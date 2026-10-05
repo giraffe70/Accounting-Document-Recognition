@@ -6,13 +6,11 @@ recognition accuracy rather than a mixture of recognition and annotation guesswo
 """
 from __future__ import annotations
 
+import argparse
+import hashlib
 import json
 import re
 from pathlib import Path
-
-ROOT = Path(__file__).resolve().parent.parent
-EVIDENCE = ROOT / "artifacts" / "full_image_validation" / "recognition_evidence.json"
-OUT = ROOT / "artifacts" / "full_image_validation" / "scored_evidence.json"
 
 # Human-reviewed transcription from the visible source scans.  Dates are
 # standardized to Gregorian YYYY-MM-DD; numeric fields use plain numbers.
@@ -77,14 +75,20 @@ def observed(record: dict, key: str):
     return fields.get(key, data.get(key, ""))
 
 
-def main() -> None:
-    evidence = json.loads(EVIDENCE.read_text(encoding="utf-8"))
-    by_name = {Path(r["source_image"]).name: r for r in evidence.get("results", [])}
+def score(evidence, gold):
+    by_name = {}
+    for record in evidence.get("results", []):
+        name = Path(record["source_image"].replace("\\", "/")).name
+        if name in by_name:
+            raise ValueError(f"Duplicate source image basename: {name}")
+        by_name[name] = record
     results, all_rows = [], []
-    for name in sorted(GROUND_TRUTH):
-        record = by_name.get(name, {"source_image": f"ref/test_img/{name}", "error": "No recognition record"})
+    for name in sorted(gold):
+        record = by_name.get(name, {"source_image": name, "error": "No recognition record"})
         comparisons = []
-        for key, expected in GROUND_TRUTH[name].items():
+        for key, expected in gold[name].items():
+            if expected is None or str(expected).strip() == "":
+                continue  # Unreviewed fields do not contribute to accuracy.
             actual = observed(record, key)
             match = normalize(expected) == normalize(actual)
             row = {"field": key, "expected": expected, "observed": actual, "match": match}
@@ -99,11 +103,40 @@ def main() -> None:
         b["total"] += 1
         b["correct"] += int(row["match"])
     correct, total = sum(x["match"] for x in all_rows), len(all_rows)
-    output = {"scope": "40 test_img files; manually reviewed clearly visible core fields", "scoring_rule": "Exact match after space, comma, case and simple number-format normalization", "correct_fields": correct, "total_scored_fields": total, "field_accuracy": correct / total if total else None, "per_field": by_field, "results": results}
-    OUT.write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"{correct}/{total} {correct / total:.1%}")
-    for field, summary in by_field.items():
-        print(f"{field}: {summary['correct']}/{summary['total']}")
+    output = {"scope": f"{len(gold)} gold images; reviewed visible core fields", "scoring_rule": "Exact match after space, comma, case and simple number-format normalization", "correct_fields": correct, "total_scored_fields": total, "field_accuracy": correct / total if total else None, "per_field": by_field, "results": results}
+    return output
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Score saved full-image evidence without recognition calls.")
+    parser.add_argument("--evidence", type=Path, required=True)
+    gold_args = parser.add_mutually_exclusive_group(required=True)
+    gold_args.add_argument("--gold", type=Path, help="JSON object mapping image basename to reviewed fields")
+    gold_args.add_argument("--builtin-gold", action="store_true", help="Explicitly use the 40 reviewed cases embedded in this script")
+    parser.add_argument("--dataset-id", required=True)
+    parser.add_argument("--run-id", required=True)
+    parser.add_argument("--output-dir", type=Path, required=True, help="New directory only")
+    args = parser.parse_args()
+    try:
+        inputs = [args.evidence, args.gold if args.gold else Path(__file__)]
+        hashes = {str(p.resolve()): hashlib.sha256(p.read_bytes()).hexdigest() for p in inputs}
+        evidence = json.loads(args.evidence.read_text(encoding="utf-8"))
+        gold = json.loads(args.gold.read_text(encoding="utf-8")) if args.gold else GROUND_TRUTH
+        if not isinstance(gold, dict) or not gold or any(not isinstance(v, dict) for v in gold.values()):
+            raise ValueError("Gold must be a nonempty object of image names to field objects")
+        output = score(evidence, gold)
+        output["provenance"] = {"dataset_id": args.dataset_id, "run_id": args.run_id,
+                                "input_sha256": hashes,
+                                "scorer_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
+        for path in inputs:
+            if hashlib.sha256(path.read_bytes()).hexdigest() != hashes[str(path.resolve())]:
+                raise ValueError(f"Input changed during scoring: {path}")
+        args.output_dir.mkdir(parents=True, exist_ok=False)
+        (args.output_dir / "scored_evidence.json").write_text(
+            json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")
+    except (OSError, ValueError, KeyError) as exc:
+        parser.error(str(exc))
+    print(f"{output['correct_fields']}/{output['total_scored_fields']} fields; {args.output_dir / 'scored_evidence.json'}")
 
 
 if __name__ == "__main__":

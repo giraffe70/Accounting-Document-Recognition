@@ -22,9 +22,9 @@
 2. 不啟動模型的契約檢查可從專案根目錄執行：
 
    ```powershell
-   python -c "from app.core import doc_types as d; assert 'other' in d.DOC_TYPES; assert all(t['label'] and t['fields'] for t in d.DOC_TYPES.values()); [d.build_extract_prompt(k) for k in d.DOC_TYPES]; print(len(d.DOC_TYPES), 'types OK')"
-   python -m unittest discover -s tests
+   scripts\verify.bat -Scope contracts
+   scripts\verify.bat -Scope all
    ```
 
 3. 有人工確認、可用的模型與成本授權時，再測正例、近似負例與全類型代表樣本；逐類列出誤判、欄位遺失及 `other` 回退率。不能用上述無模型測試替代全類型辨識回歸。
-4. `python scripts/build_agents_section.py` 會改寫 `docs/manual/index.html`；只有實際類型變更且需要同步文件時執行。`analysis/evaluate_validation.py` 會重寫 gold 輸出，不能為回歸直接在來源目錄執行。
+4. `python scripts/build_agents_section.py` 會改寫 `docs/manual/index.html`；只有實際類型變更且需要同步文件時執行。`analysis/evaluate_validation.py` 現需明示 CSV 批次、gold、資料集與新輸出目錄；參考模型驗證 Skill，不能沿用歷史無參數命令。

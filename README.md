@@ -52,6 +52,8 @@ start_webui.bat                                               # 開 http://127.0
 
 ## 目錄結構
 
+Agent 開發入口見 `AGENTS.md`；統一離線驗證：`scripts\verify.bat -Scope all`。各範圍命令與保存結果評分方式見 [Agent 工作與驗證指南](docs/dev-notes/agent-workflow.md)。
+
 - `app/` — 正式版程式碼（FastAPI + 混合 OCR/VLM，地端/雲端可切換）
 - `archive/phase0_poc_flask/` — 第一期概念驗證 POC（Flask + Gemini，已封存凍結）
 - [目前系統架構](docs/dev-notes/architecture.md) — FastAPI、SQLite、辨識與審核資料流

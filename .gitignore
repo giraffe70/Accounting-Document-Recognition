@@ -48,6 +48,19 @@ Thumbs.db
 docs/manual/_shots/
 app/data/entry_examples.json
 
+# 本機評估與客戶資料不納入程式版本基準
+datasets/
+ref/
+artifacts/
+app/data/
+analysis/gold*.json
+analysis/gold*.csv
+analysis/validation_*.json
+analysis/validation_*.csv
+analysis/reports/
+docs/dev-notes/eval*.json
+docs/dev-notes/dataset-manifest.json
+
 # 測試報告的中間素材（報告本身 docs/report/測試報告.html 有進版控）
 docs/report/shots/
 docs/report/samples/

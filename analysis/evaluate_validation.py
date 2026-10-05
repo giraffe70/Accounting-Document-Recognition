@@ -1,28 +1,29 @@
 """Compare the two saved CSV validation runs against reviewed page annotations.
 
-Run after gold_*.json have been prepared. Empty gold values mean unverified and
+Provide explicit CSV runs, a frozen gold JSON and a new output directory. Empty gold values mean unverified and
 are excluded from accuracy denominators. Model disagreement is not accuracy.
 """
 
 from __future__ import annotations
 
+import argparse
 import csv
+from datetime import datetime, timezone
 import hashlib
 import json
 import re
 import sqlite3
 import statistics
 from collections import Counter, defaultdict
+from contextlib import closing
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parents[1]
-HERE = Path(__file__).resolve().parent
-RESULT = ROOT / "app/data/validation/result"
-RUNS = {
-    "qwen": RESULT / "validation-f89d0bf3f54d4e93ab91e9b82c41beb5-csv_qwen2.5vl",
-    "gemma": RESULT / "validation-e0b0cf8e8040411cbdb0b70d8d54f25e-csv_gemma4e4b",
-}
+try:
+    from .gold_io import load_frozen
+except ImportError:
+    from gold_io import load_frozen
+
 FIELDS = (
     "doc_type_key", "date", "voucher_id", "total_amount", "subtotal",
     "tax_amount", "seller_name", "seller_tax_id", "buyer_name", "buyer_tax_id",
@@ -99,43 +100,80 @@ def normalized(field: str, value: object) -> str:
     return re.sub(r"\s+", "", s)
 
 
-def load_gold() -> dict[tuple[str, int], dict]:
-    gold = {}
-    base_paths = [HERE / name for name in (
-        "gold_voucher_cases.json", "gold_other_sources.json", "gold_jpg.json")]
-    override_paths = [HERE / name for name in (
-        "gold_extra_review.json", "gold_extra_review_2.json")]
-    for path in base_paths + [p for p in override_paths if p.exists()]:
-        for row in json.loads(path.read_text(encoding="utf-8")):
-            key = (row["source"], int(row["page"]))
-            if key in gold and path in base_paths:
-                raise ValueError(f"Duplicate gold {key}: {path}")
-            if not row.get("page_role"):
-                row["page_role"] = ("journal_voucher" if row.get("doc_type_key") == "journal_voucher"
-                                    else "document")
-            gold[key] = row
-    return gold
-
-
-def main() -> None:
-    runs = {name: load_run(path) for name, path in RUNS.items()}
-    common = set(runs["qwen"]) & set(runs["gemma"])
-    gold = load_gold()
-    (HERE / "gold_standard.json").write_text(
-        json.dumps([gold[key] for key in sorted(gold)], ensure_ascii=False, indent=2),
-        encoding="utf-8")
-    gold_fields = ("source", "page", "page_role", "doc_type", "doc_type_key", "period",
-                   "date", "voucher_id", "total_amount", "subtotal", "tax_amount",
-                   "seller_name", "seller_tax_id", "buyer_name", "buyer_tax_id",
-                   "items", "entries", "confidence", "remarks")
-    with (HERE / "gold_standard.csv").open("w", encoding="utf-8-sig", newline="") as stream:
-        writer = csv.DictWriter(stream, fieldnames=gold_fields)
-        writer.writeheader()
-        for key in sorted(gold):
-            record = gold[key]
-            writer.writerow({field: (json.dumps(record.get(field), ensure_ascii=False)
-                                     if field in ("items", "entries") else record.get(field))
-                             for field in gold_fields})
+def evaluate(run_paths, gold_path, output_dir, dataset_id, page_db=None, run_ids=None, deduplicate=False):
+    if len(run_paths) != 2:
+        raise ValueError("Exactly two named runs are required")
+    output_dir = Path(output_dir).resolve()
+    gold_path = Path(gold_path).resolve()
+    if output_dir.exists():
+        raise ValueError("Output directory must be new; existing results are never overwritten")
+    inputs = [gold_path] + [Path(p) / f for p in run_paths.values()
+                           for f in ("vouchers.csv", "fields.csv", "items.csv", "entries.csv")]
+    for path in inputs:
+        if path.resolve().is_relative_to(output_dir):
+            raise ValueError("Output directory must not contain input files")
+    input_hashes = {str(p.resolve()): hashlib.sha256(p.read_bytes()).hexdigest() for p in inputs}
+    runs = {name: load_run(Path(path)) for name, path in run_paths.items()}
+    names = list(runs)
+    common = set.intersection(*(set(records) for records in runs.values()))
+    if not common:
+        raise ValueError("Runs have no common source/page keys")
+    raw_common_count = len(common)
+    gold = load_frozen(gold_path)
+    duplicate_image_groups = []
+    router_requested_image = {}
+    image_coverage = None
+    batch_settings = {}
+    comparable = ("max_edge", "repeats", "warmup", "prompt_version_sha256", "code_version_sha256", "model_parameters")
+    modes = {name: {record.get("mode") for record in records.values()} for name, records in runs.items()}
+    mode_verified = all(len(values) == 1 and None not in values and "" not in values for values in modes.values())
+    if mode_verified and modes[names[0]] != modes[names[1]]:
+        raise ValueError("Batch conditions differ: recognition mode")
+    run_ids = run_ids or {}
+    if page_db is not None:
+        page_db = Path(page_db).resolve()
+        with closing(sqlite3.connect(page_db.as_uri() + "?mode=ro", uri=True)) as con:
+            image_groups = defaultdict(list)
+            covered = set()
+            for source, page, path in con.execute(
+                    "SELECT relative_path,page_no,page_path FROM pages WHERE dataset_id=?", (dataset_id,)):
+                key = (source, page)
+                if key in common and Path(path).is_file():
+                    covered.add(key)
+                    image_groups[hashlib.sha256(Path(path).read_bytes()).hexdigest()].append(key)
+            image_coverage = len(covered)
+            duplicate_image_groups = [sorted(keys) for keys in image_groups.values() if len(keys) > 1]
+            for name, run_id in run_ids.items():
+                if name not in runs:
+                    raise ValueError(f"Unknown run name: {name}")
+                row = con.execute("SELECT dataset_id,settings_json FROM runs WHERE id=?", (run_id,)).fetchone()
+                if not row or row[0] != dataset_id:
+                    raise ValueError(f"Run {name} does not belong to dataset {dataset_id}")
+                batch_settings[name] = json.loads(row[1])
+                count = 0
+                for (raw,) in con.execute("SELECT trace_json FROM results WHERE run_id=? AND status='succeeded'", (run_id,)):
+                    calls = [x for x in json.loads(raw or "[]") if x.get("kind") == "model_call"]
+                    if calls and "請提供" in calls[0].get("response", "") and "圖片" in calls[0].get("response", ""):
+                        count += 1
+                router_requested_image[name] = count
+        if batch_settings and set(batch_settings) != set(runs):
+            raise ValueError("Provide run IDs for both CSV batches")
+        if len(batch_settings) == 2:
+            for key in comparable:
+                if batch_settings[names[0]].get(key) != batch_settings[names[1]].get(key):
+                    raise ValueError(f"Batch conditions differ: {key}")
+    if deduplicate:
+        if image_coverage != len(common):
+            raise ValueError("Deduplication requires images for every common page via --database")
+        for group in duplicate_image_groups:
+            truths = [gold.get(k) for k in group]
+            fingerprints = [json.dumps({k:v for k,v in t.items() if k not in ("source", "page", "remarks")},
+                                       sort_keys=True, ensure_ascii=False) if t else None for t in truths]
+            if len(set(fingerprints)) != 1:
+                raise ValueError(f"Conflicting gold in duplicate group: {group}")
+            common.difference_update(group[1:])
+    # All preflight checks precede output creation; frozen gold is only read.
+    output_dir.mkdir(parents=True, exist_ok=False)
     stats = {scope: {name: {field: Counter() for field in FIELDS} for name in runs}
              for scope in ("high", "high_medium", "all")}
     core = {scope: {name: Counter() for name in runs}
@@ -154,16 +192,16 @@ def main() -> None:
                "gold_remarks": truth.get("remarks", "")}
         for field in FIELDS:
             expected = truth.get(field)
-            q = runs["qwen"][key].get(field)
-            g = runs["gemma"][key].get(field)
+            q = runs[names[0]][key].get(field)
+            g = runs[names[1]][key].get(field)
             row[f"gold_{field}"] = "" if expected is None else str(expected)
-            row[f"qwen_{field}"] = "" if q is None else str(q)
-            row[f"gemma_{field}"] = "" if g is None else str(g)
+            row[f"{names[0]}_{field}"] = "" if q is None else str(q)
+            row[f"{names[1]}_{field}"] = "" if g is None else str(g)
             if normalized(field, q) != normalized(field, g):
                 disagreement[field]["different"] += 1
             else:
                 disagreement[field]["same"] += 1
-            for model, predicted in (("qwen", q), ("gemma", g)):
+            for model, predicted in ((names[0], q), (names[1], g)):
                 if (expected is None or str(expected).strip() == ""
                         or (row["page_role"] == "journal_voucher"
                             and field in ("subtotal", "tax_amount"))):
@@ -213,36 +251,11 @@ def main() -> None:
                 row[f"{model}_core_match"] = ""
         detail.append(row)
 
-    output_csv = HERE / "validation_comparison.csv"
+    output_csv = output_dir / "validation_comparison.csv"
     with output_csv.open("w", encoding="utf-8-sig", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=list(detail[0]))
         writer.writeheader()
         writer.writerows(detail)
-    page_db = ROOT / "app/data/validation/validation.db"
-    duplicate_image_groups = []
-    router_requested_image = {}
-    if page_db.exists():
-        con = sqlite3.connect(page_db)
-        image_groups = defaultdict(list)
-        for source, page, path in con.execute(
-                "SELECT relative_path,page_no,page_path FROM pages WHERE dataset_id=?",
-                ("d7033a034f3840a0be62a4f71516b60b",)):
-            key = (source, page)
-            if key in common and Path(path).exists():
-                image_groups[hashlib.sha256(Path(path).read_bytes()).hexdigest()].append(key)
-        duplicate_image_groups = [[list(k) for k in keys]
-                                  for keys in image_groups.values() if len(keys) > 1]
-        for name, run_id in (("qwen", "f89d0bf3f54d4e93ab91e9b82c41beb5"),
-                             ("gemma", "e0b0cf8e8040411cbdb0b70d8d54f25e")):
-            count = 0
-            for (raw,) in con.execute(
-                    "SELECT trace_json FROM results WHERE run_id=? AND status='succeeded'",
-                    (run_id,)):
-                calls = [x for x in json.loads(raw or "[]") if x.get("kind") == "model_call"]
-                if calls and "請提供" in calls[0].get("response", "") and "圖片" in calls[0].get("response", ""):
-                    count += 1
-            router_requested_image[name] = count
-        con.close()
     summary = {
         "common_pages": len(common),
         "run_pages": {name: len(records) for name, records in runs.items()},
@@ -251,17 +264,22 @@ def main() -> None:
         "other_on_common": {name: sum(records[k]["doc_type_key"] == "other" for k in common)
                             for name, records in runs.items()},
         "recognition_median_seconds_on_common": {
-            name: round(statistics.median(float(records[k]["recognition_seconds"])
-                                          for k in common if records[k]["recognition_seconds"]), 1)
+            name: (round(statistics.median(float(records[k]["recognition_seconds"])
+                                          for k in common if records[k].get("recognition_seconds")), 1)
+             if any(records[k].get("recognition_seconds") for k in common) else None)
             for name, records in runs.items()},
         "router_requested_image": router_requested_image,
-        "duplicate_image_groups": duplicate_image_groups,
-        "unique_image_pages": len(common) - sum(len(group) - 1 for group in duplicate_image_groups),
+        "duplicate_image_groups": [[list(k) for k in group] for group in duplicate_image_groups],
+        "raw_common_pages": raw_common_count,
+        "deduplicated": deduplicate,
+        "excluded_duplicate_pages": [list(k) for group in duplicate_image_groups for k in group[1:]] if deduplicate else [],
+        "image_hash_coverage": image_coverage,
+        "unique_image_pages": (raw_common_count - sum(len(group)-1 for group in duplicate_image_groups)
+                               if image_coverage == raw_common_count else None),
         "gold_pages": len(set(gold) & common),
         "uncovered_pages": [list(k) for k in sorted(common - set(gold))],
         "gold_outside_common": [list(k) for k in sorted(set(gold) - common)],
-        "qwen_extra_pages": [list(k) for k in sorted(set(runs["qwen"]) - common)],
-        "gemma_extra_pages": [list(k) for k in sorted(set(runs["gemma"]) - common)],
+        "extra_pages": {name: [list(k) for k in sorted(set(records) - set.intersection(*(set(r) for r in runs.values())))] for name, records in runs.items()},
         "gold_confidence": dict(Counter(row.get("confidence", "") for key, row in gold.items()
                                         if key in common)),
         "field_scores": {scope: {name: {field: dict(counts) for field, counts in scores.items()}
@@ -320,9 +338,9 @@ def main() -> None:
         name: dict(counts) for name, counts in invoice_items.items()}
     journal_scores = {name: {"amount_side": Counter(), "account_exact": Counter()}
                       for name in runs}
-    for name, path in RUNS.items():
+    for name, path in run_paths.items():
         by_result = defaultdict(list)
-        for entry in read_csv(path / "entries.csv"):
+        for entry in read_csv(Path(path) / "entries.csv"):
             side = "debit" if entry["debit_account"] or entry["debit_account_name"] else "credit"
             account = entry["debit_account_name"] if side == "debit" else entry["credit_account_name"]
             by_result[entry["result_id"]].append({"side": side, "amount": entry["amount"],
@@ -360,8 +378,54 @@ def main() -> None:
     summary["journal_entry_scores"] = {
         name: {metric: dict(counts) for metric, counts in scores.items()}
         for name, scores in journal_scores.items()}
-    (HERE / "validation_summary.json").write_text(
+    for path in inputs:
+        if hashlib.sha256(path.read_bytes()).hexdigest() != input_hashes[str(path.resolve())]:
+            raise ValueError(f"Input changed during evaluation: {path}")
+    summary["provenance"] = {"dataset_id": dataset_id, "run_ids": run_ids,
+        "runs": {name: str(Path(path).resolve()) for name, path in run_paths.items()},
+        "batch_settings": batch_settings,
+        "comparability_verified": (len(batch_settings) == 2 and mode_verified
+                                   and all(key in settings and settings[key] is not None
+                                           for settings in batch_settings.values() for key in comparable)),
+        "csv_run_identity_verified": False,
+        "comparability_note": "CSV/run ID association must be checked by the caller; missing mode or snapshot fields leave comparability unverified.",
+        "input_sha256": input_hashes, "scorer_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "gold_loader_sha256": hashlib.sha256(Path(load_frozen.__code__.co_filename).read_bytes()).hexdigest(),
+        "created_at_utc": datetime.now(timezone.utc).isoformat()}
+    (output_dir / "validation_summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    return summary
+
+
+def named_values(values):
+    result = {}
+    for value in values:
+        name, separator, target = value.partition("=")
+        if not separator or not re.fullmatch(r"[a-z][a-z0-9_]*", name) or not target or name in result:
+            raise ValueError("Use unique lowercase NAME=VALUE arguments")
+        result[name] = target
+    return result
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Score two saved CSV runs against frozen gold; no model calls or gold writes.")
+    parser.add_argument("--run", action="append", required=True, metavar="NAME=CSV_DIR")
+    parser.add_argument("--gold", type=Path, required=True)
+    parser.add_argument("--dataset-id", required=True)
+    parser.add_argument("--output-dir", type=Path, required=True, help="New directory only")
+    parser.add_argument("--database", type=Path, help="Read-only validation DB for image hashes and settings")
+    parser.add_argument("--run-id", action="append", default=[], metavar="NAME=ID")
+    parser.add_argument("--deduplicate", action="store_true")
+    args = parser.parse_args()
+    try:
+        run_paths = {k: Path(v) for k,v in named_values(args.run).items()}
+        run_ids = named_values(args.run_id)
+        if run_ids and args.database is None:
+            raise ValueError("--run-id requires --database")
+        summary = evaluate(run_paths, args.gold, args.output_dir, args.dataset_id,
+                           args.database, run_ids, args.deduplicate)
+    except (OSError, ValueError, KeyError, sqlite3.Error) as exc:
+        parser.error(str(exc))
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
 
