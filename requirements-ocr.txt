@@ -1,0 +1,8 @@
+# ── OCR 精修層（需 Python ≤3.12）──
+# PaddlePaddle 尚未提供 Python 3.13 輪檔，請於 3.12 環境安裝：
+#   conda create -n pdfscan-ocr python=3.12
+#   pip install -r requirements-ocr.txt
+# 安裝後在「模型設定」選 paddle/pp-ocrv5 即啟用混合 OCR + VLM。
+# GPU 版改裝 paddlepaddle-gpu。
+paddleocr
+paddlepaddle

@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# 虛擬環境
+.venv/
+venv/
+env/
+
+# 環境變數與金鑰（勿上版控）
+.env
+*.key
+app/data/system_config.json
+
+# 模型權重 / 大型檔案
+*.gguf
+*.safetensors
+*.bin
+*.onnx
+models/weights/
+
+# 執行期資料
+app/data/uploads/
+app/data/validation/
+app/data/backups/
+app/data/logs/
+app/data/*.db
+app/data/*.sqlite*
+data/uploads/
+*.log
+
+# 真實憑證掃描檔（客戶財務資料，勿上版控）
+**/vouchers_real/
+**/samples_private/
+*.scan.pdf
+ref/TEST_DATA/
+*.zip
+
+# OS / 編輯器
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# 手冊產生的暫存截圖
+docs/manual/_shots/
+app/data/entry_examples.json
+
+# 測試報告的中間素材（報告本身 docs/report/測試報告.html 有進版控）
+docs/report/shots/
+docs/report/samples/
+docs/report/samples.json
+docs/report/problem_*.png

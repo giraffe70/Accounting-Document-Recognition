@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>資料集驗證｜憑證辨識系統</title>
+  <link rel="stylesheet" href="/css/styles.css">
+  <link rel="stylesheet" href="/css/validation.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="logo">驗</span> 資料集驗證 <span class="sub">批次辨識、證據與速度比較</span></div>
+    <div class="spacer"></div>
+    <span id="userChip" class="userchip"></span>
+    <button class="btn" onclick="location.href='/'">← 返回憑證系統</button>
+  </header>
+
+  <main class="validation-shell">
+    <section class="panel setup-panel">
+      <div class="section-title"><div><h2>1. 建立資料集</h2><p class="hint">支援資料夾、多選圖片／PDF 與 ZIP；子目錄及同名檔案會完整保留。</p></div><div class="inline-form"><button id="clearView" class="btn btn-sm" type="button">清空畫面（不刪資料）</button><button id="showHistory" class="btn btn-sm hidden" type="button">顯示歷史紀錄</button></div></div>
+      <div class="inline-form">
+        <input id="datasetName" class="select grow" placeholder="資料集名稱">
+        <label class="btn">📁 選擇資料夾<input id="folderInput" type="file" webkitdirectory multiple hidden></label>
+        <label class="btn">＋ 選擇檔案／ZIP<input id="filesInput" type="file" multiple accept=".zip,.pdf,image/*" hidden></label>
+        <button id="uploadBtn" class="btn primary" disabled>上傳 <span id="selectedCount">0</span> 個檔案</button>
+      </div>
+      <div id="uploadStatus" class="hint"></div>
+      <div id="datasets" class="card-grid"></div>
+    </section>
+
+    <section class="panel setup-panel">
+      <div class="section-title"><div><h2>2. 模型組合</h2><p class="hint">欄位萃取模型負責讀取單號、日期、金額與明細；單據分類模型負責先判斷發票、收據、傳票等類型。VLM 模式只會列出可讀取圖片的模型。</p></div><button id="addCombo" class="btn btn-sm">＋ 新增組合</button></div>
+      <div id="combos"></div>
+      <div class="run-options">
+        <label>重複次數 <input id="repeats" class="select compact" type="number" min="1" max="10" value="1"></label>
+        <label>單張逾時（秒） <input id="timeout" class="select compact" type="number" min="30" max="3600" value="600"></label>
+        <label title="辨識輸入圖的寬、高較大者上限；等比例縮小，不會放大原圖。">圖片長邊（像素） <input id="maxEdge" class="select compact" type="number" min="640" max="2400" value="1180"></label>
+        <label title="每個模型組合先以第一張憑證額外辨識一次；保留紀錄，但不納入主要速度統計。"><input id="warmup" type="checkbox"> 每組先暖機一次</label>
+        <input id="runName" class="select grow" placeholder="驗證批次名稱">
+        <button id="startRun" class="btn primary">開始驗證</button>
+      </div>
+      <p class="hint">圖片長邊：辨識輸入圖的最大寬或高，等比例縮小且不放大；預設 1180 像素，所有比較組合請使用相同設定。暖機：每組先用第一張額外辨識一次，該次保留紀錄但不計入主要統計。</p>
+    </section>
+
+    <section class="panel">
+      <div class="section-title"><div><h2>3. 驗證批次</h2><p class="hint">工作逐張落地；關閉頁面後仍會繼續。</p></div><button id="refreshRuns" class="btn btn-sm">重新整理</button></div>
+      <div id="runs" class="run-list"></div>
+    </section>
+
+    <section id="resultsPanel" class="panel hidden">
+      <div class="section-title">
+        <div><h2>4. 結果查閱 <span id="runTitle" class="hint"></span></h2><p class="hint">尚未匯入標準答案，所有結果均標示為「待人工核對」。</p></div>
+        <div class="export-actions"><a id="exportJson" class="btn btn-sm">JSON</a><a id="exportCsv" class="btn btn-sm">CSV</a><a id="exportZip" class="btn btn-sm primary">完整 ZIP</a></div>
+      </div>
+      <div id="stats" class="stats-grid"></div>
+      <div class="result-layout">
+        <div class="result-list-wrap">
+          <div class="filter-row"><select id="comboFilter" class="select"><option value="">所有模型</option></select><select id="statusFilter" class="select"><option value="">所有狀態</option><option value="succeeded">成功</option><option value="failed">失敗</option><option value="timeout">逾時</option></select><input id="sourceFilter" class="select" placeholder="搜尋來源"></div>
+          <div id="results" class="result-list"></div>
+        </div>
+        <div id="detail" class="detail-empty">選擇一筆結果查看辨識證據。</div>
+      </div>
+    </section>
+  </main>
+  <div id="toast" class="validation-toast hidden"></div>
+  <script src="/js/validation.js"></script>
+</body>
+</html>

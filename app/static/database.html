@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>資料庫檢視 — 憑證辨識系統</title>
+  <link rel="stylesheet" href="/css/styles.css">
+  <link rel="stylesheet" href="/css/database.css">
+  <script src="/js/database.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="logo">憑</span> 資料庫檢視</div>
+    <span class="badge">唯讀</span>
+    <div class="spacer"></div>
+    <a class="btn" href="/">返回憑證系統</a>
+  </header>
+  <main class="database-layout">
+    <p id="accessMessage" role="status">正在確認管理員權限…</p>
+    <section id="databasePanel" class="panel hidden" aria-label="資料庫檢視">
+      <h2>瀏覽資料表</h2>
+      <p class="hint">查看憑證、帳號與資料集驗證紀錄。密碼雜湊與 salt 已遮蔽，且不納入搜尋；JSON 與長內容可在右側面板查看。</p>
+      <form id="searchForm" class="database-controls">
+        <label>資料庫<select id="databaseSelect" class="select" required></select></label>
+        <label>資料表<select id="tableSelect" class="select" required></select></label>
+        <p id="tableDescription" class="database-description hint"></p>
+        <label class="database-search">關鍵字<input id="searchInput" class="select" type="search" maxlength="200" placeholder="搜尋目前資料表的可見欄位"></label>
+        <label id="dateFromWrap" class="hidden"><span id="dateFromLabel">起日</span><input id="dateFrom" class="select" type="date"></label>
+        <label id="dateToWrap" class="hidden"><span id="dateToLabel">迄日</span><input id="dateTo" class="select" type="date"></label>
+        <label id="statusWrap" class="hidden">狀態<select id="statusSelect" class="select"></select></label>
+        <label>每頁筆數<select id="pageSize" class="select"><option>25</option><option>50</option><option>100</option></select></label>
+        <button class="btn primary" type="submit">搜尋</button>
+        <button id="clearSearch" class="btn" type="button">清除篩選</button>
+        <button id="refresh" class="btn" type="button">重新整理</button>
+      </form>
+      <p id="dataMessage" class="hint" role="status" aria-live="polite"></p>
+      <div id="tableWrap" class="database-scroll" tabindex="0" aria-label="資料表，可水平捲動">
+        <table id="dataTable"><thead id="dataHead"></thead><tbody id="dataBody"></tbody></table>
+      </div>
+      <nav class="database-pager" aria-label="分頁">
+        <button id="previousPage" class="btn" type="button" disabled>上一頁</button>
+        <span id="pageInfo" aria-live="polite"></span>
+        <button id="nextPage" class="btn" type="button" disabled>下一頁</button>
+      </nav>
+    </section>
+  </main>
+  <div id="detailBackdrop" class="database-detail-backdrop hidden" aria-hidden="true"></div>
+  <aside id="detailDrawer" class="database-detail-drawer" aria-labelledby="detailTitle" aria-hidden="true">
+    <header class="database-detail-header">
+      <div>
+        <h2 id="detailTitle">欄位內容</h2>
+        <p id="detailMeta" class="hint"></p>
+      </div>
+      <button id="closeDetail" class="btn" type="button" aria-label="關閉欄位內容">關閉</button>
+    </header>
+    <pre id="detailContent" class="database-detail-content" tabindex="0"></pre>
+  </aside>
+</body>
+</html>

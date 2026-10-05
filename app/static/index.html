@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>憑證辨識系統</title>
+  <link rel="stylesheet" href="/css/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="logo">憑</span> 憑證辨識系統 <span class="sub">OCR + VLM／LLM</span></div>
+    <div class="spacer"></div>
+    <span id="userChip" class="userchip hidden"></span>
+    <span id="modeBadge" class="badge">地端優先</span>
+    <button class="btn" onclick="location.href='/validation.html'">🧪 資料集驗證</button>
+    <button id="journalBtn" class="btn">📒 日記帳</button>
+    <button id="reportBtn" class="btn">📊 報表</button>
+    <button id="accountsBtn" class="btn">🧾 科目表</button>
+    <button id="feedbackBtn" class="btn hidden">🐞 修正回饋</button>
+    <button id="backupBtn" class="btn hidden">💾 備份</button>
+    <button id="databaseBtn" class="btn hidden" onclick="location.href='/database.html'">🗃️ 資料庫檢視</button>
+    <button id="sysconfigBtn" class="btn hidden">🔧 系統組態</button>
+    <button id="settingsBtn" class="btn">⚙️ 模型設定</button>
+    <button id="logoutBtn" class="btn hidden">登出</button>
+  </header>
+
+  <!-- 登入畫面 -->
+  <div id="loginOverlay" class="login-overlay hidden">
+    <div class="login-box">
+      <div class="brand" style="justify-content:center;margin-bottom:16px;"><span class="logo">憑</span> 憑證辨識系統</div>
+      <div class="form-group"><label>帳號</label><input id="loginUser" class="select" autocomplete="username"></div>
+      <div class="form-group"><label>密碼</label><input id="loginPass" type="password" class="select" autocomplete="current-password"></div>
+      <div id="loginErr" class="chk bad"></div>
+      <button id="loginBtn" class="btn primary" style="width:100%;margin-top:10px;">登入</button>
+      <p class="hint" style="margin-top:12px;">預設帳號：admin / clerk / accountant（密碼 admin123 / clerk123 / acc123，正式使用請更改）</p>
+    </div>
+  </div>
+
+  <!-- 工作流程階段分頁 -->
+  <nav id="stageTabs" class="stage-tabs">
+    <button class="stage-tab active" data-stage="import">① 匯入</button>
+    <button class="stage-tab" data-stage="prepared">② 外觀確認<span class="cnt" id="cnt-prepared">0</span></button>
+    <button class="stage-tab" data-stage="queued">③ 掃描清單<span class="cnt" id="cnt-queued">0</span></button>
+    <button class="stage-tab" data-stage="pending">④ 待審<span class="cnt" id="cnt-pending">0</span></button>
+    <button class="stage-tab" data-stage="clerk_reviewed">⑤ 記帳士確認<span class="cnt" id="cnt-clerk_reviewed">0</span></button>
+    <button class="stage-tab" data-stage="accountant_approved">⑥ 會計師核定<span class="cnt" id="cnt-accountant_approved">0</span></button>
+    <button class="stage-tab minor" data-stage="rejected">退回<span class="cnt" id="cnt-rejected">0</span></button>
+  </nav>
+
+  <main class="layout">
+    <!-- 左：匯入視圖 / 佇列視圖 -->
+    <section class="col-left">
+      <!-- ① 匯入視圖 -->
+      <div id="importView">
+        <div class="panel">
+          <h2>上傳憑證</h2>
+          <label class="up-company">歸屬公司
+            <select id="uploadCompany" class="select select-sm"></select>
+          </label>
+          <div id="dropZone" class="drop">
+            <p>拖拉 PDF／圖片至此，或點擊選擇</p>
+            <p class="hint">支援 PDF、JPG、PNG、BMP、TIFF、WEBP（≤5MB）；可多選批次</p>
+          </div>
+          <input id="fileInput" type="file" accept=".pdf,image/*" multiple hidden>
+          <label class="btn btn-sm folder-btn">📁 選整個資料夾匯入
+            <input id="dirInput" type="file" webkitdirectory hidden>
+          </label>
+          <div id="progress" class="progress hidden">
+            <div class="bar"><div id="barFill" class="fill"></div></div>
+            <div id="progressText" class="hint"></div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="row-between">
+            <h2>掃描來源目錄</h2>
+            <button id="btnScanList" class="btn btn-sm">🔄 讀取目錄</button>
+          </div>
+          <p class="hint" id="scanDirHint">於「🔧 系統組態 → 掃描來源」設定本機資料夾路徑後，按「讀取目錄」列出可匯入的檔案。</p>
+          <div id="scanFiles" class="scan-files"></div>
+          <button id="btnScanImport" class="btn btn-sm primary hidden">匯入勾選檔案</button>
+        </div>
+      </div>
+
+      <!-- ②–⑥ 佇列視圖 -->
+      <div id="queueView" class="panel hidden">
+        <div class="row-between">
+          <h2 id="queueTitle">佇列</h2>
+          <span>
+            <button id="btnMerge" class="btn btn-sm hidden" title="勾選同一份文件的多頁，合併為一張憑證（主頁＋附頁）">🔗 合併為一張</button>
+            <button id="btnExtractAll" class="btn btn-sm primary hidden">⚡ 一鍵提取全部</button>
+          </span>
+        </div>
+        <div id="eProgress" class="progress hidden">
+          <div class="bar"><div id="eBarFill" class="fill"></div></div>
+          <div id="eProgressText" class="hint"></div>
+        </div>
+        <div id="listEmpty" class="hint">此階段目前沒有憑證。</div>
+        <table id="listTable" class="list hidden">
+          <thead><tr><th>憑證號／種類</th><th>公司</th><th>日期</th><th>總額</th><th>狀態</th></tr></thead>
+          <tbody id="listBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 可拖拉分隔線 -->
+    <div id="gutter" class="gutter" title="拖拉調整左右欄寬（雙擊還原）"></div>
+
+    <!-- 右：審核編輯 -->
+    <section class="panel">
+      <div class="row-between">
+        <h2>審核與編輯</h2>
+        <span>
+          <span id="importBadge" class="tag warn hidden">🔒 進口報單（鎖定）</span>
+          <span id="revStatus" class="tag"></span>
+        </span>
+      </div>
+      <div id="revEmpty" class="hint">從左側清單選一筆憑證進行審核。</div>
+
+      <div id="revForm" class="hidden">
+        <div class="rev-toolbar">
+          <button id="btnRotL" class="btn btn-sm" title="逆時針旋轉 90°">↺</button>
+          <button id="btnRotR" class="btn btn-sm" title="順時針旋轉 90°">↻</button>
+          <span class="fine-rot" title="微調角度去歪斜，正值＝順時針">微調<input id="fineAngle" type="number" step="0.5" value="0">°<button id="btnFineRot" class="btn btn-sm">套用</button></span>
+          <button id="btnCrop" class="btn btn-sm">✂ 裁切</button>
+          <button id="btnSplit" class="btn btn-sm" title="一頁多張憑證時，框選一張建立為新紀錄；該區會從原圖塗白，原圖只留其餘憑證">✂➕ 裁切為新憑證</button>
+          <button id="btnCropOk" class="btn btn-sm primary hidden">✓ 確認</button>
+          <button id="btnCropCancel" class="btn btn-sm hidden">取消</button>
+          <button id="btnReRecognize" class="btn btn-sm">🔄 重新辨識</button>
+        </div>
+        <!-- 地端推論進度（重新辨識／分類／確認辨識共用）-->
+        <div id="revProgress" class="progress hidden">
+          <div class="bar"><div id="revBarFill" class="fill indet"></div></div>
+          <div id="revProgressText" class="hint"></div>
+        </div>
+        <div class="rev-split" id="revSplit">
+        <div class="rev-pane-img">
+        <div id="revImageWrap" class="rev-image hidden">
+          <div class="rev-image-inner">
+            <div id="revZoom" class="rev-zoom">
+              <img id="revImage" alt="掃描影像" draggable="false">
+              <div id="revBoxes" class="rev-boxes"></div>
+            </div>
+            <div id="cropSel" class="crop-sel hidden"></div>
+          </div>
+          <div id="revPages" class="rev-pages hidden"></div>
+          <div class="rev-image-bar">
+            <span class="hint">滾輪縮放・拖曳平移・雙擊還原　（旋轉/裁切工具在上方）</span>
+            <a id="revImageFull" href="#" target="_blank" class="hint">🔍 開新分頁看原圖</a>
+          </div>
+        </div>
+        </div><!-- /rev-pane-img -->
+        <div id="revGutter" class="gutter-v" title="拖拉調整影像/欄位比例（雙擊還原）"></div>
+        <div class="rev-pane-fields">
+        <div class="rev-meta">
+          單據類型：<select id="revTypeSel" class="type-sel"></select>
+          　歸屬公司：<select id="revCompanySel" class="type-sel" title="匯入時未選公司者可在此補填"></select>
+          <button id="btnConfirmRecognize" class="btn btn-sm primary hidden">✅ 確認並辨識</button>
+          <span id="revConfWrap">　信心度：<span id="revConf" class="tag">—</span></span>
+        </div>
+        <div id="prepHint" class="callout warn hidden">
+          <b>外觀確認</b>：請先確認上方「單據類型」是否正確（可下拉修正），並用上方工具列<b>旋轉／裁切／分割</b>把影像整理好；
+          完成後按「<b>✅ 確認並辨識</b>」才進行內容辨識與審核。
+        </div>
+        <div id="reviewBody" class="prep-hide">
+        <div id="dynFields" class="grid2"></div>
+        <label class="full">摘要／備註<input id="f-note"></label>
+
+        <div id="itemsSection">
+        <div class="row-between mt">
+          <h4>明細</h4><button id="addItem" class="btn btn-sm">＋ 新增列</button>
+        </div>
+        <table class="items-edit"><thead><tr><th>品名</th><th>數量</th><th>單價</th><th>合計</th><th></th></tr></thead>
+          <tbody id="itemsBody"></tbody></table>
+        </div>
+
+        <div class="row-between mt">
+          <h4>會計分錄</h4><button id="btnClassify" class="btn btn-sm">🧮 自動分類科目</button>
+        </div>
+        <table class="entries"><thead><tr><th>摘要</th><th>借方科目</th><th>貸方科目</th><th>金額</th></tr></thead>
+          <tbody id="entriesBody"></tbody></table>
+        <div id="balanceInfo" class="hint"></div>
+
+        <label class="full manual-flag" title="欄位經你手動編輯確認後勾選。勾選後清單會標記，日後有人按「重新辨識」會先跳出提醒，避免覆蓋你的修正">
+          <input type="checkbox" id="f-manual_entry"> ✍ <b>人工修正</b>（本張欄位已人工編輯確認，重新辨識前會提醒）
+        </label>
+        <label class="full">記帳士備註（修正／回饋・<b>會作為下次辨識的修正提示</b>）<textarea id="f-clerk_note" rows="2" placeholder="例：合計金額應取右下角「應收帳款總額」，不是銷貨合計額"></textarea></label>
+        <label class="full">會計師備註（修正／回饋・<b>會作為下次辨識的修正提示</b>）<textarea id="f-acc_note" rows="2"></textarea></label>
+        <div class="full hidden" id="devNoteWrap">
+          <label>🛠 開發者備註（辨識錯誤／修正回饋・僅管理員）<textarea id="f-dev_note" rows="2" placeholder="例：水費帳單被拆成多張、支票領款單誤判為支票、掃描旋轉導致框偏…"></textarea></label>
+          <button id="btnDevNote" class="btn btn-sm">💾 儲存開發者備註</button>
+        </div>
+
+        <div class="src-hint hint" id="revSrc"></div>
+
+        <div class="actions">
+          <button id="btnSavePending" class="btn primary hidden" title="儲存目前修正與備註，保留在④待審">💾 暫存至待審</button>
+          <button id="btnReturnImport" class="btn hidden" title="先暫存目前修正與備註，再返回①匯入下一份檔案">↩ 返回①匯入下一份</button>
+          <button id="btnSave" class="btn">💾 儲存修正</button>
+          <button id="btnResubmit" class="btn primary hidden" title="退回的憑證修正後送回④待審">↩ 重新送審</button>
+          <button id="btnClerk" class="btn">記帳士確認</button>
+          <button id="btnApprove" class="btn primary">會計師核定</button>
+          <button id="btnReject" class="btn danger">退回</button>
+          <button id="btnPrintVoucher" class="btn">🖨 列印/PDF</button>
+        </div>
+        </div><!-- /reviewBody -->
+        </div><!-- /rev-pane-fields -->
+        </div><!-- /rev-split -->
+      </div>
+    </section>
+  </main>
+
+  <!-- 日記帳 modal -->
+  <div id="journalModal" class="modal hidden">
+    <div class="modal-box modal-wide">
+      <div class="row-between">
+        <h3>單月日記帳</h3>
+        <button id="closeJournal" class="btn btn-sm">關閉</button>
+      </div>
+      <div class="journal-toolbar">
+        <label>期別 <select id="journalPeriod" class="select select-sm"></select></label>
+        <label>公司 <input id="journalCompany" class="jc-input" placeholder="全部"></label>
+        <button id="journalRefresh" class="btn btn-sm">查詢</button>
+        <div class="spacer"></div>
+        <button id="btnPrintJournal" class="btn btn-sm">🖨 列印/PDF</button>
+      </div>
+      <div id="journalEmpty" class="hint">選擇期別以檢視日記帳（僅彙整「會計師已核定」的憑證）。</div>
+      <div id="journalWrap" class="journal-wrap hidden">
+        <table class="journal">
+          <thead><tr><th>日期</th><th>憑證號</th><th>摘要</th><th>借方科目</th><th>貸方科目</th><th>借方金額</th><th>貸方金額</th></tr></thead>
+          <tbody id="journalBody"></tbody>
+          <tfoot><tr><td colspan="5">合計</td><td id="journalDebit" class="num"></td><td id="journalCredit" class="num"></td></tr></tfoot>
+        </table>
+        <div id="journalBalance" class="hint"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 修正回饋 modal（管理員）-->
+  <div id="feedbackModal" class="modal hidden">
+    <div class="modal-box modal-wide">
+      <div class="row-between"><h3>修正回饋清單</h3><button id="closeFeedback" class="btn btn-sm">關閉</button></div>
+      <p class="hint">彙集「有備註」或「經人工修正」的憑證，供優化辨識提示詞／Router／掃描規範。點列可開啟該筆。</p>
+      <table class="list"><thead><tr><th>檔案</th><th>類型</th><th>狀態</th><th>已修正</th><th>備註</th></tr></thead>
+        <tbody id="feedbackBody"></tbody></table>
+      <div id="feedbackEmpty" class="hint">尚無回饋紀錄。</div>
+    </div>
+  </div>
+
+  <!-- 系統組態 modal（管理員）-->
+  <div id="sysconfigModal" class="modal hidden">
+    <div class="modal-box modal-wide">
+      <div class="row-between"><h3>系統組態</h3><button id="closeSysconfig" class="btn btn-sm">關閉</button></div>
+      <p class="hint">管理員專用。密鑰以遮罩顯示，留空表示不變更。</p>
+
+      <h4>① LLM 連線方式與 API Key</h4>
+      <div class="cfg-grid">
+        <label>Ollama 端點（地端）<input id="cfg-ollama_base_url" class="select"></label>
+        <label>H200 vLLM 端點（內網，需 VPN）<input id="cfg-h200_base_url" class="select"></label>
+        <label>Google API Key（Gemini）<input id="cfg-google_api_key" type="password" class="select"></label>
+        <label>OpenAI API Key（GPT）<input id="cfg-openai_api_key" type="password" class="select"></label>
+        <label>Anthropic API Key（Claude）<input id="cfg-anthropic_api_key" type="password" class="select"></label>
+      </div>
+      <div class="modal-actions" style="justify-content:flex-start;"><button class="btn primary cfg-save" data-section="llm">儲存 LLM 設定</button></div>
+
+      <h4>② 掃描單據遠端存取點</h4>
+      <div class="cfg-grid">
+        <label>來源類型<select id="cfg-type" class="select">
+          <option value="local">本機資料夾</option><option value="smb">SMB 網路芳鄰</option>
+          <option value="nas">NAS</option><option value="gdrive">Google Drive</option>
+          <option value="onedrive">OneDrive</option><option value="sftp">SFTP</option></select></label>
+        <label>主機／位址<input id="cfg-host" class="select" placeholder="\\server 或 IP／網址"></label>
+        <label>路徑／共享資料夾<input id="cfg-path" class="select"></label>
+        <label>帳號<input id="cfg-username" class="select"></label>
+        <label>密碼／權杖<input id="cfg-password" type="password" class="select"></label>
+        <label>備註<input id="cfg-note" class="select"></label>
+      </div>
+      <div class="modal-actions" style="justify-content:flex-start;"><button class="btn primary cfg-save" data-section="scan_source">儲存掃描來源</button></div>
+
+      <h4>③ 雲端部署空間與權限</h4>
+      <div class="cfg-grid">
+        <label>雲端供應商<select id="cfg-provider" class="select">
+          <option value="none">未使用（地端）</option><option value="azure">Microsoft Azure</option>
+          <option value="gcp">Google Cloud</option><option value="aws">Amazon Web Service</option></select></label>
+        <label>區域 Region<input id="cfg-region" class="select"></label>
+        <label>儲存空間／Bucket<input id="cfg-bucket" class="select"></label>
+        <label>Access Key<input id="cfg-access_key" type="password" class="select"></label>
+        <label>Secret Key<input id="cfg-secret_key" type="password" class="select"></label>
+        <label>存取權限<select id="cfg-permission" class="select">
+          <option value="private">私有 private</option><option value="team">團隊 team</option>
+          <option value="public">公開 public</option></select></label>
+        <label class="cfg-full">備註<input id="cfg-cloud_note" class="select"></label>
+      </div>
+      <div class="modal-actions" style="justify-content:flex-start;"><button class="btn primary cfg-save" data-section="cloud_deploy">儲存雲端部署</button></div>
+    </div>
+  </div>
+
+  <!-- 備份 modal -->
+  <div id="backupModal" class="modal hidden">
+    <div class="modal-box">
+      <div class="row-between"><h3>地端備份</h3><button id="closeBackup" class="btn btn-sm">關閉</button></div>
+      <p class="hint">備份資料庫與設定（科目表、公司、模型設定）為 zip，可下載保存於地端。</p>
+      <div class="modal-actions" style="justify-content:flex-start;">
+        <button id="backupNow" class="btn primary">立即備份</button>
+      </div>
+      <table class="list"><thead><tr><th>備份檔</th><th>時間</th><th>大小</th><th></th></tr></thead>
+        <tbody id="backupBody"></tbody></table>
+      <div id="backupEmpty" class="hint">尚無備份。</div>
+    </div>
+  </div>
+
+  <!-- 報表 modal -->
+  <div id="reportModal" class="modal hidden">
+    <div class="modal-box">
+      <div class="row-between"><h3>產製報表</h3><button id="closeReport" class="btn btn-sm">關閉</button></div>
+      <div class="form-group"><label>報表模板</label><select id="reportTemplate" class="select"></select></div>
+      <div class="form-group"><label>期別（YYYY-MM）</label><select id="reportPeriod" class="select"></select></div>
+      <div class="form-group"><label>公司（可空=全部）</label><input id="reportCompany" class="select" placeholder="全部"></div>
+      <div class="modal-actions">
+        <button id="reportGen" class="btn primary">產生報表</button>
+        <button id="reportCancel" class="btn">取消</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 科目表 modal -->
+  <div id="accountsModal" class="modal hidden">
+    <div class="modal-box modal-wide">
+      <div class="row-between">
+        <h3>客製會計科目表</h3>
+        <button id="closeAccounts" class="btn btn-sm">關閉</button>
+      </div>
+      <p class="hint">各公司的科目代號不同（如運費：仲彬 6205、實業 6050），故科目表<b>分公司</b>存放。
+        自動分類會依憑證的「歸屬公司」取用對應科目表；該公司未自訂時退回通用表。</p>
+      <label class="acc-company">科目表：
+        <select id="accCompany" class="select select-sm"></select>
+      </label>
+      <div class="acc-wrap">
+        <table class="acc-edit">
+          <thead><tr><th>代號</th><th>名稱</th><th>類別</th><th></th></tr></thead>
+          <tbody id="accBody"></tbody>
+        </table>
+      </div>
+      <div class="modal-actions">
+        <button id="accAdd" class="btn btn-sm">＋ 新增科目</button>
+        <div class="spacer"></div>
+        <button id="accSave" class="btn primary">儲存科目表</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 設定 modal -->
+  <div id="modal" class="modal hidden">
+    <div class="modal-box">
+      <h3>模型設定（地端／雲端可切換）</h3>
+      <p class="hint">未設雲端金鑰時，僅顯示地端 Ollama 模型。</p>
+      <div class="form-group"><label>OCR（辨識文字）</label><select id="sel-ocr" class="select"></select>
+        <div id="ocrStatus" class="hint"></div>
+      </div>
+      <div class="form-group"><label>結構化 VLM（讀圖萃取欄位）</label><select id="sel-structure" class="select"></select></div>
+      <div class="form-group"><label>科目分類 LLM</label><select id="sel-classify" class="select"></select></div>
+      <div class="modal-actions">
+        <button id="saveSettings" class="btn primary">儲存</button>
+        <button id="closeModal" class="btn">取消</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 引擎狀態列（固定於底部）：三階段目前用哪個模型、是否執行中、地端佔用 -->
+  <div id="engineBar" class="engine-bar">
+    <span class="eng-title">引擎</span>
+    <span class="eng" id="eng-ocr"></span>
+    <span class="eng" id="eng-structure"></span>
+    <span class="eng" id="eng-classify"></span>
+    <span class="spacer"></span>
+    <span class="eng-hint" id="engHint"></span>
+  </div>
+
+  <script src="/js/app.js?v=20260914-draft-actions"></script>
+</body>
+</html>

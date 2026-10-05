@@ -1,0 +1,35 @@
+.database-layout { margin: 24px auto; padding: 0 24px; max-width: 1800px; }
+.database-controls { display: flex; gap: 12px; flex-wrap: wrap; align-items: end; margin: 20px 0 12px; }
+.database-controls label { display: flex; flex-direction: column; gap: 5px; font-size: 14px; }
+.database-controls label.hidden { display: none; }
+.database-description { flex: 0 0 100%; margin: 0; }
+.database-search { flex: 1; min-width: 220px; }
+.database-controls .select { width: 100%; min-height: 38px; }
+.database-scroll { overflow: auto; max-height: 65vh; border: 1px solid var(--border); border-radius: 7px; margin-top: 12px; }
+#dataTable { border-collapse: collapse; width: 100%; font-size: 13px; }
+#dataTable th, #dataTable td { padding: 10px 12px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: middle; min-width: 100px; max-width: 240px; }
+#dataTable th { position: sticky; top: 0; background: #eef3f8; white-space: nowrap; z-index: 1; }
+#dataTable th small { display: block; color: var(--muted); font-weight: 400; }
+#dataTable td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#dataTable tr:nth-child(even) { background: #f6f8fa; }
+.database-detail-cell { overflow: visible !important; white-space: normal !important; }
+.database-detail-button { min-width: 88px; white-space: nowrap; }
+.database-pager { display: flex; gap: 16px; align-items: center; justify-content: center; margin-top: 18px; }
+.database-error { color: var(--red) !important; }
+.database-null { color: var(--muted); font-style: italic; }
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+.topbar a { text-decoration: none; }
+.database-detail-backdrop { position: fixed; z-index: 30; inset: 0; background: rgba(31, 35, 40, .28); }
+.database-detail-drawer { position: fixed; z-index: 31; top: 0; right: 0; bottom: 0; display: none; flex-direction: column; width: min(620px, 48vw); padding: 22px; background: var(--panel); border-left: 1px solid var(--border); box-shadow: -10px 0 28px rgba(31, 35, 40, .18); }
+.database-detail-drawer.open { display: flex; }
+.database-detail-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding-bottom: 16px; border-bottom: 1px solid var(--border); }
+.database-detail-header h2 { margin: 0; font-size: 18px; }
+.database-detail-header .hint { margin: 4px 0 0; }
+.database-detail-content { flex: 1; min-height: 0; margin-top: 16px; padding: 14px; overflow: auto; border-radius: 7px; background: #f6f8fa; color: var(--text); font: 13px/1.55 Consolas, "Cascadia Code", monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+body.database-drawer-open { overflow: hidden; }
+@media (max-width: 650px) {
+  .database-layout { padding: 0 10px; margin: 12px auto; }
+  .database-controls label { width: 100%; }
+  .topbar { flex-wrap: wrap; }
+  .database-detail-drawer { width: 100%; padding: 16px; }
+}

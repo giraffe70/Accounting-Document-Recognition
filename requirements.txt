@@ -1,0 +1,33 @@
+# ── 核心依賴（支援 Python 3.13）──
+# ── Web（FastAPI，參考 research_log_agent）──
+fastapi
+uvicorn[standard]
+python-multipart
+pydantic>=2
+python-dotenv
+
+# ── LLM 抽象層（LangChain 統一介面，地端/雲端可切換）──
+langchain
+langchain-core
+langchain-community
+langchain-ollama            # 地端：Ollama（Qwen2.5-VL、Qwen2.5、bge-m3）
+# 以下雲端 provider 為選裝；未設對應 API key 可不安裝
+langchain-openai            # 雲端：GPT
+langchain-anthropic         # 雲端：Claude
+langchain-google-genai      # 雲端：Gemini
+
+# ── 影像 / PDF ──
+pillow
+pypdfium2                   # PDF → 頁圖（純 Python，免 poppler）
+
+# ── 資料庫 ──
+sqlmodel                    # SQLite + ORM（憑證/分錄/審核/回饋）
+
+# ── 其他 ──
+requests
+tenacity                    # 重試
+opencc-python-reimplemented # 簡→繁（VLM 偶爾吐簡體字；純 Python、離線可用）
+
+# ── OCR 精修層另裝 ──
+# PaddleOCR 目前僅支援 Python ≤3.12，請於 3.12 環境安裝 requirements-ocr.txt。
+# 未安裝時系統自動降級為 VLM（Qwen2.5-VL）直讀，仍可運作。
