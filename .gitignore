@@ -57,9 +57,17 @@ analysis/gold*.json
 analysis/gold*.csv
 analysis/validation_*.json
 analysis/validation_*.csv
+analysis/validation_review.md
 analysis/reports/
 docs/dev-notes/eval*.json
 docs/dev-notes/dataset-manifest.json
+
+# 未納入版本控制的封存程式與本機/客戶驗證文件
+/archive/
+/docs/dev-notes/會計科目對照.md
+/docs/dev-notes/測試資料集.md
+/docs/dev-notes/測試集比對結果.md
+/docs/report/測試報告.html
 
 # 測試報告的中間素材（報告本身 docs/report/測試報告.html 有進版控）
 docs/report/shots/
