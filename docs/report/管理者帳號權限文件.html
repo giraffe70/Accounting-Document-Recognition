@@ -1,0 +1,377 @@
+<!DOCTYPE html><html lang="zh-TW"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>管理者帳號權限說明文件</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:      #ffffff;
+  --bg2:     #f6f8fa;
+  --bg3:     #eef1f4;
+  --border:  #d0d7de;
+  --text:    #1f2328;
+  --muted:   #636c76;
+  --blue:    #0969da;
+  --green:   #1a7f37;
+  --yellow:  #9a6700;
+  --red:     #cf222e;
+  --purple:  #8250df;
+  --orange:  #bc4c00;
+  --sidebar-w: 280px;
+  --header-h: 56px;
+  --code-bg: #f6f8fa;
+  --code-text: #1f2328;
+}
+
+html[data-theme="dark"] {
+  --bg:      #0d1117;
+  --bg2:     #161b22;
+  --bg3:     #21262d;
+  --border:  #30363d;
+  --text:    #e6edf3;
+  --muted:   #8b949e;
+  --blue:    #58a6ff;
+  --green:   #3fb950;
+  --yellow:  #d29922;
+  --red:     #f85149;
+  --purple:  #bc8cff;
+  --orange:  #ffa657;
+  --code-bg: #0d1117;
+  --code-text: #e6edf3;
+}
+
+html { scroll-behavior: smooth; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Segoe UI', 'Microsoft JhengHei', system-ui, sans-serif;
+  line-height: 1.7;
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: var(--blue); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code, pre, kbd { font-family: 'Cascadia Code', 'Consolas', ui-monospace, monospace; }
+
+/* ── Header ── */
+header.topbar {
+  position: fixed; top: 0; left: 0; right: 0; height: var(--header-h);
+  background: var(--bg2); border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 16px; padding: 0 18px; z-index: 50;
+}
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 17px; }
+.brand .logo {
+  width: 30px; height: 30px; border-radius: 7px; flex: none;
+  background: linear-gradient(135deg, var(--blue), var(--purple));
+  display: grid; place-items: center; color: #fff; font-size: 14px; font-weight: 800;
+}
+.brand .sub { color: var(--muted); font-weight: 400; font-size: 13px; }
+.topbar .spacer { flex: 1; }
+.search-wrap { position: relative; }
+#search {
+  background: var(--bg3); border: 1px solid var(--border); color: var(--text);
+  border-radius: 7px; padding: 7px 12px 7px 32px; width: 220px; font-size: 13px; outline: none;
+}
+#search:focus { border-color: var(--blue); }
+.search-wrap::before {
+  content: "🔍"; position: absolute; left: 9px; top: 50%; transform: translateY(-50%);
+  font-size: 12px; opacity: .6;
+}
+.btn-icon {
+  background: var(--bg3); border: 1px solid var(--border); color: var(--text);
+  border-radius: 7px; padding: 7px 11px; cursor: pointer; font-size: 13px;
+}
+.btn-icon:hover { border-color: var(--blue); }
+#menuToggle { display: none; }
+
+/* ── Sidebar ── */
+nav.sidebar {
+  position: fixed; top: var(--header-h); bottom: 0; left: 0; width: var(--sidebar-w);
+  background: var(--bg2); border-right: 1px solid var(--border);
+  overflow-y: auto; padding: 18px 12px 60px; z-index: 40;
+}
+nav.sidebar .group { margin-bottom: 18px; }
+nav.sidebar .group > .group-title {
+  color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .08em;
+  text-transform: uppercase; padding: 6px 12px; margin-bottom: 2px;
+}
+nav.sidebar a {
+  display: block; color: var(--text); padding: 7px 12px; border-radius: 7px;
+  font-size: 14px; border-left: 2px solid transparent;
+}
+nav.sidebar a:hover { background: var(--bg3); text-decoration: none; }
+nav.sidebar a.active {
+  background: var(--bg3); border-left-color: var(--blue); color: var(--blue); font-weight: 600;
+}
+nav.sidebar a.hidden { display: none; }
+
+/* ── Main ── */
+main {
+  margin-left: var(--sidebar-w); margin-top: var(--header-h);
+  padding: 38px 48px 120px; max-width: 1000px;
+}
+section.doc { scroll-margin-top: calc(var(--header-h) + 14px); margin-bottom: 64px; }
+section.doc > h2 {
+  font-size: 27px; padding-bottom: 10px; border-bottom: 1px solid var(--border);
+  margin-bottom: 18px; display: flex; align-items: center; gap: 10px;
+}
+section.doc > h2 .ic { font-size: 24px; }
+h3 { font-size: 19px; margin: 28px 0 12px; color: var(--text); }
+h4 { font-size: 15px; margin: 20px 0 8px; color: var(--blue); }
+p { margin: 10px 0; }
+ul, ol { margin: 10px 0 10px 26px; }
+li { margin: 5px 0; }
+.lead { font-size: 16px; color: var(--muted); margin-bottom: 8px; }
+
+/* hero */
+.hero {
+  background: linear-gradient(135deg, rgba(9,105,218,.10), rgba(130,80,223,.08));
+  border: 1px solid var(--border); border-radius: 14px; padding: 28px 30px; margin-bottom: 30px;
+}
+.hero h1 { font-size: 30px; margin-bottom: 6px; }
+.hero .tagline { color: var(--muted); font-size: 16px; }
+.badges { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+.badge {
+  font-size: 12px; padding: 4px 11px; border-radius: 20px; border: 1px solid var(--border);
+  background: var(--bg3); color: var(--muted);
+}
+.badge.b { color: var(--blue); border-color: rgba(9,105,218,.4); }
+.badge.g { color: var(--green); border-color: rgba(26,127,55,.4); }
+.badge.o { color: var(--orange); border-color: rgba(188,76,0,.4); }
+
+/* tables */
+table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 14px; }
+th, td { border: 1px solid var(--border); padding: 9px 12px; text-align: left; vertical-align: top; }
+th { background: var(--bg3); font-weight: 600; }
+tr:nth-child(even) td { background: var(--bg2); }
+td code, th code, p code, li code {
+  background: var(--bg3); padding: 1.5px 6px; border-radius: 5px; font-size: 12.5px; color: var(--orange);
+}
+
+/* code blocks */
+.codeblock { position: relative; margin: 14px 0; }
+.codeblock pre {
+  background: var(--code-bg); border: 1px solid var(--border); border-radius: 10px;
+  padding: 16px 18px; overflow-x: auto; font-size: 13px; line-height: 1.6; color: var(--code-text);
+}
+.codeblock .lang {
+  position: absolute; top: 0; left: 14px; transform: translateY(-50%);
+  background: var(--bg3); border: 1px solid var(--border); border-radius: 5px;
+  font-size: 10.5px; padding: 1px 8px; color: var(--muted); letter-spacing: .04em;
+}
+.copy-btn {
+  position: absolute; top: 8px; right: 8px; background: var(--bg3); border: 1px solid var(--border);
+  color: var(--muted); border-radius: 6px; font-size: 11px; padding: 3px 9px; cursor: pointer; opacity: 0;
+  transition: opacity .15s;
+}
+.codeblock:hover .copy-btn { opacity: 1; }
+.copy-btn:hover { color: var(--green); border-color: var(--green); }
+
+/* callouts */
+.callout {
+  border: 1px solid var(--border); border-left-width: 4px; border-radius: 8px;
+  padding: 12px 16px; margin: 16px 0; background: var(--bg2); font-size: 14px;
+}
+.callout .ct { font-weight: 700; font-size: 13px; margin-bottom: 3px; display: flex; gap: 6px; align-items: center; }
+.callout.note { border-left-color: var(--blue); }   .callout.note .ct { color: var(--blue); }
+.callout.tip  { border-left-color: var(--green); }   .callout.tip  .ct { color: var(--green); }
+.callout.warn { border-left-color: var(--yellow); }  .callout.warn .ct { color: var(--yellow); }
+.callout.danger { border-left-color: var(--red); }   .callout.danger .ct { color: var(--red); }
+
+/* diagram card (mermaid + embedded images) — always light for contrast */
+.diagram {
+  background: #ffffff; border: 1px solid var(--border); border-radius: 12px;
+  padding: 22px; margin: 18px 0; text-align: center; overflow-x: auto;
+}
+.diagram .mermaid { display: inline-block; min-width: 100%; }
+.diagram-cap { color: var(--muted); font-size: 12.5px; margin-top: 8px; }
+
+/* cards grid */
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 14px; margin: 16px 0; }
+.card {
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px;
+}
+.card h4 { margin: 0 0 6px; color: var(--text); display: flex; justify-content: space-between; align-items: center; }
+.card .port { font-size: 11px; color: var(--green); background: var(--bg3); padding: 2px 8px; border-radius: 12px; border: 1px solid var(--border); }
+.card p { font-size: 13px; color: var(--muted); margin: 4px 0 0; }
+.card .path { font-size: 12px; color: var(--orange); margin-top: 6px; word-break: break-all; }
+
+/* step list */
+.steps { counter-reset: step; list-style: none; margin-left: 0; }
+.steps > li {
+  position: relative; padding: 4px 0 16px 44px; border-left: 2px solid var(--border); margin-left: 14px;
+}
+.steps > li:last-child { border-left-color: transparent; }
+.steps > li::before {
+  counter-increment: step; content: counter(step);
+  position: absolute; left: -15px; top: 0; width: 28px; height: 28px; border-radius: 50%;
+  background: var(--blue); color: #fff; display: grid; place-items: center; font-size: 13px; font-weight: 700;
+}
+.steps > li strong { color: var(--text); }
+
+/* back to top */
+#toTop {
+  position: fixed; bottom: 26px; right: 26px; background: var(--bg3); border: 1px solid var(--border);
+  color: var(--text); width: 42px; height: 42px; border-radius: 50%; cursor: pointer; font-size: 18px;
+  display: none; z-index: 45;
+}
+#toTop:hover { border-color: var(--blue); color: var(--blue); }
+
+/* timeline (decisions / progress log) */
+.timeline { list-style: none; margin: 16px 0; padding-left: 0; }
+.timeline > li {
+  position: relative; padding: 0 0 22px 28px;
+  border-left: 2px solid var(--border); margin-left: 6px;
+}
+.timeline > li:last-child { border-left-color: transparent; padding-bottom: 4px; }
+.timeline > li::before {
+  content: ""; position: absolute; left: -7px; top: 4px;
+  width: 12px; height: 12px; border-radius: 50%;
+  background: var(--bg); border: 2px solid var(--blue);
+}
+.timeline .date { font-size: 12px; color: var(--muted); font-weight: 600; letter-spacing: .04em; }
+.timeline .ttl { font-size: 15px; font-weight: 600; margin: 2px 0 4px; color: var(--text); }
+.timeline .ttl .status {
+  display: inline-block; font-size: 11px; padding: 1px 8px; border-radius: 10px;
+  border: 1px solid var(--border); margin-left: 6px; color: var(--muted); font-weight: 500;
+  vertical-align: 1px;
+}
+.timeline .ttl .status.done { color: var(--green); border-color: rgba(26,127,55,.4); }
+.timeline .ttl .status.wip  { color: var(--orange); border-color: rgba(188,76,0,.4); }
+.timeline .ttl .status.plan { color: var(--purple); border-color: rgba(130,80,223,.4); }
+.timeline .ttl .status.drop { color: var(--red); border-color: rgba(207,34,46,.4); text-decoration: line-through; }
+.timeline > li p { font-size: 14px; margin: 4px 0; }
+.timeline > li .who { font-size: 12px; color: var(--muted); margin-top: 4px; }
+
+.kbd { background: var(--bg3); border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 5px; padding: 1px 6px; font-size: 12px; }
+.muted { color: var(--muted); }
+hr.soft { border: none; border-top: 1px solid var(--border); margin: 26px 0; }
+
+@media (max-width: 900px) {
+  :root { --sidebar-w: 0px; }
+  #menuToggle { display: inline-block; }
+  nav.sidebar { transform: translateX(-100%); width: 280px; transition: transform .2s; }
+  nav.sidebar.open { transform: none; }
+  main { padding: 24px 18px 100px; }
+  #search { width: 130px; }
+  .brand .sub { display: none; }
+}
+
+main { margin-left:0; max-width:1080px; padding:32px 40px; }
+@media print { h2 { break-before: page; } table { break-inside: avoid; } }
+</style></head><body><main>
+
+<section class="doc">
+<div class="hero"><h1>管理者帳號權限說明文件</h1>
+<div class="tagline">票據憑證掃描辨識系統　—　帳號、角色與權限管理</div>
+<div class="badges"><span class="badge g">三種角色</span><span class="badge b">PBKDF2 密碼雜湊</span>
+<span class="badge o">全地端</span></div></div>
+<p class="lead">本文件說明系統的帳號種類、各角色可執行的操作範圍，以及管理員應執行的帳號維護作業。
+內容依系統實際程式行為撰寫。文件日期：2026-07-28。</p>
+<div class="callout danger"><div class="ct">🚨 上線前必做</div>
+系統首次啟動會自動建立三個<b>預設密碼</b>的種子帳號。<b>正式使用前務必全部變更</b>，
+變更方式見下方〈帳號維護作業〉。未變更前請勿將系統開放給實際使用者。</div>
+</section>
+
+<section class="doc"><h2><span class="ic">👥</span>角色與權限</h2>
+<p class="lead">系統採三種角色。權限在<b>後端強制檢查</b>（非僅隱藏畫面按鈕），
+即使直接呼叫 API 也會被擋下。</p>
+<table>
+<tr><th>操作</th><th>記帳士<br>clerk</th><th>會計師<br>accountant</th><th>管理員<br>admin</th></tr>
+<tr><td>登入系統、瀏覽憑證清單</td><td>✓</td><td>✓</td><td>✓</td></tr>
+<tr><td>上傳／匯入憑證、外觀確認、內容辨識</td><td>✓</td><td>✓</td><td>✓</td></tr>
+<tr><td>編輯欄位、影像旋轉裁切、自動分類科目</td><td>✓</td><td>✓</td><td>✓</td></tr>
+<tr><td>記帳士確認（送交會計師）</td><td>✓</td><td>✓</td><td>✓</td></tr>
+<tr><td><b>會計師核定</b></td><td>—</td><td>✓</td><td>✓</td></tr>
+<tr><td><b>退回憑證</b></td><td>—</td><td>✓</td><td>✓</td></tr>
+<tr><td>重新送審（退回後修正）</td><td>✓</td><td>✓</td><td>✓</td></tr>
+<tr><td>日記帳、報表、列印／PDF</td><td>✓</td><td>✓</td><td>✓</td></tr>
+<tr><td><b>會計科目表：檢視</b></td><td>✓</td><td>✓</td><td>✓</td></tr>
+<tr><td><b>會計科目表：儲存變更</b></td><td>—</td><td>—</td><td>✓</td></tr>
+<tr><td><b>地端備份與下載</b></td><td>—</td><td>—</td><td>✓</td></tr>
+<tr><td><b>系統組態</b>（模型連線、API 金鑰、掃描來源、雲端權限）</td><td>—</td><td>—</td><td>✓</td></tr>
+<tr><td><b>修正回饋頁</b>（檢視 AI 原始值與人工修正差異）</td><td>—</td><td>—</td><td>✓</td></tr>
+<tr><td><b>開發者備註</b>（辨識錯誤回報）</td><td>—</td><td>—</td><td>✓</td></tr>
+</table>
+<div class="callout note"><div class="ct">💡 為何管理員擁有全部權限</div>
+管理員可執行會計師與記帳士的所有操作，以便在人員請假或帳號異常時代為處理。
+若貴公司希望管理員<b>不得</b>核定憑證（職務分離），可另行調整，屬設計變更項目。</div>
+</section>
+
+<section class="doc"><h2><span class="ic">🔐</span>安全設計</h2>
+<table>
+<tr><th>項目</th><th>作法</th></tr>
+<tr><td>密碼儲存</td><td>PBKDF2-HMAC-SHA256、每帳號獨立隨機 salt、10 萬次迭代。
+<b>資料庫內不存明文密碼</b>，即使資料庫外流也無法直接還原密碼。</td></tr>
+<tr><td>密碼比對</td><td>以定時比較（<code>hmac.compare_digest</code>）避免時間差攻擊。</td></tr>
+<tr><td>登入憑據</td><td>登入後發給隨機 session token（存於瀏覽器 cookie）。</td></tr>
+<tr><td>權限檢查</td><td>所有 <code>/api</code> 請求先驗證登入，再依角色檢查。畫面隱藏按鈕僅為輔助。</td></tr>
+<tr><td>資料落地</td><td>憑證影像、辨識結果、科目表皆存於本機，不上傳雲端。</td></tr>
+</table>
+<div class="callout warn"><div class="ct">⚠️ 現況限制（請留意）</div>
+<ul>
+<li><b>登入階段存於記憶體</b>：伺服器重新啟動後所有人需重新登入。此為刻意設計（重啟即清除所有階段），但也表示無法「強制某一使用者登出」而不影響他人。</li>
+<li><b>系統未強制密碼定期更換、未鎖定連續登入失敗</b>。若貴公司資安政策有此要求，屬設計變更項目。</li>
+<li><b>目前無網頁版帳號管理畫面</b>，帳號維護需由管理員在伺服器端以工具執行（見下節）。</li>
+<li>契約載明本次開發具備帳號密碼登入等基本資安防護；<b>第三方弱點掃描與滲透測試不在範圍內</b>。</li>
+</ul></div>
+</section>
+
+<section class="doc"><h2><span class="ic">🛠️</span>帳號維護作業</h2>
+<p class="lead">於伺服器主機開啟命令提示字元，切換至系統資料夾後執行。
+所有密碼皆以互動方式輸入，不會顯示於畫面、也不會留在命令歷史紀錄中。</p>
+
+<h3>檢視所有帳號（含是否仍為預設密碼）</h3>
+<div class="codeblock"><span class="lang">指令</span><pre>python scripts/manage_users.py list</pre></div>
+<div class="codeblock"><span class="lang">輸出範例</span><pre>帳號              角色          顯示名稱            密碼狀態
+admin           管理員         系統管理員           ⚠ 仍為預設密碼
+clerk           記帳士         記帳士             已變更
+accountant      會計師         會計師             已變更</pre></div>
+
+<h3>變更密碼（上線前三個帳號都要做）</h3>
+<div class="codeblock"><span class="lang">指令</span><pre>python scripts/manage_users.py passwd admin</pre></div>
+<p>系統會要求輸入兩次新密碼。密碼至少 8 字元，且不接受常見或預設密碼。</p>
+
+<h3>新增帳號</h3>
+<div class="codeblock"><span class="lang">指令</span><pre>python scripts/manage_users.py add wangms clerk 王小姐</pre></div>
+<p>格式為：<code>add &lt;帳號&gt; &lt;角色&gt; &lt;顯示名稱&gt;</code>，角色須為
+<code>clerk</code>（記帳士）、<code>accountant</code>（會計師）或 <code>admin</code>（管理員）。</p>
+
+<h3>更改顯示名稱／刪除帳號</h3>
+<div class="codeblock"><span class="lang">指令</span><pre>python scripts/manage_users.py rename wangms 王大明
+python scripts/manage_users.py delete wangms</pre></div>
+<p>刪除需輸入 <code>yes</code> 二次確認。系統會阻止刪除<b>最後一個管理員帳號</b>，避免無人可管理。</p>
+
+<div class="callout tip"><div class="ct">🛠️ 建議的帳號規劃</div>
+<ul>
+<li>實際使用者<b>各自使用專屬帳號</b>，不要共用；系統的修正紀錄以帳號區分責任。</li>
+<li><code>admin</code> 帳號僅供系統維護（改設定、備份、管理帳號），日常記帳請用個人帳號。</li>
+<li>人員離職時請以 <code>delete</code> 移除帳號，或先 <code>passwd</code> 變更密碼再移除。</li>
+</ul></div>
+</section>
+
+<section class="doc"><h2><span class="ic">💾</span>備份與還原</h2>
+<p class="lead">備份為<b>管理員專屬</b>功能，於系統畫面右上角「💾 備份」執行。</p>
+<table>
+<tr><th>項目</th><th>說明</th></tr>
+<tr><td>備份內容</td><td>資料庫（憑證、辨識結果、審核紀錄、帳號）與設定檔（會計科目表、公司登錄、模型設定），打包為 zip。</td></tr>
+<tr><td>備份位置</td><td>本機系統資料夾內，可從畫面下載後另存至貴公司指定的儲存媒體。</td></tr>
+<tr><td>建議頻率</td><td>每月結帳完成後至少一次；重大調整（如大量匯入、科目表變更）前後各一次。</td></tr>
+<tr><td>還原方式</td><td>將 zip 內容還原至系統資料夾後重新啟動。<b>還原會覆蓋現有資料，執行前請先備份當下狀態。</b></td></tr>
+</table>
+<div class="callout warn"><div class="ct">⚠️ 備份檔含機密資料</div>
+備份檔內含完整憑證影像與財務資料，以及帳號密碼雜湊值。請比照財務文件保管，
+勿存放於未加密的共用空間。</div>
+</section>
+
+<section class="doc"><h2><span class="ic">📄</span>文件資訊</h2>
+<table>
+<tr><th>項目</th><th>內容</th></tr>
+<tr><td>文件名稱</td><td>管理者帳號權限說明文件</td></tr>
+<tr><td>對應契約</td><td>委託技術服務契約書　附件一計畫書　五、交付項目：
+「OCR 自動辨識分類正式版模組：包含管理者帳號權限文件一份」</td></tr>
+<tr><td>適用版本</td><td>依產生日期之系統版本；系統權限調整後請重新產生本文件</td></tr>
+<tr><td>產生方式</td><td>2026-07-28　由 <code>scripts/build_admin_doc.py</code> 依程式碼實際行為產生</td></tr>
+</table>
+</section>
+</main></body></html>

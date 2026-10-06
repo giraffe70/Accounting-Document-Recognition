@@ -1,0 +1,37 @@
+操作步驟
+
+1. Install Ollama
+https://ollama.com/download/windows
+
+---
+2. Create env
+conda create -y -n pdfscan312 python=3.12
+conda activate pdfscan312
+
+---
+3. Install Packages
+
+pip install -r requirements.txt -r requirements-ocr.txt
+
+出現 Warning:
+set "PIP_CONFIG_FILE=nul"
+set "PIP_EXTRA_INDEX_URL="
+
+python -m pip config list
+正常應只看到：
+:env:.config-file='nul'
+
+接著重新安裝：
+python -m pip install --index-url https://pypi.org/simple -r requirements.txt -r requirements-ocr.txt
+
+這次不應再查詢 pypi.ngc.nvidia.com。安裝完成後執行：
+python -m pip check
+
+若顯示 No broken requirements found.，代表已安裝套件的依賴沒有衝突。
+
+---
+
+ollama pull qwen2.5vl:7b && ollama pull qwen2.5:7b && ollama pull bge-m3
+start_webui.bat   # http://127.0.0.1:8090
+
+---
