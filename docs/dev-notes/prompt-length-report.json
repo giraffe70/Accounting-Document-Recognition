@@ -1,0 +1,253 @@
+{
+  "baseline_sha256": "042532b0d737d2746b9aa018631d9db513163a10fc386a00e9b2b4d387709c19",
+  "evidence": "測試 OCR：文件日期115/06/04，總額1,050；其餘欄位未知。",
+  "unit": "Unicode characters, not model tokens",
+  "rows": [
+    {
+      "type_key": "invoice",
+      "image": {
+        "before_characters": 2315,
+        "after_characters": 1246,
+        "after_utf8_bytes": 2134
+      },
+      "ocr_text": {
+        "before_characters": 1874,
+        "after_characters": 1200,
+        "after_utf8_bytes": 2070
+      }
+    },
+    {
+      "type_key": "cheque",
+      "image": {
+        "before_characters": 1558,
+        "after_characters": 861,
+        "after_utf8_bytes": 1487
+      },
+      "ocr_text": {
+        "before_characters": 1243,
+        "after_characters": 815,
+        "after_utf8_bytes": 1423
+      }
+    },
+    {
+      "type_key": "remittance",
+      "image": {
+        "before_characters": 1753,
+        "after_characters": 1038,
+        "after_utf8_bytes": 1784
+      },
+      "ocr_text": {
+        "before_characters": 1297,
+        "after_characters": 992,
+        "after_utf8_bytes": 1720
+      }
+    },
+    {
+      "type_key": "customs_tax",
+      "image": {
+        "before_characters": 1418,
+        "after_characters": 1218,
+        "after_utf8_bytes": 2034
+      },
+      "ocr_text": {
+        "before_characters": 1426,
+        "after_characters": 1230,
+        "after_utf8_bytes": 2070
+      }
+    },
+    {
+      "type_key": "export_declaration",
+      "image": {
+        "before_characters": 2249,
+        "after_characters": 2834,
+        "after_utf8_bytes": 4144
+      },
+      "ocr_text": {
+        "before_characters": 2257,
+        "after_characters": 2846,
+        "after_utf8_bytes": 4180
+      }
+    },
+    {
+      "type_key": "import_declaration",
+      "image": {
+        "before_characters": 1929,
+        "after_characters": 2151,
+        "after_utf8_bytes": 3299
+      },
+      "ocr_text": {
+        "before_characters": 1937,
+        "after_characters": 2163,
+        "after_utf8_bytes": 3335
+      }
+    },
+    {
+      "type_key": "broker_note",
+      "image": {
+        "before_characters": 1551,
+        "after_characters": 1328,
+        "after_utf8_bytes": 2150
+      },
+      "ocr_text": {
+        "before_characters": 1559,
+        "after_characters": 1340,
+        "after_utf8_bytes": 2186
+      }
+    },
+    {
+      "type_key": "declaration",
+      "image": {
+        "before_characters": 1213,
+        "after_characters": 939,
+        "after_utf8_bytes": 1621
+      },
+      "ocr_text": {
+        "before_characters": 1221,
+        "after_characters": 951,
+        "after_utf8_bytes": 1657
+      }
+    },
+    {
+      "type_key": "tax_bill",
+      "image": {
+        "before_characters": 1317,
+        "after_characters": 1022,
+        "after_utf8_bytes": 1730
+      },
+      "ocr_text": {
+        "before_characters": 1325,
+        "after_characters": 1034,
+        "after_utf8_bytes": 1766
+      }
+    },
+    {
+      "type_key": "utility",
+      "image": {
+        "before_characters": 1714,
+        "after_characters": 1184,
+        "after_utf8_bytes": 1986
+      },
+      "ocr_text": {
+        "before_characters": 1722,
+        "after_characters": 1196,
+        "after_utf8_bytes": 2022
+      }
+    },
+    {
+      "type_key": "receipt",
+      "image": {
+        "before_characters": 1600,
+        "after_characters": 1066,
+        "after_utf8_bytes": 1820
+      },
+      "ocr_text": {
+        "before_characters": 1290,
+        "after_characters": 1020,
+        "after_utf8_bytes": 1756
+      }
+    },
+    {
+      "type_key": "statement",
+      "image": {
+        "before_characters": 1766,
+        "after_characters": 1246,
+        "after_utf8_bytes": 2116
+      },
+      "ocr_text": {
+        "before_characters": 1774,
+        "after_characters": 1258,
+        "after_utf8_bytes": 2152
+      }
+    },
+    {
+      "type_key": "purchase_order",
+      "image": {
+        "before_characters": 1398,
+        "after_characters": 1067,
+        "after_utf8_bytes": 1775
+      },
+      "ocr_text": {
+        "before_characters": 1406,
+        "after_characters": 1079,
+        "after_utf8_bytes": 1811
+      }
+    },
+    {
+      "type_key": "fda_import",
+      "image": {
+        "before_characters": 1398,
+        "after_characters": 1255,
+        "after_utf8_bytes": 2003
+      },
+      "ocr_text": {
+        "before_characters": 1406,
+        "after_characters": 1267,
+        "after_utf8_bytes": 2039
+      }
+    },
+    {
+      "type_key": "social_insurance",
+      "image": {
+        "before_characters": 1518,
+        "after_characters": 1116,
+        "after_utf8_bytes": 1906
+      },
+      "ocr_text": {
+        "before_characters": 1526,
+        "after_characters": 1128,
+        "after_utf8_bytes": 1942
+      }
+    },
+    {
+      "type_key": "bill_detail",
+      "image": {
+        "before_characters": 1369,
+        "after_characters": 709,
+        "after_utf8_bytes": 1327
+      },
+      "ocr_text": {
+        "before_characters": 1377,
+        "after_characters": 721,
+        "after_utf8_bytes": 1363
+      }
+    },
+    {
+      "type_key": "journal_voucher",
+      "image": {
+        "before_characters": 1993,
+        "after_characters": 938,
+        "after_utf8_bytes": 1654
+      },
+      "ocr_text": {
+        "before_characters": 2001,
+        "after_characters": 950,
+        "after_utf8_bytes": 1690
+      }
+    },
+    {
+      "type_key": "other",
+      "image": {
+        "before_characters": 1479,
+        "after_characters": 954,
+        "after_utf8_bytes": 1582
+      },
+      "ocr_text": {
+        "before_characters": 1156,
+        "after_characters": 908,
+        "after_utf8_bytes": 1518
+      }
+    }
+  ],
+  "averages": {
+    "image": {
+      "before": 1641.0,
+      "after": 1231.7777777777778
+    },
+    "ocr_text": {
+      "before": 1544.2777777777778,
+      "after": 1227.6666666666667
+    }
+  },
+  "core_template_count": 3,
+  "document_contract_count": 18
+}

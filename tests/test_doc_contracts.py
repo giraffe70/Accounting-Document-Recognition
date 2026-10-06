@@ -38,7 +38,8 @@ class DocumentContractTests(unittest.TestCase):
                 self.assertTrue(all(key for key in keys))
                 self.assertTrue(all(field.get("kind", "text") in {"text", "date", "number"} for field in fields))
 
-    def test_no_vlm_box_types_are_known_and_prompt_box_contract_matches(self):
+    def test_document_types_and_prompt_box_contract_matches(self):
+        self.assertEqual(len(doc_types.DOC_TYPES), 18)
         self.assertLessEqual(doc_types.NO_VLM_BOX_TYPES, doc_types.DOC_TYPES.keys())
         for type_key in doc_types.DOC_TYPES:
             prompt = doc_types.build_extract_prompt(type_key)
@@ -46,9 +47,12 @@ class DocumentContractTests(unittest.TestCase):
                 if type_key in doc_types.NO_VLM_BOX_TYPES:
                     self.assertNotIn('"boxes": {', prompt)
                 else:
-                    self.assertIn('"boxes": {', prompt)
-                    for field in doc_types.DOC_TYPES[type_key]["fields"]:
-                        self.assertIn(f'"{field["key"]}": [x1,y1,x2,y2]', prompt)
+                    # Boxes are optional in the JSON contract. The prompt gives one
+                    # empty example and the shared coordinate/omission rule; field
+                    # eligibility is enforced by the validator, not repeated inline.
+                    self.assertIn('"boxes":{}', prompt)
+                    self.assertIn("0至1000整數", prompt)
+                    self.assertIn("未知省略", prompt)
 
     def test_manual_generator_constants_stay_in_sync_without_importing_writer(self):
         source = ROOT / "scripts" / "build_agents_section.py"

@@ -285,7 +285,7 @@ hr.soft { border: none; border-top: 1px solid var(--border); margin: 26px 0; }
     <a href="#architecture" data-kw="架構 architecture fastapi 管線 pipeline ocr vlm">系統架構</a>
     <a href="#modules" data-kw="模組 module 依賴 services core db">模組依賴關係</a>
     <a href="#api" data-kw="api 介面 endpoint 登入 vouchers report backup">API／介面說明</a>
-    <a href="#agents" data-kw="agent 單據類型 任務 提示詞 prompt 欄位契約 contract 報單 declaration workflow router">辨識 Agent 一覽</a>
+    <a href="#agents" data-kw="agent 單據類型 任務 提示詞 prompt 欄位契約 contract 報單 declaration workflow router">辨識模板與資料契約</a>
     <a href="#thirdparty" data-kw="第三方 套件 langchain ollama paddle sqlmodel 授權">第三方模組與授權</a>
   </div>
   <div class="group">
@@ -427,8 +427,8 @@ flowchart TB
 
     <h3>支援的單據類型（Router → 專屬 agent）</h3>
     <p>由 <code>doc_router</code> 判類型後，交給該類型在 <code>doc_types.DOC_TYPES</code> 的專屬提示詞與欄位契約辨識。
-    目前 <strong>14 種專屬類型 + 1 種通用</strong>，稅務相關（發票／收據／進出口）優先、欄位契約最完整。
-    各 agent 的任務、提示詞全文與欄位契約見 <a href="#agents">〈辨識 Agent 一覽〉</a>。</p>
+    目前登錄 <strong>18 種文件類型</strong>，共用模板搭配各類型欄位契約與提示。
+    共用辨識模板與欄位契約見 <a href="#agents">〈辨識模板與資料契約〉</a>。</p>
   </section>
 
   <!-- ░░░ MODULES ░░░ -->
@@ -496,337 +496,406 @@ flowchart TB
   </section>
 
   <!-- ░░░ AGENTS ░░░ -->
+  <!-- ░░░ AGENTS ░░░ -->
+  <!-- ░░░ AGENTS ░░░ -->
+  <!-- ░░░ AGENTS ░░░ -->
+  <!-- ░░░ AGENTS ░░░ -->
+  <!-- ░░░ AGENTS ░░░ -->
+  <!-- ░░░ AGENTS ░░░ -->
+  <!-- ░░░ AGENTS ░░░ -->
   <section class="doc" id="agents">
-    <h2><span class="ic">🤖</span>辨識 Agent 一覽</h2>
-    <p class="lead">一個 agent ＝ <code>doc_types.DOC_TYPES</code> 的一筆登錄。同一筆定義同時驅動三件事：
-    <strong>①</strong> 專屬辨識提示詞（依欄位契約自動生成）<strong>②</strong> 萃取回傳的欄位契約 <code>fields</code>
-    <strong>③</strong> 前端審核 UI 的動態欄位。新增類型只要加一筆，三處自動同步。</p>
+    <h2><span class="ic">🤖</span>辨識模板與資料契約</h2>
+    <p class="lead">辨識流程共用三個核心模板：路由分類、欄位萃取、會計分類。18 種文件各自提供欄位契約與 <code>type_hints</code>，不再維護每種文件的一整份獨立提示詞。</p>
 
-    <h3>Agent Workflow</h3>
-    <p>拆為兩張橫式圖，便於直接貼入簡報：<strong>圖 3a</strong> 是主幹（誰接手誰），
-    <strong>圖 3b</strong> 是內容辨識與後處理的內部細節。</p>
+    <h3>辨識流程</h3>
     <div class="diagram">
       <div class="mermaid">
 flowchart LR
-  IMG["頁圖<br/>（已轉正）"] --> R["Router<br/>判類型"]
-  R --> CONF{"人工<br/>確認類型"}
-  CONF --> EX["專屬 agent<br/>萃取欄位"]
-  EX --> POST["後處理鏈<br/>（圖 3b）"]
-  POST --> DB[("待審<br/>pending")]
-  DB --> C["分類 agent<br/>產生分錄"]
+  IMG["頁面影像與 OCR"] --> ROUTE["路由模板"] --> TYPE["文件類型與契約"]
+  TYPE --> EXTRACT["萃取模板"] --> READ["共用補讀與欄位檢查"] --> REVIEW["待審資料"]
+  REVIEW --> ACCOUNT["會計模板"] --> CANDIDATE["候選分錄"]
       </div>
-      <div class="diagram-cap">圖 3a — 主流程：Router 先判類型，<strong>人工確認後</strong>才交給該類型的專屬 agent 萃取欄位</div>
+      <div class="diagram-cap">路由與萃取共用提示詞模板，再以文件類型契約和提示補充差異；會計模板產生供審核的候選分錄。</div>
     </div>
-    <div class="diagram">
-      <div class="mermaid">
-flowchart TB
-  subgraph EX["內容辨識 extract_for_type()"]
-    direction LR
-    O["OCR<br/>文字＋精準框"] --> Q["條碼／QR<br/>解碼"] --> V["VLM<br/>專屬提示詞＋OCR grounding"]
-  end
-  subgraph POST["後處理鏈：依序修補 VLM 的已知弱點"]
-    direction LR
-    F1["JSON<br/>修復"] --> F2["印章<br/>補讀統編"] --> F3["QR 值<br/>覆蓋"] --> F4["框精修<br/>只留 OCR<br/>驗證過"] --> F5["清洗<br/>統編／民國年<br/>／髒值"]
-  end
-  EX --> POST
-      </div>
-      <div class="diagram-cap">圖 3b — 內容辨識與後處理細節。後處理五步各對應一個實測過的 VLM 弱點：JSON 格式瑕疵、印章內統編漏抓、QR 值較可信、框座標不可靠、格式髒值</div>
-    </div>
+    <p>欄位契約失敗時，系統會在初次請求後再做 <strong>1 次契約重試</strong>；每一輪傳輸最多重試 <strong>3 次</strong>。影像補讀與輸出修正由共用流程處理。</p>
+    <p>條碼或 QR 解碼值若與影像辨識欄位衝突，保留衝突警告供後續檢視，不靜默覆蓋其中一方。</p>
 
-    <h3>Agent 列表</h3>
-    <p>目前 <strong>17 種專屬 agent + 1 種通用</strong>（<code>other</code>）。「出框策略」欄見下方密集表單說明。</p>
-    <table>
-      <tr><th>Agent（key）</th><th>任務與專屬規則</th><th>欄位數</th><th>明細列</th><th>出框策略</th></tr>
-      <tr><th colspan="5">稅務核心</th></tr>
-      <tr><td>統一發票／電子發票<br><code>invoice</code></td><td>台灣統一發票（三聯式／二聯式／電子發票證明聯／收銀機）。課稅別看勾選；統編 8 位純數字、電話不得填入；賣方統編常在「統一發票專用章」內，漏抓才觸發印章聚焦補讀；電子發票 QR 解出的值為權威值，直接覆蓋。</td><td>13</td><td>✔</td><td>VLM+OCR</td></tr>
-      <tr><td>收據／雜項開銷<br><code>receipt</code></td><td>免用統一發票收據、一般收據、勞務報酬單、代收轉付。未必有統編或營業稅；有扣繳才填 tax_amount。</td><td>9</td><td>✔</td><td>VLM+OCR</td></tr>
-      <tr><td>稅款繳款書<br><code>tax_bill</code></td><td>營所稅結算自行繳納、營業稅等繳款書。稅目代碼（如 357）、銷帳編號在條碼下方；一頁三聯內容相同取其一。</td><td>14</td><td>—</td><td>OCR 精修</td></tr>
-      <tr><th colspan="5">進出口</th></tr>
-      <tr><td>出口報單<br><code>export_declaration</code></td><td>海關出口報單，依官方 48 格編號逐格定位。direction 固定「出口」；32~41 為貨物明細第一項。</td><td>48</td><td>—</td><td>OCR 精修</td></tr>
-      <tr><td>進口報單<br><code>import_declaration</code></td><td>海關進口報單。納稅義務人＝進口商、賣方＝國外出口商；完稅價格以 CIF 為基礎；稅費分項擷取後加總。逐項貨物入 items。</td><td>33</td><td>✔</td><td>OCR 精修</td></tr>
-      <tr><td>海關進口貨物稅費繳納證明<br><code>customs_tax</code></td><td>海關進口（快遞）貨物稅費繳納證明。一頁三聯取其一不跨聯混填；報單號碼可與進口報單勾稽。</td><td>18</td><td>—</td><td>OCR 精修</td></tr>
-      <tr><td>報關行收費通知單<br><code>broker_note</code></td><td>報關行收費通知單／費用明細。代墊稅費（關稅/滯報費）與勞務費（報關手續費）分開擷取，逐項費別入 items。</td><td>19</td><td>✔</td><td>OCR 精修</td></tr>
-      <tr><td>食品輸入許可通知<br><code>fda_import</code></td><td>食藥署食品及相關產品輸入許可通知。報驗義務人＝進口商；報單號碼及項次可與進口報單勾稽。</td><td>18</td><td>—</td><td>OCR 精修</td></tr>
-      <tr><td>進出口報單（未分進出口）<br><code>declaration</code></td><td>無法判定進出口時的報單通用契約，由模型填 direction。</td><td>9</td><td>✔</td><td>OCR 精修</td></tr>
-      <tr><th colspan="5">金流</th></tr>
-      <tr><td>支票<br><code>cheque</code></td><td>支票／本票。金額以票面國字大寫為準轉數字；同頁若含信封或其他單據只取支票本身。</td><td>9</td><td>—</td><td>VLM+OCR</td></tr>
-      <tr><td>匯款單／銀行轉帳水單<br><code>remittance</code></td><td>銀行匯款單／網銀轉帳水單。扣款金額＝交易金額＋手續費（內扣時相同）。</td><td>14</td><td>—</td><td>VLM+OCR</td></tr>
-      <tr><th colspan="5">其他</th></tr>
-      <tr><td>水電費／公用事業帳單<br><code>utility</code></td><td>台水／台電等公用事業帳單。114/2 起有統編用戶水費為含稅價，另列未稅小計與營業稅。</td><td>17</td><td>—</td><td>OCR 精修</td></tr>
-      <tr><td>訂購單／採購單<br><code>purchase_order</code></td><td>訂購單／採購單。採購方與供應商雙方統編分別擷取；明細入 items。</td><td>12</td><td>✔</td><td>OCR 精修</td></tr>
-      <tr><td>對帳單／應收帳款明細表<br><code>statement</code></td><td>對帳單／應收（應付）帳款明細表。表內「發票號碼」只是勾稽用，放 ref_invoice_no 而非憑證號碼——這類表格常被誤判為發票。統編沒印出就留空不得推測；明細數量／單價留白不可拿金額填補。</td><td>14</td><td>✔</td><td>OCR 精修</td></tr>
-      <tr><td>會計傳票（記帳憑證）<br><code>journal_voucher</code></td><td>會計傳票（記帳憑證）：記帳人員依原始憑證編製的內部單據，明細本身就是借貸分錄，故填入 entries 而非 items。借貸方向以 OCR 座標判定（VLM 判欄位歸屬不可靠）；立沖帳目為往來對象代號。也是測試集標準答案的來源。</td><td>9</td><td>—</td><td>OCR 精修</td></tr>
-      <tr><td>帳單費用明細（附頁佐證）<br><code>bill_detail</code></td><td>帳單費用明細附頁（如中華電信費用明細清單第 3 頁）。**佐證文件，不獨立產生分錄**——入帳依據是同批的發票或繳費憑證，每頁各自產分錄會讓金額嚴重灌水（實測該案正解 3,532、逐頁加總後 646 萬）。刻意不含「繳費結果通知」：該文件印有繳費總金額與扣款帳戶，本身就是入帳依據。</td><td>6</td><td>✔</td><td>OCR 精修</td></tr>
-      <tr><td>勞健保費繳款／繳費證明<br><code>social_insurance</code></td><td>勞健保費繳款單／投保單位繳費證明。**保險費免稅，不得拆進項稅額**。表格依費用代號分列（勞保普通事故／職災／就業保險／積欠工資墊償）放入 items。單位負擔與員工自付的拆分需對照薪資資料，繳費證明上查不到就不拆，於摘要提示人工分攤。</td><td>12</td><td>✔</td><td>OCR 精修</td></tr>
-      <tr><td>其他憑證<br><code>other</code></td><td>未歸類憑證的通用契約：買賣方、未稅／稅額／總計。屬「雜項附件」。</td><td>9</td><td>✔</td><td>VLM+OCR</td></tr>
+    <h3>18 種文件資料契約</h3>
+    <p>欄位名稱、標籤與型別直接取自 <code>DOC_TYPES</code>；類型提示取自 <code>type_hints</code>。展開列可檢視各類型完整欄位。</p>
+    <table class="contracts">
+      <tr><th>分類</th><th>文件類型</th><th>辨識任務與類型提示</th><th>資料契約</th></tr>
+<tr><td rowspan="3">稅務核心</td><td>統一發票／電子發票<br><code>invoice</code></td><td>辨識發票基本資料與金額欄位。<br><small>日期取填發日，不是發票期別。賣方資料可能在專用章；amount_words 抄錄大寫原文。</small></td><td><details><summary>欄位契約（15 欄）</summary><table><tr><th>key</th><th>欄位</th><th>型別</th></tr><tr><td><code>voucher_id</code></td><td>發票號碼</td><td>字串</td></tr>
+<tr><td><code>date</code></td><td>發票日期</td><td>日期</td></tr>
+<tr><td><code>invoice_type</code></td><td>發票格式（三聯式／二聯式／電子發票／收銀機）</td><td>字串</td></tr>
+<tr><td><code>tax_type</code></td><td>課稅別（應稅／零稅率／免稅）</td><td>字串</td></tr>
+<tr><td><code>seller_name</code></td><td>賣方名稱</td><td>字串</td></tr>
+<tr><td><code>seller_tax_id</code></td><td>賣方統編</td><td>字串</td></tr>
+<tr><td><code>buyer_name</code></td><td>買方名稱</td><td>字串</td></tr>
+<tr><td><code>buyer_tax_id</code></td><td>買方統編</td><td>字串</td></tr>
+<tr><td><code>subtotal</code></td><td>未稅銷售額</td><td>數字</td></tr>
+<tr><td><code>tax_amount</code></td><td>營業稅額</td><td>數字</td></tr>
+<tr><td><code>total_amount</code></td><td>總計（含稅）</td><td>數字</td></tr>
+<tr><td><code>amount_words</code></td><td>總計金額中文大寫（如有）</td><td>字串</td></tr>
+<tr><td><code>usage_note</code></td><td>買受人註記（進貨及費用／固定資產）</td><td>字串</td></tr>
+<tr><td><code>payment_status</code></td><td>明示付款狀態</td><td>字串</td></tr>
+<tr><td><code>payment_method</code></td><td>明示付款方式</td><td>字串</td></tr></table></details></td></tr>
+<tr><td>收據／雜項開銷<br><code>receipt</code></td><td>辨識收據資料，並依契約填寫扣繳相關欄位。<br><small>廠商資料可能在印章。扣繳稅額填 withholding_tax；tax_amount 僅讀明示營業稅。</small></td><td><details><summary>欄位契約（12 欄）</summary><table><tr><th>key</th><th>欄位</th><th>型別</th></tr><tr><td><code>voucher_id</code></td><td>單號／收據號</td><td>字串</td></tr>
+<tr><td><code>date</code></td><td>日期</td><td>日期</td></tr>
+<tr><td><code>receipt_type</code></td><td>收據類型（免用統一發票／一般收據／勞務報酬）</td><td>字串</td></tr>
+<tr><td><code>vendor</code></td><td>廠商／收款人</td><td>字串</td></tr>
+<tr><td><code>tax_id</code></td><td>統一編號</td><td>字串</td></tr>
+<tr><td><code>item_desc</code></td><td>品名／事由</td><td>字串</td></tr>
+<tr><td><code>subtotal</code></td><td>未稅</td><td>數字</td></tr>
+<tr><td><code>tax_amount</code></td><td>營業稅額</td><td>數字</td></tr>
+<tr><td><code>withholding_tax</code></td><td>扣繳稅額</td><td>數字</td></tr>
+<tr><td><code>total_amount</code></td><td>金額</td><td>數字</td></tr>
+<tr><td><code>payment_status</code></td><td>明示付款狀態</td><td>字串</td></tr>
+<tr><td><code>payment_method</code></td><td>明示付款方式</td><td>字串</td></tr></table></details></td></tr>
+<tr><td>稅款繳款書<br><code>tax_bill</code></td><td>辨識稅款繳款文件欄位。<br><small>多聯讀完整一聯；銷帳編號是識別碼，繳納期間不是填發日。</small></td><td><details><summary>欄位契約（16 欄）</summary><table><tr><th>key</th><th>欄位</th><th>型別</th></tr><tr><td><code>tax_agency</code></td><td>徵收機關</td><td>字串</td></tr>
+<tr><td><code>tax_code</code></td><td>稅目代碼</td><td>字串</td></tr>
+<tr><td><code>tax_type</code></td><td>稅目名稱</td><td>字串</td></tr>
+<tr><td><code>period</code></td><td>所屬年度／期別</td><td>字串</td></tr>
+<tr><td><code>payment_no</code></td><td>銷帳編號</td><td>字串</td></tr>
+<tr><td><code>taxpayer</code></td><td>納稅義務人／營利事業名稱</td><td>字串</td></tr>
+<tr><td><code>tax_id</code></td><td>統一編號</td><td>字串</td></tr>
+<tr><td><code>responsible_person</code></td><td>負責人</td><td>字串</td></tr>
+<tr><td><code>principal</code></td><td>本稅</td><td>數字</td></tr>
+<tr><td><code>surcharge</code></td><td>滯納金／加計利息</td><td>數字</td></tr>
+<tr><td><code>total_amount</code></td><td>應繳金額合計</td><td>數字</td></tr>
+<tr><td><code>pay_start</code></td><td>繳納期間起</td><td>日期</td></tr>
+<tr><td><code>due_date</code></td><td>繳納期限止</td><td>日期</td></tr>
+<tr><td><code>phone</code></td><td>納稅義務人電話</td><td>字串</td></tr>
+<tr><td><code>payment_status</code></td><td>明示付款狀態</td><td>字串</td></tr>
+<tr><td><code>payment_method</code></td><td>明示付款方式</td><td>字串</td></tr></table></details></td></tr>
+<tr><td rowspan="6">進出口</td><td>出口報單<br><code>export_declaration</code></td><td>辨識出口報單欄位。<br><small>依格位標題及編號定位；32至41格讀第一項貨物。</small></td><td><details><summary>欄位契約（49 欄）</summary><table><tr><th>key</th><th>欄位</th><th>型別</th></tr><tr><td><code>transport_mode</code></td><td>海空運別(1)</td><td>字串</td></tr>
+<tr><td><code>doc_category</code></td><td>報單類別(2)</td><td>字串</td></tr>
+<tr><td><code>declaration_no</code></td><td>報單號碼(3)</td><td>字串</td></tr>
+<tr><td><code>customs_clear_no</code></td><td>海關通關號碼(4)</td><td>字串</td></tr>
+<tr><td><code>ship_code</code></td><td>出口船機代碼(5)</td><td>字串</td></tr>
+<tr><td><code>voyage</code></td><td>船舶航次／船機班次(6)</td><td>字串</td></tr>
+<tr><td><code>date</code></td><td>報關日期(7)</td><td>日期</td></tr>
+<tr><td><code>loading_port</code></td><td>裝貨港名稱及代碼(8)</td><td>字串</td></tr>
+<tr><td><code>dest_country</code></td><td>目的地國家及代碼(9)</td><td>字串</td></tr>
+<tr><td><code>storage_code</code></td><td>卸存地點代碼(10)</td><td>字串</td></tr>
+<tr><td><code>master_awb</code></td><td>託運單主號(11)</td><td>字串</td></tr>
+<tr><td><code>house_awb</code></td><td>託運單分號(12)</td><td>字串</td></tr>
+<tr><td><code>refund_material_tax</code></td><td>申請沖退原料稅(13)</td><td>字串</td></tr>
+<tr><td><code>transport_method</code></td><td>運輸方式(14)</td><td>字串</td></tr>
+<tr><td><code>ship_name</code></td><td>出口船舶名稱(15)</td><td>字串</td></tr>
+<tr><td><code>invoice_amount</code></td><td>發票總金額(16)</td><td>數字</td></tr>
+<tr><td><code>freight</code></td><td>運費(17)</td><td>數字</td></tr>
+<tr><td><code>insurance</code></td><td>保險費(18)</td><td>數字</td></tr>
+<tr><td><code>add_fee</code></td><td>應加費用(19)</td><td>數字</td></tr>
+<tr><td><code>deduct_fee</code></td><td>應減費用(20)</td><td>數字</td></tr>
+<tr><td><code>total_fob_twd</code></td><td>總離岸價格新臺幣(21)</td><td>數字</td></tr>
+<tr><td><code>exporter</code></td><td>出口人名稱地址(22)</td><td>字串</td></tr>
+<tr><td><code>exporter_tax_id</code></td><td>出口人統一編號(23)</td><td>字串</td></tr>
+<tr><td><code>exporter_customs_no</code></td><td>出口人海關監管編號(24)</td><td>字串</td></tr>
+<tr><td><code>payment_method</code></td><td>繳納方式代碼(25)</td><td>字串</td></tr>
+<tr><td><code>buyer</code></td><td>買方名稱地址(26)</td><td>字串</td></tr>
+<tr><td><code>buyer_country</code></td><td>買方國家代碼(27)</td><td>字串</td></tr>
+<tr><td><code>buyer_tax_id</code></td><td>買方統一編號(28)</td><td>字串</td></tr>
+<tr><td><code>buyer_customs_no</code></td><td>買方海關監管編號(29)</td><td>字串</td></tr>
+<tr><td><code>price_term</code></td><td>單價條件代碼(30)</td><td>字串</td></tr>
+<tr><td><code>exchange_rate</code></td><td>匯率(31)</td><td>數字</td></tr>
+<tr><td><code>item_no</code></td><td>項次(32)</td><td>字串</td></tr>
+<tr><td><code>goods_desc</code></td><td>貨物名稱商標(牌名)及規格(33)</td><td>字串</td></tr>
+<tr><td><code>permit_no</code></td><td>輸出入許可文件號碼-項次(34)</td><td>字串</td></tr>
+<tr><td><code>hs_code</code></td><td>輸出入貨品分類號列／統計號別／檢查號碼(35)</td><td>字串</td></tr>
+<tr><td><code>unit_price</code></td><td>單價／幣別／金額(36)</td><td>字串</td></tr>
+<tr><td><code>net_weight</code></td><td>淨重公斤(37)</td><td>數字</td></tr>
+<tr><td><code>quantity</code></td><td>數量(單位)(38)</td><td>字串</td></tr>
+<tr><td><code>stat_use</code></td><td>統計用(39)</td><td>字串</td></tr>
+<tr><td><code>fob_value_twd</code></td><td>離岸價格FOB Value新臺幣(40)</td><td>數字</td></tr>
+<tr><td><code>stat_method</code></td><td>統計方式(41)</td><td>字串</td></tr>
+<tr><td><code>total_packages</code></td><td>總件數(單位)(42)</td><td>字串</td></tr>
+<tr><td><code>packing_desc</code></td><td>包裝說明(43)</td><td>字串</td></tr>
+<tr><td><code>gross_weight</code></td><td>總毛重公斤(44)</td><td>數字</td></tr>
+<tr><td><code>marks</code></td><td>標記及貨櫃號碼(45)</td><td>字串</td></tr>
+<tr><td><code>other_declared</code></td><td>其它申報事項(46)</td><td>字串</td></tr>
+<tr><td><code>broker</code></td><td>報關人／AEO編號(47)</td><td>字串</td></tr>
+<tr><td><code>specialist</code></td><td>專責人員(48)</td><td>字串</td></tr>
+<tr><td><code>payment_status</code></td><td>明示付款狀態</td><td>字串</td></tr></table></details></td></tr>
+<tr><td>進口報單<br><code>import_declaration</code></td><td>辨識進口報單欄位與貨物明細。<br><small>納稅義務人是進口商，賣方是國外出口商；items.amount 讀完稅價格新臺幣。</small></td><td><details><summary>欄位契約（35 欄）</summary><table><tr><th>key</th><th>欄位</th><th>型別</th></tr><tr><td><code>doc_category</code></td><td>報單類別</td><td>字串</td></tr>
+<tr><td><code>declaration_no</code></td><td>報單號碼</td><td>字串</td></tr>
+<tr><td><code>customs_clear_no</code></td><td>海關通關號碼</td><td>字串</td></tr>
+<tr><td><code>date</code></td><td>報關日期</td><td>日期</td></tr>
+<tr><td><code>import_date</code></td><td>進口日期</td><td>日期</td></tr>
+<tr><td><code>ship_name</code></td><td>進口船（機）名及呼號（班次）</td><td>字串</td></tr>
+<tr><td><code>bl_no</code></td><td>提單號碼</td><td>字串</td></tr>
+<tr><td><code>loading_port</code></td><td>裝貨港（代碼及名稱）</td><td>字串</td></tr>
+<tr><td><code>origin_port</code></td><td>起運口岸（代碼及名稱）</td><td>字串</td></tr>
+<tr><td><code>transport_method</code></td><td>運輸方式</td><td>字串</td></tr>
+<tr><td><code>taxpayer</code></td><td>納稅義務人名稱地址</td><td>字串</td></tr>
+<tr><td><code>taxpayer_tax_id</code></td><td>納稅義務人統一編號</td><td>字串</td></tr>
+<tr><td><code>customs_supervision</code></td><td>海關監管編號</td><td>字串</td></tr>
+<tr><td><code>seller</code></td><td>賣方名稱地址</td><td>字串</td></tr>
+<tr><td><code>seller_country</code></td><td>賣方國家代碼</td><td>字串</td></tr>
+<tr><td><code>tax_method</code></td><td>納稅辦法</td><td>字串</td></tr>
+<tr><td><code>permit_no</code></td><td>輸入許可證號碼</td><td>字串</td></tr>
+<tr><td><code>price_term</code></td><td>條件（起岸價格條件）</td><td>字串</td></tr>
+<tr><td><code>currency</code></td><td>幣別</td><td>字串</td></tr>
+<tr><td><code>exchange_rate</code></td><td>匯率</td><td>數字</td></tr>
+<tr><td><code>invoice_amount</code></td><td>發票金額</td><td>數字</td></tr>
+<tr><td><code>freight</code></td><td>運費</td><td>數字</td></tr>
+<tr><td><code>insurance</code></td><td>保險費</td><td>數字</td></tr>
+<tr><td><code>total_cif_twd</code></td><td>完稅價格總計新臺幣</td><td>數字</td></tr>
+<tr><td><code>duty</code></td><td>進口稅</td><td>數字</td></tr>
+<tr><td><code>business_tax</code></td><td>營業稅</td><td>數字</td></tr>
+<tr><td><code>trade_fee</code></td><td>推廣貿易服務費</td><td>數字</td></tr>
+<tr><td><code>commodity_tax</code></td><td>貨物稅</td><td>數字</td></tr>
+<tr><td><code>total_tax</code></td><td>稅費合計</td><td>數字</td></tr>
+<tr><td><code>gross_weight</code></td><td>總毛重公斤</td><td>數字</td></tr>
+<tr><td><code>total_packages</code></td><td>總件數及單位</td><td>字串</td></tr>
+<tr><td><code>broker</code></td><td>報關人／AEO編號</td><td>字串</td></tr>
+<tr><td><code>specialist</code></td><td>專責人員</td><td>字串</td></tr>
+<tr><td><code>payment_status</code></td><td>明示付款狀態</td><td>字串</td></tr>
+<tr><td><code>payment_method</code></td><td>明示付款方式</td><td>字串</td></tr></table></details></td></tr>
+<tr><td>海關進口貨物稅費繳納證明<br><code>customs_tax</code></td><td>辨識進口貨物稅費繳納文件。<br><small>多聯內容相同時讀完整一聯，不跨聯混填；營業稅稅基不是營業稅。</small></td><td><details><summary>欄位契約（20 欄）</summary><table><tr><th>key</th><th>欄位</th><th>型別</th></tr><tr><td><code>tax_bill_no</code></td><td>稅單號碼</td><td>字串</td></tr>
+<tr><td><code>taxpayer</code></td><td>納稅義務人</td><td>字串</td></tr>
+<tr><td><code>tax_id</code></td><td>統一編號</td><td>字串</td></tr>
+<tr><td><code>import_date</code></td><td>貨物進口日期</td><td>日期</td></tr>
+<tr><td><code>ship_name</code></td><td>船（機）名及呼號（班次）</td><td>字串</td></tr>
+<tr><td><code>broker_box</code></td><td>報關行箱號</td><td>字串</td></tr>
+<tr><td><code>bl_no</code></td><td>提裝貨單號</td><td>字串</td></tr>
+<tr><td><code>declaration_no</code></td><td>報單號碼</td><td>字串</td></tr>
+<tr><td><code>goods_no</code></td><td>貨名／稅則號列</td><td>字串</td></tr>
+<tr><td><code>qty</code></td><td>件數</td><td>字串</td></tr>
+<tr><td><code>courier</code></td><td>快遞業者／列印者代號</td><td>字串</td></tr>
+<tr><td><code>payment_date</code></td><td>填發（繳款）日期</td><td>日期</td></tr>
+<tr><td><code>duty</code></td><td>進口稅</td><td>數字</td></tr>
+<tr><td><code>trade_fee</code></td><td>推廣貿易服務費</td><td>數字</td></tr>
+<tr><td><code>business_tax</code></td><td>營業稅</td><td>數字</td></tr>
+<tr><td><code>total_amount</code></td><td>稅費合計</td><td>數字</td></tr>
+<tr><td><code>business_tax_base</code></td><td>營業稅稅基</td><td>數字</td></tr>
+<tr><td><code>issuer</code></td><td>核發機關</td><td>字串</td></tr>
+<tr><td><code>payment_status</code></td><td>明示付款狀態</td><td>字串</td></tr>
+<tr><td><code>payment_method</code></td><td>明示付款方式</td><td>字串</td></tr></table></details></td></tr>
+<tr><td>報關行收費通知單<br><code>broker_note</code></td><td>辨識報關服務費用與明細。<br><small>代墊稅費與報關勞務費分開；預收費、應收退金額不是總計。</small></td><td><details><summary>欄位契約（22 欄）</summary><table><tr><th>key</th><th>欄位</th><th>型別</th></tr><tr><td><code>doc_no</code></td><td>單號</td><td>字串</td></tr>
+<tr><td><code>date</code></td><td>日期</td><td>日期</td></tr>
+<tr><td><code>broker</code></td><td>報關行名稱</td><td>字串</td></tr>
+<tr><td><code>client</code></td><td>委託人／客戶</td><td>字串</td></tr>
+<tr><td><code>declaration_no</code></td><td>報單號碼</td><td>字串</td></tr>
+<tr><td><code>bl_no</code></td><td>B/L S/O NO</td><td>字串</td></tr>
+<tr><td><code>customs_date</code></td><td>報關日期</td><td>日期</td></tr>
+<tr><td><code>vessel</code></td><td>船名</td><td>字串</td></tr>
+<tr><td><code>port</code></td><td>進出口岸</td><td>字串</td></tr>
+<tr><td><code>goods_name</code></td><td>貨名</td><td>字串</td></tr>
+<tr><td><code>qty</code></td><td>件數</td><td>字串</td></tr>
+<tr><td><code>customs_duty</code></td><td>關稅／滯報費</td><td>數字</td></tr>
+<tr><td><code>broker_fee</code></td><td>報關手續費</td><td>數字</td></tr>
+<tr><td><code>edi_fee</code></td><td>海關鍵輸費</td><td>數字</td></tr>
+<tr><td><code>subtotal</code></td><td>費用合計</td><td>數字</td></tr>
+<tr><td><code>tax</code></td><td>稅金</td><td>數字</td></tr>
+<tr><td><code>total_amount</code></td><td>總計</td><td>數字</td></tr>
+<tr><td><code>prepaid</code></td><td>預收費</td><td>數字</td></tr>
+<tr><td><code>balance</code></td><td>應收（退）金額</td><td>數字</td></tr>
+<tr><td><code>payment_status</code></td><td>明示付款狀態</td><td>字串</td></tr>
+<tr><td><code>payment_method</code></td><td>明示付款方式</td><td>字串</td></tr>
+<tr><td><code>direction</code></td><td>明示進出口別</td><td>字串</td></tr></table></details></td></tr>
+<tr><td>食品輸入許可通知<br><code>fda_import</code></td><td>辨識食品及相關產品輸入文件。<br><small>applicant 是報驗進口商，manufacturer 是生產廠；許可通知不是稅費繳款證明。</small></td><td><details><summary>欄位契約（20 欄）</summary><table><tr><th>key</th><th>欄位</th><th>型別</th></tr><tr><td><code>permit_no</code></td><td>申請書號碼</td><td>字串</td></tr>
+<tr><td><code>fda_no</code></td><td>FDA中字號</td><td>字串</td></tr>
+<tr><td><code>import_date</code></td><td>進口日期</td><td>日期</td></tr>
+<tr><td><code>applicant</code></td><td>報驗義務人</td><td>字串</td></tr>
+<tr><td><code>applicant_tax_id</code></td><td>報驗義務人統編</td><td>字串</td></tr>
+<tr><td><code>goods_name</code></td><td>貨物名稱（品名）</td><td>字串</td></tr>
+<tr><td><code>ccc_code</code></td><td>貨品分類號列（C.C.C.Code）</td><td>字串</td></tr>
+<tr><td><code>declaration_no</code></td><td>報單號碼及項次</td><td>字串</td></tr>
+<tr><td><code>manufactured_date</code></td><td>製造日期</td><td>日期</td></tr>
+<tr><td><code>expiration_date</code></td><td>有效日期</td><td>日期</td></tr>
+<tr><td><code>trademark</code></td><td>商標（牌名）</td><td>字串</td></tr>
+<tr><td><code>manufacturer</code></td><td>製造廠名稱</td><td>字串</td></tr>
+<tr><td><code>spec</code></td><td>規格</td><td>字串</td></tr>
+<tr><td><code>lot_no</code></td><td>製造批號</td><td>字串</td></tr>
+<tr><td><code>origin_country</code></td><td>生產國別</td><td>字串</td></tr>
+<tr><td><code>quantity</code></td><td>數量</td><td>字串</td></tr>
+<tr><td><code>net_weight</code></td><td>淨重</td><td>字串</td></tr>
+<tr><td><code>remark</code></td><td>備註</td><td>字串</td></tr>
+<tr><td><code>payment_status</code></td><td>明示付款狀態</td><td>字串</td></tr>
+<tr><td><code>payment_method</code></td><td>明示付款方式</td><td>字串</td></tr></table></details></td></tr>
+<tr><td>進出口報單（未分進出口）<br><code>declaration</code></td><td>辨識未區分進出口的報單欄位。<br><small>direction 只依文件明示的進口或出口填入。</small></td><td><details><summary>欄位契約（11 欄）</summary><table><tr><th>key</th><th>欄位</th><th>型別</th></tr><tr><td><code>declaration_no</code></td><td>報單號碼</td><td>字串</td></tr>
+<tr><td><code>doc_category</code></td><td>報單類別</td><td>字串</td></tr>
+<tr><td><code>date</code></td><td>報關日期</td><td>日期</td></tr>
+<tr><td><code>direction</code></td><td>進出口別</td><td>字串</td></tr>
+<tr><td><code>trader</code></td><td>出口人／納稅義務人</td><td>字串</td></tr>
+<tr><td><code>tax_id</code></td><td>統一編號</td><td>字串</td></tr>
+<tr><td><code>counterparty</code></td><td>買方／賣方</td><td>字串</td></tr>
+<tr><td><code>total_amount</code></td><td>總離岸／完稅價格新臺幣</td><td>數字</td></tr>
+<tr><td><code>currency</code></td><td>幣別</td><td>字串</td></tr>
+<tr><td><code>payment_status</code></td><td>明示付款狀態</td><td>字串</td></tr>
+<tr><td><code>payment_method</code></td><td>明示付款方式</td><td>字串</td></tr></table></details></td></tr>
+<tr><td rowspan="2">金流</td><td>支票<br><code>cheque</code></td><td>辨識支票或本票欄位。<br><small>只讀支票區域；出票人與受款人不同。amount_words 抄錄票面大寫原文。</small></td><td><details><summary>欄位契約（11 欄）</summary><table><tr><th>key</th><th>欄位</th><th>型別</th></tr><tr><td><code>cheque_no</code></td><td>票號</td><td>字串</td></tr>
+<tr><td><code>issue_date</code></td><td>發票日</td><td>日期</td></tr>
+<tr><td><code>due_date</code></td><td>到期（票載）日</td><td>日期</td></tr>
+<tr><td><code>drawer</code></td><td>發票人／出票人</td><td>字串</td></tr>
+<tr><td><code>payer_bank</code></td><td>付款銀行</td><td>字串</td></tr>
+<tr><td><code>payee</code></td><td>受款人／抬頭</td><td>字串</td></tr>
+<tr><td><code>account_no</code></td><td>帳號</td><td>字串</td></tr>
+<tr><td><code>total_amount</code></td><td>金額</td><td>數字</td></tr>
+<tr><td><code>amount_words</code></td><td>金額大寫</td><td>字串</td></tr>
+<tr><td><code>payment_status</code></td><td>明示付款狀態</td><td>字串</td></tr>
+<tr><td><code>payment_method</code></td><td>明示付款方式</td><td>字串</td></tr></table></details></td></tr>
+<tr><td>匯款單／銀行轉帳水單<br><code>remittance</code></td><td>辨識匯款或銀行轉帳欄位。<br><small>交易金額是本金，扣款金額及手續費分別讀取；付款人與收款人分開。</small></td><td><details><summary>欄位契約（15 欄）</summary><table><tr><th>key</th><th>欄位</th><th>型別</th></tr><tr><td><code>date</code></td><td>交易日期</td><td>日期</td></tr>
+<tr><td><code>ref_no</code></td><td>交易序號／建檔批號</td><td>字串</td></tr>
+<tr><td><code>remitter</code></td><td>付款人戶名</td><td>字串</td></tr>
+<tr><td><code>payer_account</code></td><td>付款帳號</td><td>字串</td></tr>
+<tr><td><code>remitter_bank</code></td><td>付款／匯出銀行</td><td>字串</td></tr>
+<tr><td><code>payment_method</code></td><td>付款方式</td><td>字串</td></tr>
+<tr><td><code>total_amount</code></td><td>交易（匯款）金額</td><td>數字</td></tr>
+<tr><td><code>debit_amount</code></td><td>扣款金額</td><td>數字</td></tr>
+<tr><td><code>fee</code></td><td>手續費</td><td>數字</td></tr>
+<tr><td><code>currency</code></td><td>幣別</td><td>字串</td></tr>
+<tr><td><code>payee</code></td><td>收款人戶名</td><td>字串</td></tr>
+<tr><td><code>payee_bank</code></td><td>收款銀行</td><td>字串</td></tr>
+<tr><td><code>account_no</code></td><td>收款帳號</td><td>字串</td></tr>
+<tr><td><code>payee_code</code></td><td>收款人代號</td><td>字串</td></tr>
+<tr><td><code>payment_status</code></td><td>明示付款狀態</td><td>字串</td></tr></table></details></td></tr>
+<tr><td rowspan="7">其他</td><td>水電費／公用事業帳單<br><code>utility</code></td><td>辨識公用事業帳單欄位。<br><small>總額讀獨立標示的繳費總金額；用戶號碼不是金額，預定扣繳不代表已付款。</small></td><td><details><summary>欄位契約（19 欄）</summary><table><tr><th>key</th><th>欄位</th><th>型別</th></tr><tr><td><code>provider</code></td><td>事業機構</td><td>字串</td></tr>
+<tr><td><code>period</code></td><td>計費（用水／用電）期間</td><td>字串</td></tr>
+<tr><td><code>customer_name</code></td><td>用戶名稱</td><td>字串</td></tr>
+<tr><td><code>customer_tax_id</code></td><td>用戶統一編號</td><td>字串</td></tr>
+<tr><td><code>account</code></td><td>水號／電號／用戶號</td><td>字串</td></tr>
+<tr><td><code>meter_no</code></td><td>水／電表表號</td><td>字串</td></tr>
+<tr><td><code>usage</code></td><td>使用度數</td><td>字串</td></tr>
+<tr><td><code>basic_fee</code></td><td>基本費</td><td>數字</td></tr>
+<tr><td><code>usage_fee</code></td><td>用水／用電費</td><td>數字</td></tr>
+<tr><td><code>subtotal</code></td><td>未稅小計</td><td>數字</td></tr>
+<tr><td><code>business_tax</code></td><td>營業稅</td><td>數字</td></tr>
+<tr><td><code>levy_fee</code></td><td>代徵／附加費用</td><td>數字</td></tr>
+<tr><td><code>total_amount</code></td><td>本期應繳合計</td><td>數字</td></tr>
+<tr><td><code>pay_start</code></td><td>繳費起始日</td><td>日期</td></tr>
+<tr><td><code>due_date</code></td><td>繳費期限</td><td>日期</td></tr>
+<tr><td><code>debit_date</code></td><td>預定扣繳日</td><td>日期</td></tr>
+<tr><td><code>pay_account</code></td><td>委託代繳帳號</td><td>字串</td></tr>
+<tr><td><code>payment_status</code></td><td>明示付款狀態</td><td>字串</td></tr>
+<tr><td><code>payment_method</code></td><td>明示付款方式</td><td>字串</td></tr></table></details></td></tr>
+<tr><td>訂購單／採購單<br><code>purchase_order</code></td><td>辨識訂購或採購文件欄位。<br><small>buyer 是採購方，supplier 是供應商；採購訂單不代表已付款。</small></td><td><details><summary>欄位契約（14 欄）</summary><table><tr><th>key</th><th>欄位</th><th>型別</th></tr><tr><td><code>po_no</code></td><td>採購單號</td><td>字串</td></tr>
+<tr><td><code>date</code></td><td>訂購日期</td><td>日期</td></tr>
+<tr><td><code>buyer</code></td><td>採購方（買方）</td><td>字串</td></tr>
+<tr><td><code>buyer_tax_id</code></td><td>買方統編</td><td>字串</td></tr>
+<tr><td><code>supplier</code></td><td>供應商（賣方）</td><td>字串</td></tr>
+<tr><td><code>supplier_code</code></td><td>供應商代碼</td><td>字串</td></tr>
+<tr><td><code>supplier_tax_id</code></td><td>供應商統編</td><td>字串</td></tr>
+<tr><td><code>contact</code></td><td>聯絡人</td><td>字串</td></tr>
+<tr><td><code>currency</code></td><td>幣別</td><td>字串</td></tr>
+<tr><td><code>payment_term</code></td><td>付款條件</td><td>字串</td></tr>
+<tr><td><code>delivery_date</code></td><td>交貨／需求日期</td><td>日期</td></tr>
+<tr><td><code>total_amount</code></td><td>總金額</td><td>數字</td></tr>
+<tr><td><code>payment_status</code></td><td>明示付款狀態</td><td>字串</td></tr>
+<tr><td><code>payment_method</code></td><td>明示付款方式</td><td>字串</td></tr></table></details></td></tr>
+<tr><td>對帳單／應收帳款明細表<br><code>statement</code></td><td>辨識對帳單與帳款明細欄位。<br><small>表列發票號碼是參照號，填 ref_invoice_no。issuer 是開立方，customer 是客戶。</small></td><td><details><summary>欄位契約（16 欄）</summary><table><tr><th>key</th><th>欄位</th><th>型別</th></tr><tr><td><code>statement_no</code></td><td>對帳單號／單號</td><td>字串</td></tr>
+<tr><td><code>date</code></td><td>日期</td><td>日期</td></tr>
+<tr><td><code>period</code></td><td>交易日區間／結帳期間</td><td>字串</td></tr>
+<tr><td><code>issuer</code></td><td>開立廠商（賣方／收款方）</td><td>字串</td></tr>
+<tr><td><code>issuer_tax_id</code></td><td>開立廠商統編</td><td>字串</td></tr>
+<tr><td><code>customer</code></td><td>客戶名稱（買方／付款方）</td><td>字串</td></tr>
+<tr><td><code>customer_tax_id</code></td><td>客戶統一編號</td><td>字串</td></tr>
+<tr><td><code>payment_term</code></td><td>付款方式／條件</td><td>字串</td></tr>
+<tr><td><code>ref_invoice_no</code></td><td>表列發票號碼（勾稽用，非本憑證號碼）</td><td>字串</td></tr>
+<tr><td><code>subtotal</code></td><td>銷貨合計額（未稅）</td><td>數字</td></tr>
+<tr><td><code>tax_amount</code></td><td>營業稅額</td><td>數字</td></tr>
+<tr><td><code>total_amount</code></td><td>應收（應付）帳款總額</td><td>數字</td></tr>
+<tr><td><code>bank_account</code></td><td>銀行資料（戶名／銀行／帳號）</td><td>字串</td></tr>
+<tr><td><code>remark</code></td><td>備註</td><td>字串</td></tr>
+<tr><td><code>payment_status</code></td><td>明示付款狀態</td><td>字串</td></tr>
+<tr><td><code>payment_method</code></td><td>明示付款方式</td><td>字串</td></tr></table></details></td></tr>
+<tr><td>會計傳票（記帳憑證）<br><code>journal_voucher</code></td><td>辨識傳票欄位與分錄列。<br><small>entries 照印出各列讀取；借貸依所在欄，單面傳票不補另一面；底列合計不是分錄。</small></td><td><details><summary>欄位契約（9 欄）</summary><table><tr><th>key</th><th>欄位</th><th>型別</th></tr><tr><td><code>voucher_kind</code></td><td>傳票單別（如 A911 轉帳傳票）</td><td>字串</td></tr>
+<tr><td><code>voucher_id</code></td><td>傳票單號</td><td>字串</td></tr>
+<tr><td><code>date</code></td><td>傳票日期</td><td>日期</td></tr>
+<tr><td><code>prepared_date</code></td><td>製表日期</td><td>日期</td></tr>
+<tr><td><code>company_name</code></td><td>公司名稱（表頭）</td><td>字串</td></tr>
+<tr><td><code>page_no</code></td><td>頁次（如 1/2）</td><td>字串</td></tr>
+<tr><td><code>remark</code></td><td>備註</td><td>字串</td></tr>
+<tr><td><code>debit_total</code></td><td>借方合計</td><td>數字</td></tr>
+<tr><td><code>credit_total</code></td><td>貸方合計</td><td>數字</td></tr></table></details></td></tr>
+<tr><td>帳單費用明細（附頁佐證）<br><code>bill_detail</code></td><td>辨識帳單明細附頁欄位。<br><small>只讀純費用明細附頁；載明繳費總額的繳費結果通知應分類為 utility。</small></td><td><details><summary>欄位契約（6 欄）</summary><table><tr><th>key</th><th>欄位</th><th>型別</th></tr><tr><td><code>provider</code></td><td>事業機構</td><td>字串</td></tr>
+<tr><td><code>customer_name</code></td><td>用戶名稱</td><td>字串</td></tr>
+<tr><td><code>account</code></td><td>用戶帳號／號碼</td><td>字串</td></tr>
+<tr><td><code>period</code></td><td>計費期間</td><td>字串</td></tr>
+<tr><td><code>page_no</code></td><td>頁次</td><td>字串</td></tr>
+<tr><td><code>total_amount</code></td><td>本頁應繳金額合計</td><td>數字</td></tr></table></details></td></tr>
+<tr><td>勞健保費繳款／繳費證明<br><code>social_insurance</code></td><td>辨識社會保險繳費文件欄位。<br><small>單位與個人負擔只有文件分列才讀取；各費用代號分列 items。</small></td><td><details><summary>欄位契約（14 欄）</summary><table><tr><th>key</th><th>欄位</th><th>型別</th></tr><tr><td><code>agency</code></td><td>主辦機關（勞保局／健保署）</td><td>字串</td></tr>
+<tr><td><code>insurance_type</code></td><td>保險別</td><td>字串</td></tr>
+<tr><td><code>unit_name</code></td><td>投保單位名稱</td><td>字串</td></tr>
+<tr><td><code>unit_no</code></td><td>投保單位代號</td><td>字串</td></tr>
+<tr><td><code>period</code></td><td>計費年月</td><td>字串</td></tr>
+<tr><td><code>payment_no</code></td><td>銷帳編號</td><td>字串</td></tr>
+<tr><td><code>payment_date</code></td><td>繳納日期</td><td>日期</td></tr>
+<tr><td><code>due_date</code></td><td>繳款期限</td><td>日期</td></tr>
+<tr><td><code>employer_share</code></td><td>單位負擔金額（如單據有列）</td><td>數字</td></tr>
+<tr><td><code>employee_share</code></td><td>個人負擔金額（如單據有列）</td><td>數字</td></tr>
+<tr><td><code>surcharge</code></td><td>滯納金</td><td>數字</td></tr>
+<tr><td><code>total_amount</code></td><td>應繳／已繳總金額</td><td>數字</td></tr>
+<tr><td><code>payment_status</code></td><td>明示付款狀態</td><td>字串</td></tr>
+<tr><td><code>payment_method</code></td><td>明示付款方式</td><td>字串</td></tr></table></details></td></tr>
+<tr><td>其他憑證<br><code>other</code></td><td>辨識未歸類文件的通用欄位。<br><small>—</small></td><td><details><summary>欄位契約（11 欄）</summary><table><tr><th>key</th><th>欄位</th><th>型別</th></tr><tr><td><code>voucher_id</code></td><td>單號</td><td>字串</td></tr>
+<tr><td><code>date</code></td><td>日期</td><td>日期</td></tr>
+<tr><td><code>seller_name</code></td><td>賣方／來源</td><td>字串</td></tr>
+<tr><td><code>seller_tax_id</code></td><td>賣方統編</td><td>字串</td></tr>
+<tr><td><code>buyer_name</code></td><td>買方／對象</td><td>字串</td></tr>
+<tr><td><code>buyer_tax_id</code></td><td>買方統編</td><td>字串</td></tr>
+<tr><td><code>subtotal</code></td><td>未稅</td><td>數字</td></tr>
+<tr><td><code>tax_amount</code></td><td>稅額</td><td>數字</td></tr>
+<tr><td><code>total_amount</code></td><td>總計</td><td>數字</td></tr>
+<tr><td><code>payment_status</code></td><td>明示付款狀態</td><td>字串</td></tr>
+<tr><td><code>payment_method</code></td><td>明示付款方式</td><td>字串</td></tr></table></details></td></tr>
     </table>
     <div class="callout note">
-      <div class="ct">💡 出框策略：為何密集表單不讓 VLM 出框</div>
-      進出口報單、稅單、報關行收費單等多欄多聯表單（<code>NO_VLM_BOX_TYPES</code>）的提示詞<strong>不要求 VLM 輸出 boxes</strong>——
-      密集版面下 VLM 常把 <code>[x,y,x,y]</code> 座標誤塞進欄位值。這些類型的框改由 OCR 行框精修取得，
-      對不上 OCR 的欄位<strong>寧可不給框</strong>（<code>keep_unmatched=False</code>）。
+      <div class="ct">欄位補充</div>
+      收據契約包含 <code>withholding_tax</code>；貨物明細支援 <code>hs_code</code> 與 <code>origin_country</code>。細節以契約列出的欄位和萃取模板為準。
     </div>
+    <p>舊收據稅額尚未確認語意時，來源記錄為 <code>semantic_role=unconfirmed_tax</code>；canonical 再次儲存不會把它當作共同營業稅。人工確認並移入 <code>withholding_tax</code> 後，未確認狀態解除。</p>
 
-    <h3>提示詞</h3>
-    <h4>① Router 分類提示詞（<code>doc_router.ROUTER_PROMPT</code>）</h4>
-    <p>類別清單由 <code>DOC_TYPES</code> 自動生成，新增類型即自動出現在選單。</p>
-    <div class="codeblock"><span class="lang">prompt</span><pre>你是單據分類器。判斷這張掃描件：
-1) 屬於下列哪一類（回代碼，如 cheque）
-2) 需『順時針』旋轉幾度才會正立（僅能是 0、90、180、270）
-只回 JSON：{"type":"代碼","rotate":0}，不要其他文字。
-以**標題**為準，不要只看到「發票號碼」「營業稅額」就判成發票：
-- 標題寫「應收帳款明細表／應付帳款明細表／對帳單／月結單」→ statement（這類表格內的發票號碼只是勾稽用，本身不是發票）
-- 標題寫「轉帳傳票／收入傳票／支出傳票」，表格有「會計科目・借方金額・貸方金額」欄→ journal_voucher（這是記帳憑證，不是發票收據）
-- bill_detail **只用於帳單的費用明細附頁**：標題明確寫「費用明細清單／費用明細」，內容是逐項費用的清單。
-  以下一律**不是** bill_detail，它們本身就是入帳依據：印有「統一發票／電子發票證明聯」（→ invoice）、「繳費結果通知／繳費通知」且載明繳費總金額（→ utility）、勞健保台電的「繳費證明／繳款單」（→ tax_bill 或 utility）。
-- 勞保局／健保署／勞退的保險費繳款單、投保單位繳費證明書 → social_insurance
-- 標題寫「訂購單／採購單」→ purchase_order；報關行的「收費通知單」→ broker_note
-- 真正的發票（invoice）標題為「統一發票」「電子發票證明聯」或收銀機發票格式
+    <h3>三個共用核心模板</h3>
+    <h4>① 路由模板（<code>ROUTE_TEMPLATE</code>）</h4>
+    <p>由類型清單建立分類提示；以下展示建構器產生的預設版本。</p>
+    <div class="codeblock"><span class="lang">prompt</span><pre>任務：判斷文件類型及正立方向，只輸出指定 JSON。
+以文件本身標題及版面判斷，不因引用發票號碼就分類為發票。未知類型填 other 並說明原因。
+對帳單用 statement；會計傳票用 journal_voucher；純費用附頁用 bill_detail。
+載明繳費總額的繳費通知用 utility；勞健保繳款用 social_insurance。
+進口、出口報單分開；報關行收費通知用 broker_note。
+圖片模式：已提供圖片；OCR 僅供校對。
+類型：invoice=統一發票／電子發票；cheque=支票；remittance=匯款單／銀行轉帳水單；customs_tax=海關進口貨物稅費繳納證明；export_declaration=出口報單；import_declaration=進口報單；broker_note=報關行收費通知單；declaration=進出口報單（未分進出口）；tax_bill=稅款繳款書；utility=水電費／公用事業帳單；receipt=收據／雜項開銷；statement=對帳單／應收帳款明細表；purchase_order=訂購單／採購單；fda_import=食品輸入許可通知；social_insurance=勞健保費繳款／繳費證明；bill_detail=帳單費用明細（附頁佐證）；journal_voucher=會計傳票（記帳憑證）；other=其他憑證
+rotate 為順時針 0、90、180、270。
+輸出：{"type":"other","rotate":0,"reason":"判斷依據或未知原因"}</pre></div>
+    <details><summary>ROUTE_TEMPLATE 原文</summary><div class="codeblock"><span class="lang">template</span><pre>任務：判斷文件類型及正立方向，只輸出指定 JSON。
+以文件本身標題及版面判斷，不因引用發票號碼就分類為發票。未知類型填 other 並說明原因。
+對帳單用 statement；會計傳票用 journal_voucher；純費用附頁用 bill_detail。
+載明繳費總額的繳費通知用 utility；勞健保繳款用 social_insurance。
+進口、出口報單分開；報關行收費通知用 broker_note。</pre></div></details>
 
-類別：
-- invoice：統一發票／電子發票
-- cheque：支票
-- remittance：匯款單／銀行轉帳水單
-- customs_tax：海關進口貨物稅費繳納證明
-- export_declaration：出口報單
-- import_declaration：進口報單
-- broker_note：報關行收費通知單
-- declaration：進出口報單（未分進出口）
-- tax_bill：稅款繳款書
-- utility：水電費／公用事業帳單
-- receipt：收據／雜項開銷
-- statement：對帳單／應收帳款明細表
-- purchase_order：訂購單／採購單
-- fda_import：食品輸入許可通知
-- social_insurance：勞健保費繳款／繳費證明
-- bill_detail：帳單費用明細（附頁佐證）
-- journal_voucher：會計傳票（記帳憑證）
-- other：其他憑證</pre></div>
+    <h4>② 萃取模板（<code>EXTRACT_TEMPLATE</code>）</h4>
+    <p>依所選類型契約產生欄位提示。以下展示預設影像模式下的發票範例。</p>
+    <div class="codeblock"><span class="lang">prompt</span><pre>任務：從文件證據擷取指定欄位，只依契約輸出 JSON。
+僅填可確認的原文或數值；未知填 null，不補造明細，不以其他欄位推算缺值。
+區分文件本身資料與引用資料；日期與金額可保留原文，格式及算術由程式處理。
+人工提示只協助定位，不是已確認證據；不得為使合計相等而改寫數字。
+圖片模式：已提供圖片；OCR 僅供校對。
+文件類型：統一發票／電子發票
+欄位：voucher_id=發票號碼(原文|null)；date=發票日期(原文|null)；invoice_type=發票格式（三聯式／二聯式／電子發票／收銀機）(原文|null)；tax_type=課稅別（應稅／零稅率／免稅）(原文|null)；seller_name=賣方名稱(原文|null)；seller_tax_id=賣方統編(原文|null)；buyer_name=買方名稱(原文|null)；buyer_tax_id=買方統編(原文|null)；subtotal=未稅銷售額(數/原文|null)；tax_amount=營業稅額(數/原文|null)；total_amount=總計（含稅）(數/原文|null)；amount_words=總計金額中文大寫（如有）(原文|null)；usage_note=買受人註記（進貨及費用／固定資產）(原文|null)；payment_status=明示付款狀態(原文|null)；payment_method=明示付款方式(原文|null)
+輸出範本（空明細不可補造）：{"fields":{"voucher_id":null,"date":null,"invoice_type":null,"tax_type":null,"seller_name":null,"seller_tax_id":null,"buyer_name":null,"buyer_tax_id":null,"subtotal":null,"tax_amount":null,"total_amount":null,"amount_words":null,"usage_note":null,"payment_status":null,"payment_method":null},"doc_type":"統一發票／電子發票","note":null,"confidence":null,"items":[],"boxes":{}}
+items 列契約：description=品名／事由(原文|null)；quantity=數量(數/原文|null)；unit_price=單價(數/原文|null)；amount=列金額(數/原文|null)
+日期取填發日，不是發票期別。賣方資料可能在專用章；amount_words 抄錄大寫原文。
+boxes 僅框可定位的指定欄位；[x1,y1,x2,y2] 為0至1000整數，未知省略。</pre></div>
+    <details><summary>EXTRACT_TEMPLATE 原文</summary><div class="codeblock"><span class="lang">template</span><pre>任務：從文件證據擷取指定欄位，只依契約輸出 JSON。
+僅填可確認的原文或數值；未知填 null，不補造明細，不以其他欄位推算缺值。
+區分文件本身資料與引用資料；日期與金額可保留原文，格式及算術由程式處理。
+人工提示只協助定位，不是已確認證據；不得為使合計相等而改寫數字。</pre></div></details>
 
-    <h4>② 專屬萃取提示詞（<code>doc_types.build_extract_prompt(type_key)</code>）</h4>
-    <p>依該類型的欄位契約自動生成，非逐類手寫。以下為 <code>invoice</code> 的實際輸出：</p>
-    <div class="codeblock"><span class="lang">prompt</span><pre>你是專業會計憑證辨識助手。這是一張「統一發票／電子發票」。以下提供原圖與 OCR 文字（供校對，數字以圖為準）。
-請萃取此類單據的專屬欄位並僅以 JSON 回覆（不要多餘文字）：
-{
-  "doc_type": "統一發票／電子發票",
-  "fields": { voucher_id（發票號碼）、date（發票日期）、invoice_type（發票格式（三聯式／二聯式／電子發票／收銀機））、tax_type（課稅別（應稅／零稅率／免稅））、seller_name（賣方名稱）、seller_tax_id（賣方統編）、buyer_name（買方名稱）、buyer_tax_id（買方統編）、subtotal（未稅銷售額）、tax_amount（營業稅額）、total_amount（總計（含稅））、amount_words（總計金額中文大寫（如有））、usage_note（買受人註記（進貨及費用／固定資產）） },
-  "items": [{"description": "品名", "quantity": 0, "unit_price": 0, "amount": 0}],
-  "note": "摘要／備註",
-  "confidence": "high|medium|low",
-  "boxes": { "voucher_id": [x1,y1,x2,y2], "date": [x1,y1,x2,y2], "invoice_type": [x1,y1,x2,y2], "tax_type": [x1,y1,x2,y2], "seller_name": [x1,y1,x2,y2], "seller_tax_id": [x1,y1,x2,y2], "buyer_name": [x1,y1,x2,y2], "buyer_tax_id": [x1,y1,x2,y2], "subtotal": [x1,y1,x2,y2], "tax_amount": [x1,y1,x2,y2], "total_amount": [x1,y1,x2,y2], "amount_words": [x1,y1,x2,y2], "usage_note": [x1,y1,x2,y2] }
-}
-規則：
-- 中文一律輸出**繁體字**（台灣單據），不得輸出簡體字；照單據原文抄錄，不要改寫用詞。
-- 日期一律 YYYY-MM-DD。民國轉西元請用公式 **西元年 ＝ 民國年 ＋ 1911**
-  （民國114年→2025、民國115年→2026；**不是加 1900**）。單據上多處日期時，
-  以「中華民國○年○月○日」的填發日欄為主，表頭的「○年○、○月份」是發票期別不是日期。
-- 金額純數字，不要 $、逗號或文字。**不可寫算式或計算過程**——
-  錯誤範例：`"usage_fee": 2161 + 952 = 3113`、`"total": 1,234.00`；
-  正確寫法：`"usage_fee": 3113`、`"total": 1234`。需要相加時請自行算完只寫結果。
-- boxes 為各欄位在影像上的邊界框，座標正規化 0~1000 整數（左上為原點）；找不到的欄位省略該鍵。
-- **單據上有多個合計時，total_amount 取涵蓋全部明細項目的那一個**。
-  常見陷阱：另有「不含○○」「部分小計」之類的局部合計（如保費收據的
-  「總保險費 NT$5,653（不含強制險）」與「總保費金額 NT$6,752」，後者才是總額）。
-  請用各明細項目加總驗證：加總等於哪一個合計，就取哪一個。
-- 無資料的欄位留空字串或 0。
-- 欄位標題後括號內的數字是「表單欄位編號」，僅供你定位對應格位；**絕對不要把編號或座標當作欄位值輸出**。
-- 每個 fields 的值必須是單一字串或數字，**不可輸出陣列或 [x,y,x,y] 之類座標**；金額為純數字。
-- 請盡量擷取所有列出的欄位；即使版面密集，也逐格對照標題與編號填入。
-- 本表單為台灣統一發票（三聯式／二聯式／電子發票證明聯／收銀機發票）。統一編號為 8 位純數字；電話號碼（含 - 或括號、位數非 8）不是統編，切勿填入統編欄，寧可留空。課稅別看勾選（✓）填『應稅』『零稅率』或『免稅』其一。營業稅額通常＝未稅銷售額×5%，仍以圖為準。買方多為仲彬股份有限公司(統編23051677)、中意企業股份有限公司(31182666)、天干；賣方為開立發票之廠商。賣方統編常蓋在『統一發票專用章』內——印章顏色可能為紅、藍、黑或紫，通常位於發票下方或右側，章內含賣方公司名、8 位統一編號與負責人；請務必從印章內讀出賣方統編填入 seller_tax_id。三聯式買受人註記欄若勾『固定資產』填『固定資產』，否則填『進貨及費用』。**金額自我校驗（手寫三聯式尤其重要）**：① 手寫發票下方多有『總計新台幣（中文大寫）』，請讀入 amount_words；大寫字（壹貳參肆伍陸柒捌玖拾佰仟萬）比手寫阿拉伯數字好辨認，**大寫與阿拉伯數字不一致時，以大寫為準**回填 total_amount。② 應稅發票應滿足『未稅銷售額 ＋ 營業稅額 ＝ 總計』；若三個數字兜不攏，請回到圖上重新核對（別直接輸出矛盾的數字）。③ 欄位在單據上空白就留空，**不要用其他欄位回推或編造**（金額欄尤其嚴格：寧可留空給人工填，也不要給錯的數字）。</pre></div>
-    <p>密集表單（如 <code>export_declaration</code>）少掉 <code>boxes</code> 鍵與對應規則，其餘結構相同；
-    每個類型的最後一段 <code>extra</code> 即該 agent 的專屬領域知識（三聯取一、民國年、印章位置、含稅價規則等）。</p>
-
-    <h4>③ 印章聚焦補讀（<code>pipeline._read_seal_taxid</code>）</h4>
-    <p>僅 <code>invoice</code>／<code>receipt</code> 且賣方統編漏抓時才觸發的第二次 VLM 呼叫——不裁切、不靠顏色，
-    以單一目的提示讓模型專注於印章。</p>
-    <div class="codeblock"><span class="lang">prompt</span><pre>這是一張台灣統一發票。請只做一件事：找出『統一發票專用章』（印章顏色可能是紅、藍、黑或紫，通常蓋在發票下方或右側），讀出章內的賣方公司名稱與 8 位統一編號。只回 JSON：{"seller_name":"","seller_tax_id":""}；統一編號必須是 8 位純數字（電話不算），讀不到就留空字串。</pre></div>
-
-    <h4>④ 科目分類提示詞（<code>classify.CLASSIFY_PROMPT</code>）</h4>
-    <div class="codeblock"><span class="lang">prompt</span><pre>你是台灣會計師。依據下列憑證資訊，產生借貸分錄（雙式簿記）。
-
-規則：
-- **每一筆的 amount 必須填入實際金額**（取自憑證的未稅／稅額／總計），不得留 0。
-- 一筆分錄只填借方或只填貸方，另一側留空字串。
-- **借方費用科目要選最貼切的那一個**：科目表裡有「運費」就不要用「其他費用」、
-  有「保險費」就不要用「稅捐」。只有在科目表中確實找不到對應科目時，
-  才使用「其他費用」「雜項購置」這類概括科目。
-- **貸方看是否已付款**：憑證顯示已由銀行扣繳／已付款 → 用「銀行存款」；
-  以現金支付 → 用「現金」；尚未付款的**費用**（水電、運費、勞務等）→ 用「應付費用」；
-  尚未付款的**進貨／商品**才用「應付帳款」。兩者不同，勿一律填應付帳款。
-- 一張憑證含多種性質的費用時（如影印機月租＋碳粉耗材），**分別列為不同科目**，
-  不要合併成一筆。
-- 含營業稅時，進項／銷項稅額**獨立列一筆**（金額＝稅額），費用或收入用未稅金額。
-- **憑證上沒有稅額就不要生出進項稅額**。保險費（商業保險、勞保、健保、勞退）、
-  規費、稅捐、薪資、國外勞務等屬免稅或不得扣抵，這類憑證只有一個總額，
-  借方直接用該總額，不可自行拆成「未稅＋稅額」。
-- 勞健保費繳款單：借方用「保險費」全額。單位負擔與員工自付的拆分需對照薪資資料，
-  **繳費證明上查不到就不要拆**，於摘要註明「單位／個人負擔待人工分攤」。
-- 借方金額合計必須等於貸方金額合計。
-- 摘要寫憑證上的品名／事由，不要寫「摘要」這類佔位字。
-
-範例（進貨含稅 2,830：未稅 2,695、稅額 135）：
-{"entries":[
- {"description":"倉租及理貨費","amount":2695,"debit_account":"6020","debit_account_name":"租金支出","credit_account":"","credit_account_name":""},
- {"description":"進項稅額","amount":135,"debit_account":"1290","debit_account_name":"進項稅額","credit_account":"","credit_account_name":""},
- {"description":"應付詮瑞福物流","amount":2830,"debit_account":"","debit_account_name":"","credit_account":"2130","credit_account_name":"應付帳款"}
-]}
-
-僅回 JSON，不要多餘文字。</pre></div>
-    <p>進口報單走專用分支（<code>importdecl.IMPORT_CLASSIFY_PROMPT</code>），因其無一般發票的買賣方統編、且稅費結構不同：</p>
-    <div class="codeblock"><span class="lang">prompt</span><pre>你是台灣會計師，處理「進口報單／進口關稅」之會計分錄（雙式簿記）。
-請依本客戶的既有記帳慣例，**不要**改用其他教科書作法：
-
-- **進口稅費一律借記「1210 預付費用」（資產科目），不是進貨成本、不是營業費用**。
-  包含：進口稅（關稅）、推廣貿易服務費、船公司費／吊櫃費、FDA 或商檢等規費。
-  每一項費用各開一筆分錄（不要合併成一筆），摘要註明是哪一項費用。
-  （客戶 ERP 原以「1254 預付進口款項」記帳，事務所科目表無此科目，故對映為 1210。）
-- **海關代徵之營業稅**單獨借記「1290 進項稅額」。
-- **銀行匯費／手續費**借記「6230 其他費用」（事務所科目表無「手續費」科目）。
-- **最後必須有一筆貸方分錄**：借方各筆的合計，貸記實際付款的「1110 銀行存款」
-  （尚未付款則為「2130 應付帳款」）。缺了這筆借貸就不平衡，等於分錄不可用。
-- 進口報單無一般統一發票之買賣方統編，賣方視為國外供應商，不做統編核對。
-- **金額一律直接取自憑證欄位，不得自行拆分、加總或估算**（例：進口稅 200,028
-  就是一筆 200,028，不可拆成 150,000 + 50,428）。
-- 摘要請寫上報單號碼／貨名等可追溯資訊；憑證上沒有的資訊就省略，不要填
-  「[請填寫]」這類佔位字串。
-
-僅回 JSON（不要多餘文字）。每筆只填借方或只填貸方，另一側留空字串：
-{"entries":[
-  {"description":"進口稅 報單CUI...","amount":200028,"debit_account":"1210","debit_account_name":"預付費用","credit_account":"","credit_account_name":""},
-  {"description":"海關代徵營業稅","amount":60008,"debit_account":"1290","debit_account_name":"進項稅額","credit_account":"","credit_account_name":""},
-  {"description":"支付進口稅費","amount":260436,"debit_account":"","debit_account_name":"","credit_account":"1110","credit_account_name":"銀行存款"}
-]}
-借方合計必須等於貸方合計。</pre></div>
-
-    <h3>Declaration 欄位契約</h3>
-    <p>報單是本系統欄位最多、也最要求「依編號定位」的類型，故單獨列出完整契約。
-    共三個 agent：<code>export_declaration</code>（出口）、<code>import_declaration</code>（進口）、
-    <code>declaration</code>（無法判定進出口時的後備）。</p>
-
-    <h4>出口報單 <code>export_declaration</code>（官方 48 格，依真實文件核對）</h4>
-    <p>欄位標題旁的括號編號即報單上印出的格號；<code>direction</code> 固定「出口」，由類型直接判定不再問模型。
-    欄位 32~41 為貨物明細第一項；多項貨物仍以第一項填入。</p>
-    <table>
-      <tr><th>格號</th><th>key</th><th>欄位</th><th>型別</th></tr>
-      <tr><td>1</td><td><code>transport_mode</code></td><td>海空運別</td><td>字串</td></tr>
-      <tr><td>2</td><td><code>doc_category</code></td><td>報單類別</td><td>字串</td></tr>
-      <tr><td>3</td><td><code>declaration_no</code></td><td>報單號碼</td><td>字串</td></tr>
-      <tr><td>4</td><td><code>customs_clear_no</code></td><td>海關通關號碼</td><td>字串</td></tr>
-      <tr><td>5</td><td><code>ship_code</code></td><td>出口船機代碼</td><td>字串</td></tr>
-      <tr><td>6</td><td><code>voyage</code></td><td>船舶航次／船機班次</td><td>字串</td></tr>
-      <tr><td>7</td><td><code>date</code></td><td>報關日期</td><td>日期</td></tr>
-      <tr><td>8</td><td><code>loading_port</code></td><td>裝貨港名稱及代碼</td><td>字串</td></tr>
-      <tr><td>9</td><td><code>dest_country</code></td><td>目的地國家及代碼</td><td>字串</td></tr>
-      <tr><td>10</td><td><code>storage_code</code></td><td>卸存地點代碼</td><td>字串</td></tr>
-      <tr><td>11</td><td><code>master_awb</code></td><td>託運單主號</td><td>字串</td></tr>
-      <tr><td>12</td><td><code>house_awb</code></td><td>託運單分號</td><td>字串</td></tr>
-      <tr><td>13</td><td><code>refund_material_tax</code></td><td>申請沖退原料稅</td><td>字串</td></tr>
-      <tr><td>14</td><td><code>transport_method</code></td><td>運輸方式</td><td>字串</td></tr>
-      <tr><td>15</td><td><code>ship_name</code></td><td>出口船舶名稱</td><td>字串</td></tr>
-      <tr><td>16</td><td><code>invoice_amount</code></td><td>發票總金額</td><td>數字</td></tr>
-      <tr><td>17</td><td><code>freight</code></td><td>運費</td><td>數字</td></tr>
-      <tr><td>18</td><td><code>insurance</code></td><td>保險費</td><td>數字</td></tr>
-      <tr><td>19</td><td><code>add_fee</code></td><td>應加費用</td><td>數字</td></tr>
-      <tr><td>20</td><td><code>deduct_fee</code></td><td>應減費用</td><td>數字</td></tr>
-      <tr><td>21</td><td><code>total_fob_twd</code></td><td>總離岸價格新臺幣</td><td>數字</td></tr>
-      <tr><td>22</td><td><code>exporter</code></td><td>出口人名稱地址</td><td>字串</td></tr>
-      <tr><td>23</td><td><code>exporter_tax_id</code></td><td>出口人統一編號</td><td>字串</td></tr>
-      <tr><td>24</td><td><code>exporter_customs_no</code></td><td>出口人海關監管編號</td><td>字串</td></tr>
-      <tr><td>25</td><td><code>payment_method</code></td><td>繳納方式代碼</td><td>字串</td></tr>
-      <tr><td>26</td><td><code>buyer</code></td><td>買方名稱地址</td><td>字串</td></tr>
-      <tr><td>27</td><td><code>buyer_country</code></td><td>買方國家代碼</td><td>字串</td></tr>
-      <tr><td>28</td><td><code>buyer_tax_id</code></td><td>買方統一編號</td><td>字串</td></tr>
-      <tr><td>29</td><td><code>buyer_customs_no</code></td><td>買方海關監管編號</td><td>字串</td></tr>
-      <tr><td>30</td><td><code>price_term</code></td><td>單價條件代碼</td><td>字串</td></tr>
-      <tr><td>31</td><td><code>exchange_rate</code></td><td>匯率</td><td>數字</td></tr>
-      <tr><td>32</td><td><code>item_no</code></td><td>項次</td><td>字串</td></tr>
-      <tr><td>33</td><td><code>goods_desc</code></td><td>貨物名稱商標(牌名)及規格</td><td>字串</td></tr>
-      <tr><td>34</td><td><code>permit_no</code></td><td>輸出入許可文件號碼-項次</td><td>字串</td></tr>
-      <tr><td>35</td><td><code>hs_code</code></td><td>輸出入貨品分類號列／統計號別／檢查號碼</td><td>字串</td></tr>
-      <tr><td>36</td><td><code>unit_price</code></td><td>單價／幣別／金額</td><td>字串</td></tr>
-      <tr><td>37</td><td><code>net_weight</code></td><td>淨重公斤</td><td>數字</td></tr>
-      <tr><td>38</td><td><code>quantity</code></td><td>數量(單位)</td><td>字串</td></tr>
-      <tr><td>39</td><td><code>stat_use</code></td><td>統計用</td><td>字串</td></tr>
-      <tr><td>40</td><td><code>fob_value_twd</code></td><td>離岸價格FOB Value新臺幣</td><td>數字</td></tr>
-      <tr><td>41</td><td><code>stat_method</code></td><td>統計方式</td><td>字串</td></tr>
-      <tr><td>42</td><td><code>total_packages</code></td><td>總件數(單位)</td><td>字串</td></tr>
-      <tr><td>43</td><td><code>packing_desc</code></td><td>包裝說明</td><td>字串</td></tr>
-      <tr><td>44</td><td><code>gross_weight</code></td><td>總毛重公斤</td><td>數字</td></tr>
-      <tr><td>45</td><td><code>marks</code></td><td>標記及貨櫃號碼</td><td>字串</td></tr>
-      <tr><td>46</td><td><code>other_declared</code></td><td>其它申報事項</td><td>字串</td></tr>
-      <tr><td>47</td><td><code>broker</code></td><td>報關人／AEO編號</td><td>字串</td></tr>
-      <tr><td>48</td><td><code>specialist</code></td><td>專責人員</td><td>字串</td></tr>
-    </table>
-
-    <h4>進口報單 <code>import_declaration</code>（33 欄 + items）</h4>
-    <p>本契約未逐一標號（真本編號待客戶提供正式文件核對），提示詞要求模型「以表單上實際印出的編號與標題為準」定位。
-    逐項貨物明細放入 <code>items</code>。</p>
-    <table>
-      <tr><th>key</th><th>欄位</th><th>型別</th></tr>
-      <tr><td><code>doc_category</code></td><td>報單類別</td><td>字串</td></tr>
-      <tr><td><code>declaration_no</code></td><td>報單號碼</td><td>字串</td></tr>
-      <tr><td><code>customs_clear_no</code></td><td>海關通關號碼</td><td>字串</td></tr>
-      <tr><td><code>date</code></td><td>報關日期</td><td>日期</td></tr>
-      <tr><td><code>import_date</code></td><td>進口日期</td><td>日期</td></tr>
-      <tr><td><code>ship_name</code></td><td>進口船（機）名及呼號（班次）</td><td>字串</td></tr>
-      <tr><td><code>bl_no</code></td><td>提單號碼</td><td>字串</td></tr>
-      <tr><td><code>loading_port</code></td><td>裝貨港（代碼及名稱）</td><td>字串</td></tr>
-      <tr><td><code>origin_port</code></td><td>起運口岸（代碼及名稱）</td><td>字串</td></tr>
-      <tr><td><code>transport_method</code></td><td>運輸方式</td><td>字串</td></tr>
-      <tr><td><code>taxpayer</code></td><td>納稅義務人名稱地址</td><td>字串</td></tr>
-      <tr><td><code>taxpayer_tax_id</code></td><td>納稅義務人統一編號</td><td>字串</td></tr>
-      <tr><td><code>customs_supervision</code></td><td>海關監管編號</td><td>字串</td></tr>
-      <tr><td><code>seller</code></td><td>賣方名稱地址</td><td>字串</td></tr>
-      <tr><td><code>seller_country</code></td><td>賣方國家代碼</td><td>字串</td></tr>
-      <tr><td><code>tax_method</code></td><td>納稅辦法</td><td>字串</td></tr>
-      <tr><td><code>permit_no</code></td><td>輸入許可證號碼</td><td>字串</td></tr>
-      <tr><td><code>price_term</code></td><td>條件（起岸價格條件）</td><td>字串</td></tr>
-      <tr><td><code>currency</code></td><td>幣別</td><td>字串</td></tr>
-      <tr><td><code>exchange_rate</code></td><td>匯率</td><td>數字</td></tr>
-      <tr><td><code>invoice_amount</code></td><td>發票金額</td><td>數字</td></tr>
-      <tr><td><code>freight</code></td><td>運費</td><td>數字</td></tr>
-      <tr><td><code>insurance</code></td><td>保險費</td><td>數字</td></tr>
-      <tr><td><code>total_cif_twd</code></td><td>完稅價格總計新臺幣</td><td>數字</td></tr>
-      <tr><td><code>duty</code></td><td>進口稅</td><td>數字</td></tr>
-      <tr><td><code>business_tax</code></td><td>營業稅</td><td>數字</td></tr>
-      <tr><td><code>trade_fee</code></td><td>推廣貿易服務費</td><td>數字</td></tr>
-      <tr><td><code>commodity_tax</code></td><td>貨物稅</td><td>數字</td></tr>
-      <tr><td><code>total_tax</code></td><td>稅費合計</td><td>數字</td></tr>
-      <tr><td><code>gross_weight</code></td><td>總毛重公斤</td><td>數字</td></tr>
-      <tr><td><code>total_packages</code></td><td>總件數及單位</td><td>字串</td></tr>
-      <tr><td><code>broker</code></td><td>報關人／AEO編號</td><td>字串</td></tr>
-      <tr><td><code>specialist</code></td><td>專責人員</td><td>字串</td></tr>
-    </table>
-    <div class="codeblock"><span class="lang">json</span><pre>"items": [{"description": "貨物名稱及規格", "hs_code": "貨品分類號列 C.C.C.Code",
-            "quantity": 0, "unit_price": 0, "amount": 0, "origin_country": "生產國別"}]</pre></div>
-
-    <h4>後備 <code>declaration</code>（未分進出口）</h4>
-    <table>
-      <tr><th>key</th><th>欄位</th><th>型別</th></tr>
-      <tr><td><code>declaration_no</code></td><td>報單號碼</td><td>字串</td></tr>
-      <tr><td><code>doc_category</code></td><td>報單類別</td><td>字串</td></tr>
-      <tr><td><code>date</code></td><td>報關日期</td><td>日期</td></tr>
-      <tr><td><code>direction</code></td><td>進出口別</td><td>字串</td></tr>
-      <tr><td><code>trader</code></td><td>出口人／納稅義務人</td><td>字串</td></tr>
-      <tr><td><code>tax_id</code></td><td>統一編號</td><td>字串</td></tr>
-      <tr><td><code>counterparty</code></td><td>買方／賣方</td><td>字串</td></tr>
-      <tr><td><code>total_amount</code></td><td>總離岸／完稅價格新臺幣</td><td>數字</td></tr>
-      <tr><td><code>currency</code></td><td>幣別</td><td>字串</td></tr>
-    </table>
-
-    <div class="callout warn">
-      <div class="ct">⚠️ 報單辨識的三個坑</div>
-      <ul>
-        <li><strong>編號不是值</strong>：欄位標題後括號內的數字是格號，提示詞明文禁止把編號或座標當欄位值輸出；
-        另有 <code>_clean_fields</code> 清洗陣列型髒值。</li>
-        <li><strong>條碼靠不住</strong>：海關報單條碼為 Code39，掃描解析度不足多半讀不出，報單主要靠專屬提示詞而非條碼。</li>
-        <li><strong>進口報單會被鎖定</strong>：<code>importdecl.is_import()</code> 判定後套用專用分錄規則，
-        且不做一般統編核對（賣方為國外供應商）。</li>
-      </ul>
-    </div>
+    <h4>③ 會計模板（<code>ACCOUNTING_TEMPLATE</code>）</h4>
+    <p>只對已確認為進口的文件套用進口規則；出口類型不套用。預設角色映射為：進口稅費→預付費用、海關營業稅→進項稅額、銀行手續費→其他費用。未付款進口／商品使用應付帳款，一般未付款費用使用應付費用；已付款須有付款方式，才能選銀行存款或現金。科目角色由當次公司的科目表解析，不固定寫入科目代碼。進口預設 <code>include_goods_values=false</code>、<code>posting_currency=TWD</code>；外幣發票與明細完整保留，但不將外幣貨款與臺幣稅費混合加總。</p>
+    <p>付款方式或收支方向不明時，提出候選分錄並明示假設；不能據此強制貸記銀行。會計輸出標記為 <code>proposed</code>、<code>candidate</code> 或 <code>skipped</code>。缺金額或科目屬候選；原始單面傳票再次分類會以 <code>status=skipped</code>、<code>reason=original_entries</code> 保留既有分錄，不生成另一側。其 <code>original_checks</code> 記錄 <code>complete</code>、<code>single_sided</code>、<code>observed_totals</code> 與 <code>printed_totals_match</code>；<code>balance_check</code> 僅表示借貸實際相等，單面完整不代表平衡。候選結果供人員檢視確認，不代表已核定。</p>
+    <p>辨識欄位可保留 <code>field_evidence</code> 與 <code>validation_warnings</code>；會計模型只接收已選取的現行證據，完整歷史仍保存。人工修改後會重算日期、金額、統編等目前警告，並保留原始來源與衝突診斷。分類結果記錄於 <code>classification_meta</code>，分錄證據路徑記錄於 <code>JournalEntry.evidence_paths</code>。日記帳列保留 null 金額與證據路徑，忽略舊 <code>bill_detail</code> 分錄列；前端與報表列印附上 escaped 來源、驗證及政策紀錄。舊瀏覽器重複儲存不覆蓋服務端 audit 與 stale 標記。</p>
+    <div class="codeblock"><span class="lang">prompt</span><pre>任務：依已確認資料、公司科目表與適用政策提出分錄，只輸出指定 JSON。
+不猜原始單據、不自創科目或金額；每列只填借或貸一側。
+amount 取提供的金額來源，evidence_paths 列出來源路徑；無金額填 null。
+缺科目代碼留空並列警告。資料不足仍可提出候選分錄，將假設列入 assumptions。
+分項費用分列；不自行拆未印出的稅額或付款資料。平衡與科目驗證由程式執行。</pre></div>
+    <p class="muted">模板原文：<code>app/core/prompts.py</code>；類型契約：<code>app/core/doc_types.py</code>。</p>
   </section>
 
-  <!-- ░░░ THIRD-PARTY ░░░ -->
+
+<!-- ░░░ THIRD-PARTY ░░░ -->
   <section class="doc" id="thirdparty">
     <h2><span class="ic">📦</span>第三方模組與授權</h2>
     <p class="lead">整個應用跑在 <strong>Python 3.12 conda 環境 <code>pdfscan312</code></strong>（<code>start_webui.bat</code> 已指向），因為 OCR 精修層 PaddlePaddle 尚無 3.13 輪檔。核心依賴本身相容 3.13，但那樣會失去 OCR。</p>
@@ -1030,7 +1099,7 @@ flowchart TB
       <li>
         <div class="date">2026-07-24</div>
         <div class="ttl">Router → 專屬 Agent 分流辨識 <span class="status done">已決</span></div>
-        <p>先由 <code>doc_router</code> 判斷單據種類（發票/支票/匯款單/報關海關/繳款書/水電費…），再交由該類型專屬提示詞與欄位契約（<code>doc_types</code>）辨識；審核欄位依類型動態呈現。影像以顏色框標示辨識到的欄位，與左側欄位色碼對照。</p>
+        <p>先由路由模板判斷單據種類，再由共用萃取模板搭配該類型欄位契約與 <code>type_hints</code> 辨識；審核欄位依類型動態呈現。影像以顏色框標示辨識到的欄位，與左側欄位色碼對照。</p>
       </li>
       <li>
         <div class="date">2026-07-23</div>
@@ -1133,7 +1202,7 @@ flowchart TB
     <table>
       <tr><th>本手冊章節</th><th>原始來源</th></tr>
       <tr><td>架構 / 模組 / API</td><td><code>app/</code>（main.py, core/, services/, db/, models/, static/）</td></tr>
-      <tr><td>辨識 Agent 一覽</td><td><code>app/core/doc_types.py</code>（DOC_TYPES／build_extract_prompt）、<code>doc_router.py</code>（ROUTER_PROMPT）、<code>pipeline.py</code>（後處理鏈／印章補讀）、<code>services/classify.py</code>、<code>services/importdecl.py</code>　※表格與提示詞由程式碼直接產生，勿手改</td></tr>
+      <tr><td>辨識模板與資料契約</td><td><code>app/core/prompts.py</code>（三個共用模板與建構器）、<code>app/core/doc_types.py</code>（18 種 DOC_TYPES）　※本章由程式碼產生，勿手改</td></tr>
       <tr><td>開發歷程</td><td>git log（Phase 1/2 commits）</td></tr>
       <tr><td>POC 歷史</td><td><code>archive/phase0_poc_flask/</code>、<code>docs/dev-notes/architecture.md</code></td></tr>
       <tr><td>測試集比對結果</td><td><code>docs/dev-notes/測試集比對結果.md</code>＋<code>eval-result.json</code>（由 <code>scripts/eval_dataset.py</code> 產生：憑證跑完整管線後與客戶傳票分錄比對）</td></tr>

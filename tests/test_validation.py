@@ -9,7 +9,7 @@ from unittest.mock import patch
 from PIL import Image
 
 from app import validation
-from app.core import model_factory, settings_store
+from app.core import model_factory, settings_store, prompts
 
 
 class _Response:
@@ -21,14 +21,15 @@ class _Chat:
         content = messages[0]["content"]
         text = content if isinstance(content, str) else "\n".join(
             part.get("text", "") for part in content if part.get("type") == "text")
-        if "單據分類器" in text:
+        if prompts.ROUTE_TEMPLATE in text:
             return _Response('{"type":"receipt","rotate":0}')
-        return _Response(json.dumps({
-            "doc_type": "收據", "fields": {"date": "2026-09-22", "seller_name": "測試商店",
-            "seller_tax_id": "12345678", "total_amount": 100},
-            "items": [{"description": "文具", "quantity": 1, "unit_price": 100, "amount": 100}],
-            "confidence": "high", "boxes": {"total_amount": [100, 700, 400, 800]}
-        }, ensure_ascii=False))
+        mode = "ocr_text" if "沒有圖片" in text else "image"
+        data = prompts.extraction_example("receipt", mode)
+        data["fields"].update(date="2026-09-22", vendor="測試商店", tax_id="12345678", total_amount=100)
+        data.update(items=[{"description": "文具", "quantity": 1, "unit_price": 100, "amount": 100}], confidence="high")
+        if mode == "image":
+            data["boxes"] = {"total_amount": [100, 700, 400, 800]}
+        return _Response(json.dumps(data, ensure_ascii=False))
 
 
 class _OCR:

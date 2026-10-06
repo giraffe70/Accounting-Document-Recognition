@@ -10,7 +10,7 @@
 
 
 def _f(key, label, kind="text"):
-    return {"key": key, "label": label, "kind": kind}
+    return {"key": key, "label": label, "kind": kind, "nullable": True}
 
 
 # 各類型：label（顯示名）、fields（欄位契約）、has_items（是否有明細列）
@@ -31,23 +31,6 @@ DOC_TYPES = {
             _f("amount_words", "總計金額中文大寫（如有）"),
             _f("usage_note", "買受人註記（進貨及費用／固定資產）"),
         ],
-        "extra": ("本表單為台灣統一發票（三聯式／二聯式／電子發票證明聯／收銀機發票）。"
-                  "統一編號為 8 位純數字；電話號碼（含 - 或括號、位數非 8）不是統編，切勿填入統編欄，寧可留空。"
-                  "課稅別看勾選（✓）填『應稅』『零稅率』或『免稅』其一。"
-                  "營業稅額通常＝未稅銷售額×5%，仍以圖為準。"
-                  "買方多為仲彬股份有限公司(統編23051677)、中意企業股份有限公司(31182666)、天干；"
-                  "賣方為開立發票之廠商。賣方統編常蓋在『統一發票專用章』內——印章顏色可能為"
-                  "紅、藍、黑或紫，通常位於發票下方或右側，章內含賣方公司名、8 位統一編號與負責人；"
-                  "請務必從印章內讀出賣方統編填入 seller_tax_id。"
-                  "三聯式買受人註記欄若勾『固定資產』填『固定資產』，否則填『進貨及費用』。"
-                  "**金額自我校驗（手寫三聯式尤其重要）**："
-                  "① 手寫發票下方多有『總計新台幣（中文大寫）』，請讀入 amount_words；"
-                  "大寫字（壹貳參肆伍陸柒捌玖拾佰仟萬）比手寫阿拉伯數字好辨認，"
-                  "**大寫與阿拉伯數字不一致時，以大寫為準**回填 total_amount。"
-                  "② 應稅發票應滿足『未稅銷售額 ＋ 營業稅額 ＝ 總計』；"
-                  "若三個數字兜不攏，請回到圖上重新核對（別直接輸出矛盾的數字）。"
-                  "③ 欄位在單據上空白就留空，**不要用其他欄位回推或編造**"
-                  "（金額欄尤其嚴格：寧可留空給人工填，也不要給錯的數字）。"),
     },
     "cheque": {
         "label": "支票",
@@ -60,10 +43,6 @@ DOC_TYPES = {
             _f("account_no", "帳號"), _f("total_amount", "金額", "number"),
             _f("amount_words", "金額大寫"),
         ],
-        "extra": ("本表單為支票／本票。金額以票面『國字大寫』為準轉為數字（如玖仟肆佰貳拾貳圓整＝9422）；"
-                  "票號多在右上角（如 TD3642163），下方 MICR 磁碼含票號/帳號/行庫代號。"
-                  "受款人（抬頭）為票據抬頭之公司；發票人為出票公司。日期為民國年，請轉西元。"
-                  "注意：掃描頁若同時含信封、傳票或其他單據，只擷取『支票本身』的內容，不要混入其他單據。"),
     },
     "remittance": {
         "label": "匯款單／銀行轉帳水單",
@@ -80,10 +59,6 @@ DOC_TYPES = {
             _f("payee_bank", "收款銀行"), _f("account_no", "收款帳號"),
             _f("payee_code", "收款人代號"),
         ],
-        "extra": ("本表單為銀行匯款單／網路銀行轉帳水單。交易（匯款）金額為本金；"
-                  "扣款金額＝交易金額＋手續費（手續費若『內扣』則兩者相同）。"
-                  "付款人多為本公司（仲彬／中意／天干），收款人為受款廠商。"
-                  "收款銀行常以代碼＋名稱呈現（如 007 第一銀行）。"),
     },
     "customs_tax": {
         "label": "海關進口貨物稅費繳納證明",
@@ -101,10 +76,6 @@ DOC_TYPES = {
             _f("business_tax", "營業稅", "number"), _f("total_amount", "稅費合計", "number"),
             _f("business_tax_base", "營業稅稅基", "number"), _f("issuer", "核發機關"),
         ],
-        "extra": ("本表單為「海關進口（快遞）貨物稅費繳納證明」。一頁常有三聯（第一聯收據聯／第二聯扣抵聯／"
-                  "第三聯副本），內容相同，取任一聯完整填入即可，不要跨聯混填。右側稅費項目表含進口稅、"
-                  "推廣貿易服務費、營業稅、稅費合計、營業稅稅基，請逐項擷取為純數字。"
-                  "報單號碼可與進口報單勾稽。日期為民國年（如 1150524＝民國115年5月24日）。"),
     },
     "export_declaration": {
         "label": "出口報單",
@@ -138,9 +109,6 @@ DOC_TYPES = {
             _f("marks", "標記及貨櫃號碼(45)"), _f("other_declared", "其它申報事項(46)"),
             _f("broker", "報關人／AEO編號(47)"), _f("specialist", "專責人員(48)"),
         ],
-        "extra": ("本表單為台灣海關「出口報單」，共 48 個欄位，標題旁均有括號編號，請「依編號」在對應格位定位擷取，避免張冠左右鄰格。"
-                  "direction 固定為「出口」。declaration_no 請含開頭英文別碼與完整編號（如 CX/ /15/696/D6341）。"
-                  "欄位 32~41 為貨物明細第一項的各欄；若有多項貨物，仍以第一項為主填入對應欄位。"),
     },
     "import_declaration": {
         "label": "進口報單",
@@ -165,17 +133,11 @@ DOC_TYPES = {
             _f("total_packages", "總件數及單位"), _f("broker", "報關人／AEO編號"),
             _f("specialist", "專責人員"),
         ],
-        "extra": ("本表單為台灣海關「進口報單」，各欄位標題旁有括號編號，請依標題文字定位並讀出其編號（本欄位契約未逐一標號，"
-                  "請以表單上實際印出的編號與標題為準）。direction 固定為「進口」。"
-                  "納稅義務人為進口商、賣方為國外出口商；完稅價格以 CIF 為基礎；"
-                  "稅費含進口稅、營業稅、推廣貿易服務費、貨物稅，請分別擷取並加總為稅費合計。"
-                  "逐項貨物明細放入 items：description=貨物名稱及規格、hs_code=貨品分類號列（C.C.C.Code）、"
-                  "quantity=數量、unit_price=單價、amount=完稅價格新臺幣、origin_country=生產國別。"),
     },
     "broker_note": {
         "label": "報關行收費通知單",
         "aliases": ["收費通知單", "報關行", "船務", "報關費用", "報關行對帳",
-                    "強泰", "customs broker"],
+                    "customs broker"],
         "has_items": True,
         "fields": [
             _f("doc_no", "單號"), _f("date", "日期", "date"),
@@ -190,13 +152,6 @@ DOC_TYPES = {
             _f("total_amount", "總計", "number"), _f("prepaid", "預收費", "number"),
             _f("balance", "應收（退）金額", "number"),
         ],
-        "extra": ("本表單為報關行開立的『收費通知單／費用明細』（進出口報關費用）。"
-                  "左右兩欄列出各項費別與金額（關稅/滯報費、服務車資、驗對證費、理貨工資、"
-                  "報關手續費、海關鍵輸費等），請把每一有金額的費別放入 items："
-                  "description=費別名稱、amount=金額。關稅/滯報費(customs_duty)為代墊稅費、"
-                  "報關手續費(broker_fee)為勞務費，請分別擷取為頂層欄位。"
-                  "下方有費用合計、稅金、總計、預收費、應收（退）金額。金額純數字、"
-                  "日期民國轉西元；報單號碼可與進口／出口報單勾稽；委託人多為本公司（仲彬／中意／天干）。"),
     },
     "declaration": {
         "label": "進出口報單（未分進出口）",
@@ -209,7 +164,6 @@ DOC_TYPES = {
             _f("counterparty", "買方／賣方"), _f("total_amount", "總離岸／完稅價格新臺幣", "number"),
             _f("currency", "幣別"),
         ],
-        "extra": "若能判斷是進口或出口報單，direction 請填「進口」或「出口」。",
     },
     "tax_bill": {
         "label": "稅款繳款書",
@@ -225,9 +179,6 @@ DOC_TYPES = {
             _f("pay_start", "繳納期間起", "date"), _f("due_date", "繳納期限止", "date"),
             _f("phone", "納稅義務人電話"),
         ],
-        "extra": ("本表單為稅款繳款書（如營利事業所得稅結算自行繳納、營業稅等）。稅目代碼如 357（國稅）。"
-                  "銷帳編號通常在底部條碼下方（如 A110016601654155011）。一頁常含三聯（收據／證明／收款機構留存），"
-                  "內容相同取其一。金額純數字，日期民國年轉西元（如 1150531→2026-05-31）。"),
     },
     "utility": {
         "label": "水電費／公用事業帳單",
@@ -245,19 +196,6 @@ DOC_TYPES = {
             _f("due_date", "繳費期限", "date"), _f("debit_date", "預定扣繳日", "date"),
             _f("pay_account", "委託代繳帳號"),
         ],
-        "extra": ("本表單為水費／電費等公用事業帳單（台灣自來水公司、台電等）。"
-                  "自 114 年 2 月份起，有統一編號之用戶水費項目為『含稅價』，另列示未稅小計與營業稅。"
-                  "本期應繳合計＝水（電）費項目小計＋代徵／附加費用小計。"
-                  "**total_amount 優先取帳單上獨立標示的「繳費總金額」「本期應繳總金額」"
-                  "「應繳金額」欄位值**（通常在表頭的方框內，如中華電信繳費結果通知的"
-                  "『繳費總金額(元) $3,532』）；不要拿下方費用明細裡的單項金額充當總額。"
-                  "水號／電號為用戶識別碼；日期民國年轉西元。用戶多為本公司（天干／中意／仲彬）。"
-                  "亦涵蓋電信帳單（如中華電信）與其繳費通知／繳費結果通知。"
-                  "**識別碼絕對不是金額**：用戶號碼、電話號碼、水號電號、銷帳編號、"
-                  "帳號、發票號碼都是識別碼——這些數字常有 8～12 位、沒有小數點也沒有千分位逗號，"
-                  "**一律不得填入任何金額欄位**（basic_fee／usage_fee／subtotal／total_amount 等）。"
-                  "金額欄只填帳單上標示為「元」或帶千分位／小數點的費用數字；"
-                  "找不到對應金額就留空，寧可空著也不要拿識別碼充數。"),
     },
     "receipt": {
         "label": "收據／雜項開銷",
@@ -268,11 +206,9 @@ DOC_TYPES = {
             _f("receipt_type", "收據類型（免用統一發票／一般收據／勞務報酬）"),
             _f("vendor", "廠商／收款人"), _f("tax_id", "統一編號"),
             _f("item_desc", "品名／事由"), _f("subtotal", "未稅", "number"),
-            _f("tax_amount", "稅額", "number"), _f("total_amount", "金額", "number"),
+            _f("tax_amount", "營業稅額", "number"), _f("withholding_tax", "扣繳稅額", "number"),
+            _f("total_amount", "金額", "number"),
         ],
-        "extra": ("本表單為收據（可能為免用統一發票收據、一般收據、勞務報酬單、代收轉付收據等），"
-                  "未必有統一編號或營業稅。統一編號為 8 位純數字，電話不是統編勿填入。"
-                  "請擷取收款人／廠商、事由／品名、金額與日期；有扣繳稅額才填 tax_amount。"),
     },
     "statement": {
         "label": "對帳單／應收帳款明細表",
@@ -293,19 +229,6 @@ DOC_TYPES = {
             _f("bank_account", "銀行資料（戶名／銀行／帳號）"),
             _f("remark", "備註"),
         ],
-        "extra": ("本表單為對帳單／應收帳款（應付帳款）明細表，**不是統一發票**。"
-                  "表格內的「發票號碼」欄是用來勾稽的既有發票號，請放入 ref_invoice_no，"
-                  "**不要**把它當成本憑證的憑證號碼或視為發票。"
-                  "抬頭（表頭最上方）的公司為開立廠商＝賣方／收款方；"
-                  "「客戶名稱」為買方／付款方，多為本公司（仲彬／中意／天干）。"
-                  "統一編號只在單據上明確印出時才填，**沒印出就留空，絕對不要推測或編造**；"
-                  "單據上若只有一個統編（通常標示於客戶欄），那是客戶（買方）的，填入 customer_tax_id。"
-                  "下方常有銷貨合計額、營業稅額、應收帳款總額三個數字，請分別擷取為純數字。"
-                  "明細每一列放入 items：description=商品名稱及規格、quantity=數量、"
-                  "unit_price=單價、amount=**金額欄（未稅）**（空白列略過）。"
-                  "明細表常有數量／單價留白的列（如運費），該欄空白就留空，"
-                  "**不可拿右邊的金額或合計去填補空欄位**；amount 取「金額」欄，不是「合計」欄。"
-                  "日期為民國年，請轉西元。"),
     },
     "purchase_order": {
         "label": "訂購單／採購單",
@@ -320,10 +243,6 @@ DOC_TYPES = {
             _f("delivery_date", "交貨／需求日期", "date"),
             _f("total_amount", "總金額", "number"),
         ],
-        "extra": ("本表單為訂購單／採購單（Purchase Order）。採購方（buyer）為下單客戶、"
-                  "供應商（supplier）為出貨方；請分別擷取雙方名稱與統一編號（8 位純數字，電話勿當統編）。"
-                  "明細放入 items：description=品名／規格、quantity=數量、unit_price=單價、amount=金額。"
-                  "付款條件如『月結75天／M75』；日期民國轉西元。"),
     },
     "fda_import": {
         "label": "食品輸入許可通知",
@@ -342,10 +261,6 @@ DOC_TYPES = {
             _f("origin_country", "生產國別"), _f("quantity", "數量"),
             _f("net_weight", "淨重"), _f("remark", "備註"),
         ],
-        "extra": ("本表單為衛生福利部食品藥物管理署『食品及相關產品輸入許可通知』。"
-                  "報驗義務人（applicant）為進口商、製造廠（manufacturer）為國外生產廠。"
-                  "報單號碼及項次可與進口報單勾稽；C.C.C.Code 為貨品分類號列。"
-                  "統一編號為 8 位純數字；日期民國轉西元。"),
     },
     "social_insurance": {
         "label": "勞健保費繳款／繳費證明",
@@ -363,15 +278,6 @@ DOC_TYPES = {
             _f("surcharge", "滯納金", "number"),
             _f("total_amount", "應繳／已繳總金額", "number"),
         ],
-        "extra": ("本表單為勞保局／健保署的保險費繳款單或投保單位繳費證明書。"
-                  "**保險費屬免稅，單據上沒有營業稅，絕對不要拆出進項稅額。**"
-                  "表格常依『費用代號』分列（如勞保普通事故、職災保險、就業保險、"
-                  "積欠工資墊償基金），請把每一列放入 items："
-                  "description＝費用名稱或代號、amount＝該列金額；"
-                  "total_amount 為各列合計或單據標示的應繳總額。"
-                  "**單位負擔／個人負擔**：多數繳費證明並未區分，"
-                  "**單據上沒有列出就留空，不要自行推算或分攤**。"
-                  "日期為民國年（如 1121101＝民國112年11月1日），請轉西元。"),
     },
     "bill_detail": {
         "label": "帳單費用明細（附頁佐證）",
@@ -385,14 +291,6 @@ DOC_TYPES = {
             _f("account", "用戶帳號／號碼"), _f("period", "計費期間"),
             _f("page_no", "頁次"), _f("total_amount", "本頁應繳金額合計", "number"),
         ],
-        "extra": ("本表單是帳單的**費用明細附頁**或繳費結果通知（如中華電信「112年12月費用明細清單 第3頁」），"
-                  "屬於佐證文件——真正的入帳依據是同一批文件中的統一發票或繳費憑證，"
-                  "本頁**不單獨產生會計分錄**。"
-                  "表格中的「用戶號碼」欄是電話號碼（如 27524123、0922000102），"
-                  "「彙寄編號」「通知單流水號」「變動載具號碼」「金融機構代繳帳號」亦皆為識別碼，"
-                  "**一律不得填入金額欄位**。"
-                  "total_amount 只填本頁明確標示為「應繳金額」「合計」的費用數字；"
-                  "若本頁只有明細沒有合計，請留空。"),
     },
     "journal_voucher": {
         "label": "會計傳票（記帳憑證）",
@@ -411,27 +309,6 @@ DOC_TYPES = {
             _f("debit_total", "借方合計", "number"),
             _f("credit_total", "貸方合計", "number"),
         ],
-        "extra": ("本表單為**會計傳票（記帳憑證）**，是記帳人員依原始憑證編製的內部單據，"
-                  "本身不是發票或收據——它的重點是**借貸分錄**。"
-                  "傳票單別決定型態：**轉帳傳票**（如 A911）借貸兩面都列出、必然平衡；"
-                  "**現支傳票**（如 A931）只列支出（借方），貸方為現金屬隱含不印在表上；"
-                  "**收入傳票**反之只列收入面。請照表上實際印出的列擷取，"
-                  "**不要為了讓借貸平衡而自行補上沒有印出的那一面**。"
-                  "表格每一列的左欄是「會計科目／科目名稱」（上為代號、下為名稱，如「6205／運費」），"
-                  "接著是摘要、部門別、立沖帳目（往來對象代號，如「047／聯邦快遞」），"
-                  "最右兩欄是借方金額與貸方金額。"
-                  "**每一列放入 entries**：account_code＝科目代號、account_name＝科目名稱、"
-                  "description＝摘要、dept＝部門別、offset_code＝立沖帳目、"
-                  "debit＝借方金額、credit＝貸方金額。"
-                  "**一列只會有借方或貸方其中一邊有金額**，另一邊填 0，不要把同一個數字同時填兩邊。"
-                  "**借方金額欄在貸方金額欄的左邊，兩欄相鄰**：請嚴格依數字實際落在哪一欄判定借貸，"
-                  "**不要依科目性質推測**（例如不要因為是稅額就假設它在貸方）。"
-                  "金額欄空白的列（如「以下空白」）請略過。"
-                  "表格最底列的「合計」請填入 debit_total／credit_total，不要當成分錄。"
-                  "**填完請自我檢查**：各列的 debit 加總必須等於 debit_total、credit 加總必須等於 "
-                  "credit_total，且兩者相等（傳票一定借貸平衡）。若對不上，代表有某列的金額放錯邊，"
-                  "請回到圖上重新確認該數字是印在借方欄還是貸方欄。"
-                  "日期若為民國年請轉西元（西元＝民國＋1911）。"),
     },
     "other": {
         "label": "其他憑證",
@@ -458,7 +335,7 @@ NO_VLM_BOX_TYPES = {"export_declaration", "import_declaration", "declaration",
 
 
 def is_supporting(type_key: str) -> bool:
-    """佐證附頁（帳單明細、繳費結果通知）不獨立產生會計分錄。
+    """佐證附頁（純帳單費用明細）不獨立產生會計分錄。
 
     一份帳單常有數頁：發票／繳費憑證是入帳依據，其餘明細頁只是佐證。
     若每頁都各自產生分錄再加總，金額會嚴重灌水（實測中華電信案：正解 3,532、
@@ -471,50 +348,73 @@ def get(type_key: str) -> dict:
     return DOC_TYPES.get(type_key, DOC_TYPES["other"])
 
 
-def build_extract_prompt(type_key: str) -> str:
-    """依類型欄位契約自動生成專屬辨識提示詞。
-    密集表單（no_vlm_boxes）不要求 VLM 輸出 boxes——框改由 OCR 精修取得，
-    避免 VLM 在密集版面把座標誤塞進欄位值。"""
-    t = get(type_key)
-    field_lines = "、".join(f'{f["key"]}（{f["label"]}）' for f in t["fields"])
-    items_block = ""
-    if t.get("has_entries"):
-        # 傳票（記帳憑證）的明細本身就是借貸分錄，欄位與品名/數量/單價完全不同
-        items_block = ('\n  "entries": [{"account_code": "科目代號", "account_name": "科目名稱", '
-                       '"description": "摘要", "dept": "部門別", "offset_code": "立沖帳目", '
-                       '"debit": 0, "credit": 0}],')
-    elif t.get("has_items"):
-        items_block = ('\n  "items": [{"description": "品名", "quantity": 0, '
-                       '"unit_price": 0, "amount": 0}],')
-    extra = ("\n- " + t["extra"]) if t.get("extra") else ""
-    if type_key in NO_VLM_BOX_TYPES:
-        boxes_line, boxes_rule = "", ""
-    else:
-        box_keys = ", ".join(f'"{f["key"]}": [x1,y1,x2,y2]' for f in t["fields"])
-        boxes_line = f',\n  "boxes": {{ {box_keys} }}'
-        boxes_rule = ("\n- boxes 為各欄位在影像上的邊界框，座標正規化 0~1000 整數"
-                      "（左上為原點）；找不到的欄位省略該鍵。")
-    return f"""你是專業會計憑證辨識助手。這是一張「{t['label']}」。以下提供原圖與 OCR 文字（供校對，數字以圖為準）。
-請萃取此類單據的專屬欄位並僅以 JSON 回覆（不要多餘文字）：
-{{
-  "doc_type": "{t['label']}",
-  "fields": {{ {field_lines} }},{items_block}
-  "note": "摘要／備註",
-  "confidence": "high|medium|low"{boxes_line}
-}}
-規則：
-- 中文一律輸出**繁體字**（台灣單據），不得輸出簡體字；照單據原文抄錄，不要改寫用詞。
-- 日期一律 YYYY-MM-DD。民國轉西元請用公式 **西元年 ＝ 民國年 ＋ 1911**
-  （民國114年→2025、民國115年→2026；**不是加 1900**）。單據上多處日期時，
-  以「中華民國○年○月○日」的填發日欄為主，表頭的「○年○、○月份」是發票期別不是日期。
-- 金額純數字，不要 $、逗號或文字。**不可寫算式或計算過程**——
-  錯誤範例：`"usage_fee": 2161 + 952 = 3113`、`"total": 1,234.00`；
-  正確寫法：`"usage_fee": 3113`、`"total": 1234`。需要相加時請自行算完只寫結果。{boxes_rule}
-- **單據上有多個合計時，total_amount 取涵蓋全部明細項目的那一個**。
-  常見陷阱：另有「不含○○」「部分小計」之類的局部合計（如保費收據的
-  「總保險費 NT$5,653（不含強制險）」與「總保費金額 NT$6,752」，後者才是總額）。
-  請用各明細項目加總驗證：加總等於哪一個合計，就取哪一個。
-- 無資料的欄位留空字串或 0。
-- 欄位標題後括號內的數字是「表單欄位編號」，僅供你定位對應格位；**絕對不要把編號或座標當作欄位值輸出**。
-- 每個 fields 的值必須是單一字串或數字，**不可輸出陣列或 [x,y,x,y] 之類座標**；金額為純數字。
-- 請盡量擷取所有列出的欄位；即使版面密集，也逐格對照標題與編號填入。{extra}"""
+def receipt_tax_ambiguous(type_key: str, fields: dict, evidence: dict | None = None) -> bool:
+    """Legacy receipt tax had no VAT/withholding distinction; require confirmation."""
+    if type_key != "receipt" or fields.get("tax_amount") is None:
+        return False
+    current = [r for r in (evidence or {}).get("fields.tax_amount", []) if r.get("selected")]
+    if any(r.get("source") == "manual" for r in current):
+        return False
+    return "withholding_tax" not in fields or any(r.get("semantic_role") == "unconfirmed_tax" for r in current)
+
+
+# 只保存定位與語意；格式、算術與公司政策由程式負責。
+TYPE_HINTS = {
+    "invoice": ["日期取填發日，不是發票期別。賣方資料可能在專用章；amount_words 抄錄大寫原文。"],
+    "cheque": ["只讀支票區域；出票人與受款人不同。amount_words 抄錄票面大寫原文。"],
+    "remittance": ["交易金額是本金，扣款金額及手續費分別讀取；付款人與收款人分開。"],
+    "customs_tax": ["多聯內容相同時讀完整一聯，不跨聯混填；營業稅稅基不是營業稅。"],
+    "export_declaration": ["依格位標題及編號定位；32至41格讀第一項貨物。"],
+    "import_declaration": ["納稅義務人是進口商，賣方是國外出口商；items.amount 讀完稅價格新臺幣。"],
+    "broker_note": ["代墊稅費與報關勞務費分開；預收費、應收退金額不是總計。"],
+    "declaration": ["direction 只依文件明示的進口或出口填入。"],
+    "tax_bill": ["多聯讀完整一聯；銷帳編號是識別碼，繳納期間不是填發日。"],
+    "utility": ["總額讀獨立標示的繳費總金額；用戶號碼不是金額，預定扣繳不代表已付款。"],
+    "receipt": ["廠商資料可能在印章。扣繳稅額填 withholding_tax；tax_amount 僅讀明示營業稅。"],
+    "statement": ["表列發票號碼是參照號，填 ref_invoice_no。issuer 是開立方，customer 是客戶。"],
+    "purchase_order": ["buyer 是採購方，supplier 是供應商；採購訂單不代表已付款。"],
+    "fda_import": ["applicant 是報驗進口商，manufacturer 是生產廠；許可通知不是稅費繳款證明。"],
+    "social_insurance": ["單位與個人負擔只有文件分列才讀取；各費用代號分列 items。"],
+    "bill_detail": ["只讀純費用明細附頁；載明繳費總額的繳費結果通知應分類為 utility。"],
+    "journal_voucher": ["entries 照印出各列讀取；借貸依所在欄，單面傳票不補另一面；底列合計不是分錄。"],
+    "other": [],
+}
+ITEM_FIELDS = [_f("description", "品名／事由"), _f("quantity", "數量", "number"),
+               _f("unit_price", "單價", "number"), _f("amount", "列金額", "number")]
+ENTRY_FIELDS = [_f("account_code", "科目代號"), _f("account_name", "科目名稱"),
+                _f("description", "摘要"), _f("dept", "部門"), _f("offset_code", "立沖帳目"),
+                _f("debit", "借方金額", "number"), _f("credit", "貸方金額", "number")]
+COMMON_FIELDS = {
+    "voucher_id": ["voucher_id", "doc_no", "tax_bill_no", "payment_no", "po_no", "permit_no",
+                   "cheque_no", "declaration_no", "statement_no", "account"],
+    "date": ["date", "issue_date", "payment_date", "import_date", "pay_start", "due_date"],
+    "subtotal": ["subtotal"], "tax_amount": ["tax_amount", "business_tax", "tax"],
+    "total_amount": ["total_amount", "total_fob_twd", "total_cif_twd", "total_tax", "principal"],
+    "seller_name": ["seller_name", "seller", "exporter", "supplier", "manufacturer", "vendor",
+                    "payee", "taxpayer", "trader", "provider", "broker", "issuer", "agency"],
+    "seller_tax_id": ["seller_tax_id", "exporter_tax_id", "supplier_tax_id", "tax_id", "issuer_tax_id"],
+    "buyer_name": ["buyer_name", "buyer", "remitter", "counterparty", "applicant", "customer", "customer_name", "unit_name"],
+    "buyer_tax_id": ["buyer_tax_id", "taxpayer_tax_id", "applicant_tax_id", "customer_tax_id"],
+}
+for _key, _spec in DOC_TYPES.items():
+    _spec["type_hints"] = TYPE_HINTS[_key]
+    _spec["item_fields"] = list(ITEM_FIELDS) if _spec.get("has_items") else []
+    _spec["entry_fields"] = list(ENTRY_FIELDS) if _spec.get("has_entries") else []
+    _allowed_fields = {f["key"] for f in _spec["fields"]}
+    if _key == "import_declaration":
+        _allowed_fields.update(("buyer", "buyer_tax_id"))
+    _spec["common_fields"] = {name: [key for key in keys if key in _allowed_fields]
+                              for name, keys in COMMON_FIELDS.items()}
+    if not _spec.get("supporting") and not _spec.get("has_entries"):
+        _existing = {f["key"] for f in _spec["fields"]}
+        for _field in [_f("payment_status", "明示付款狀態"), _f("payment_method", "明示付款方式")]:
+            if _field["key"] not in _existing:
+                _spec["fields"].append(_field)
+DOC_TYPES["import_declaration"]["item_fields"] += [_f("hs_code", "貨品分類號列"), _f("origin_country", "生產國別")]
+DOC_TYPES["broker_note"]["fields"].append(_f("direction", "明示進出口別"))
+
+
+def build_extract_prompt(type_key: str, **kwargs) -> str:
+    """相容入口；圖片及純文字均使用同一生成器。"""
+    from app.core.prompts import build_extract_prompt as build
+    return build(type_key, **kwargs)

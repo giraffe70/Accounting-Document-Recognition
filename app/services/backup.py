@@ -5,7 +5,7 @@ from datetime import datetime
 from app import config
 
 _BACKUP_DIR = config.DATA_DIR / "backups"
-_INCLUDE = ["app.db", "settings.json", "accounts.json", "companies.json"]
+_INCLUDE = ["app.db", "settings.json", "accounts.json", "companies.json", "accounting_policies.json"]
 
 
 def create_backup() -> dict:

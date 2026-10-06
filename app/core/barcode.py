@@ -63,38 +63,30 @@ def decode(image_path: str) -> list[str]:
     return found
 
 
-def parse_einvoice_qr(codes: list[str]) -> dict:
-    """解析台灣電子發票證明聯「左側」QR 的明文前綴，回欄位 dict（無則回空）。
-
-    版面（MIG）：發票號碼(10) 日期民國YYYMMDD(7) 隨機碼(4)
-                 未稅金額(8 hex) 含稅金額(8 hex) 買方統編(8) 賣方統編(8) …後略。
-    """
+def parse_einvoice_qr_candidates(codes: list[str]) -> list[dict]:
+    """Decode valid left-QR prefixes; retain all conflicting candidates."""
+    from datetime import date
+    import re
+    candidates = []
     for raw in codes or []:
         s = str(raw).strip()
-        if len(s) < 53:
-            continue
-        inv = s[0:10]
-        if not (inv[:2].isalpha() and inv[2:10].isdigit()):
-            continue
-        d = s[10:17]
-        if not d.isdigit():
+        if len(s) < 53 or not re.fullmatch(r"[A-Za-z]{2}[0-9]{8}", s[:10]) or not s[10:17].isdigit():
             continue
         try:
-            yy, mm, dd = int(d[:3]) + 1911, d[3:5], d[5:7]
-            date = f"{yy}-{mm}-{dd}"
-            subtotal = int(s[21:29], 16)
-            total = int(s[29:37], 16)
+            d = date(int(s[10:13]) + 1911, int(s[13:15]), int(s[15:17])).isoformat()
+            subtotal, total = int(s[21:29], 16), int(s[29:37], 16)
         except (ValueError, TypeError):
             continue
-        buyer_id = s[37:45]
-        seller_id = s[45:53]
-        out = {
-            "voucher_id": inv.upper(), "date": date,
-            "subtotal": subtotal, "total_amount": total,
-        }
-        if buyer_id.isdigit():
-            out["buyer_tax_id"] = buyer_id
-        if seller_id.isdigit():
-            out["seller_tax_id"] = seller_id
-        return out
-    return {}
+        if not s[37:45].isascii() or not s[37:45].isdigit() or not s[45:53].isascii() or not s[45:53].isdigit():
+            continue
+        item = {"voucher_id": s[:10].upper(), "date": d, "subtotal": subtotal, "total_amount": total,
+                "buyer_tax_id": s[37:45], "seller_tax_id": s[45:53]}
+        if item not in candidates:
+            candidates.append(item)
+    return candidates
+
+
+def parse_einvoice_qr(codes: list[str]) -> dict:
+    """Compatibility: only a single unambiguous valid invoice may override fields."""
+    candidates = parse_einvoice_qr_candidates(codes)
+    return candidates[0] if len(candidates) == 1 else {}

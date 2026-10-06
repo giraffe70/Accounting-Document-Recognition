@@ -1,0 +1,78 @@
+{
+  "version": "before-2026-10-06",
+  "evidence": "測試 OCR：文件日期115/06/04，總額1,050；其餘欄位未知。",
+  "characters": {
+    "invoice": {
+      "image": 2315,
+      "ocr_text": 1874
+    },
+    "cheque": {
+      "image": 1558,
+      "ocr_text": 1243
+    },
+    "remittance": {
+      "image": 1753,
+      "ocr_text": 1297
+    },
+    "customs_tax": {
+      "image": 1418,
+      "ocr_text": 1426
+    },
+    "export_declaration": {
+      "image": 2249,
+      "ocr_text": 2257
+    },
+    "import_declaration": {
+      "image": 1929,
+      "ocr_text": 1937
+    },
+    "broker_note": {
+      "image": 1551,
+      "ocr_text": 1559
+    },
+    "declaration": {
+      "image": 1213,
+      "ocr_text": 1221
+    },
+    "tax_bill": {
+      "image": 1317,
+      "ocr_text": 1325
+    },
+    "utility": {
+      "image": 1714,
+      "ocr_text": 1722
+    },
+    "receipt": {
+      "image": 1600,
+      "ocr_text": 1290
+    },
+    "statement": {
+      "image": 1766,
+      "ocr_text": 1774
+    },
+    "purchase_order": {
+      "image": 1398,
+      "ocr_text": 1406
+    },
+    "fda_import": {
+      "image": 1398,
+      "ocr_text": 1406
+    },
+    "social_insurance": {
+      "image": 1518,
+      "ocr_text": 1526
+    },
+    "bill_detail": {
+      "image": 1369,
+      "ocr_text": 1377
+    },
+    "journal_voucher": {
+      "image": 1993,
+      "ocr_text": 2001
+    },
+    "other": {
+      "image": 1479,
+      "ocr_text": 1156
+    }
+  }
+}

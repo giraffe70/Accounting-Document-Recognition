@@ -1,7 +1,6 @@
-"""辨識管線：PDF/圖片 → OCR → VLM/LLM 結構化 → （後續）科目分類。
+"""辨識管線：影像準備、分類、契約擷取、證據合併及程式驗證。
 
-骨架階段：串起流程並回傳 Voucher。VLM 結構化以「OCR 文字 + 原圖」為輸入。
-科目分類、日記帳彙整、審核回寫於 Phase 1 後續補上。
+圖片與純 OCR 文字共用擷取契約；會計分類由 services.classify 接續處理。
 """
 import base64
 import json
@@ -14,30 +13,6 @@ from app.core import activity, doc_router, doc_types, model_factory, settings_st
 from app.models.schemas import Voucher
 
 logger = logging.getLogger("pdf_scan.pipeline")
-
-STRUCTURE_PROMPT = """你是專業會計憑證辨識助手。以下提供一張台灣會計憑證的原圖，以及 OCR 已抽取的文字（供校對，數字以圖為準）。
-請萃取完整欄位並以 JSON 回覆（僅回 JSON，不要多餘文字）：
-{
-  "voucher_id": "發票/憑證號碼",
-  "date": "YYYY-MM-DD（請將民國年轉為西元，如民國115年→2026）",
-  "doc_type": "發票/收據/進口報單…",
-  "buyer": {"name": "", "tax_id": "統編", "address": ""},
-  "seller": {"name": "", "tax_id": "統編", "address": ""},
-  "items": [{"description": "品名", "quantity": 0, "unit_price": 0, "amount": 0}],
-  "subtotal": 0, "tax_amount": 0, "total_amount": 0, "currency": "TWD",
-  "note": "備註/摘要",
-  "confidence": "high|medium|low",
-  "boxes": {
-    "voucher_id": [x1,y1,x2,y2], "date": [x1,y1,x2,y2],
-    "seller_name": [x1,y1,x2,y2], "seller_tax_id": [x1,y1,x2,y2],
-    "buyer_name": [x1,y1,x2,y2], "buyer_tax_id": [x1,y1,x2,y2],
-    "subtotal": [x1,y1,x2,y2], "tax_amount": [x1,y1,x2,y2], "total_amount": [x1,y1,x2,y2]
-  }
-}
-boxes 為各欄位在影像上的邊界框，座標一律正規化為 0~1000 整數（左上角為原點，x 向右、y 向下）；
-只需框有把握的欄位，找不到的欄位請省略該鍵。金額數字請純數字不要加 $ 或逗號。
-若無營業稅資訊，tax_amount 視為 0。"""
-
 
 def render_to_images(file_path: str) -> list[str]:
     """PDF → 逐頁 PNG 路徑（輸出至暫存區，不污染來源目錄）；圖片 → 原路徑。"""
@@ -96,6 +71,8 @@ def prepare_pages(file_path: str) -> list[Voucher]:
             })
             v.source_file = f"{name} p{i + 1}" if n > 1 else name
             v.source_image = img
+            v.field_evidence["doc_type_key"] = [{"source": "model", "value": type_key,
+                                                "reason": doc_router.last_result().get("reason", ""), "selected": True}]
             out.append(v)
         except Exception as exc:  # noqa: BLE001
             logger.warning("第 %d/%d 頁準備失敗，略過：%s", i + 1, n, exc)
@@ -140,7 +117,7 @@ def prepare_image(image_path: str, hint: str = "", auto_rotate: bool = True) -> 
     return type_key
 
 
-def extract_for_type(image_path: str, type_key: str, hint: str = "") -> Voucher:
+def extract_for_type(image_path: str, type_key: str, hint: str = "", company: str = "") -> Voucher:
     """依「已確認的類型」在「已準備好的影像」上萃取欄位＋精準框。
     不再判類型／不再自動轉正（外觀確認階段已完成）。"""
     settings = settings_store.get_settings()
@@ -165,90 +142,138 @@ def extract_for_type(image_path: str, type_key: str, hint: str = "") -> Voucher:
             logger.warning("OCR 辨識失敗，改 VLM 直讀：%s", exc)
             ocr_lines = []
 
-    # 條碼／QR grounding（若可讀，內容可信度高）
-    from app.core import barcode
-    codes = barcode.decode(image_path)
-    code_block = ""
-    einv = {}
-    if codes:
-        code_block = "\n\n影像偵測到的條碼／QR 內容（機器解碼，可信度高，可直接採用）：\n" + "\n".join(codes)
-        if type_key == "invoice":
-            einv = barcode.parse_einvoice_qr(codes)
-            if einv:
-                code_block += ("\n電子發票 QR 已解出下列欄位，請優先採用："
-                               f"發票號碼={einv.get('voucher_id','')}、日期={einv.get('date','')}、"
-                               f"未稅小計={einv.get('subtotal','')}、含稅總計={einv.get('total_amount','')}、"
-                               f"買方統編={einv.get('buyer_tax_id','')}、賣方統編={einv.get('seller_tax_id','')}")
-
     chat = model_factory.get_chat_model(struct_provider, struct_model, temperature=0.0)
-    grounding = f"\n\nOCR 文字（供校對，數字以圖為準）：\n{ocr_text}" if ocr_text else ""
-    grounding += code_block
-    hint_block = f"\n\n人工修正提示（審核人員指出的錯誤，請據此優先修正）：{hint}" if hint else ""
-    content = [
-        {"type": "text", "text": doc_types.build_extract_prompt(type_key) + grounding + hint_block},
-        {"type": "image_url", "image_url": {"url": _data_uri(image_path)}},
-    ]
-    with activity.stage("structure", settings["structure"]):
-        raw = _invoke_text(chat, content)
-    try:
-        data = _parse_json(raw)
-    except json.JSONDecodeError as exc:
-        # VLM 回傳非合法 JSON → 讓它自我修正一次（只回 JSON）
-        logger.warning("首次 JSON 解析失敗（%s），要求 VLM 重新輸出合法 JSON", exc)
-        with activity.stage("structure", settings["structure"] + "（JSON 修正）"):
-            # 回應裡連一個 { 都沒有（空字串，或模型改用散文回答）→ 沒有 JSON 可修，
-            # 要求它修正只會再拿到一段廢話，直接重問原題比較有機會成功。
-            if "{" in str(raw):
-                fix = _invoke_text(chat, [
-                    {"type": "text", "text": "你剛才的輸出不是合法 JSON。請「只」輸出修正後的合法 JSON 物件"
-                     "（不要任何說明文字、不要 markdown code fence、鍵與字串一律用雙引號、不要尾逗號）：\n\n"
-                     + str(raw)[:4000]}])
-            else:
-                # 上一輪根本沒有內容可修，直接重問一次原題（多為 Ollama 偶發失敗）
-                fix = _invoke_text(chat, content)
-        try:
-            data = _parse_json(fix)
-        except json.JSONDecodeError:
-            # 修正也失敗：多半是輸出被截斷或整段跑掉。重問原題一次——實測同一張圖
-            # 有時回完整 JSON、有時不回，重新生成比繼續修同一段壞輸出有機會。
-            logger.warning("JSON 修正仍失敗，重問原題最後一次")
-            with activity.stage("structure", settings["structure"] + "（重問）"):
-                data = _parse_json(_invoke_text(chat, content))
-    # 印章聚焦補讀：發票/收據若賣方統編漏抓（常在印章內），才觸發第二次聚焦讀取
-    if type_key in ("invoice", "receipt"):
-        _f = data.get("fields") or {}
-        if not _clean_taxid(_f.get("seller_tax_id", "")):
-            seal = _read_seal_taxid(image_path, chat)
-            if seal.get("seller_tax_id"):
-                _f["seller_tax_id"] = seal["seller_tax_id"]
-                if seal.get("seller_name") and not _f.get("seller_name"):
-                    _f["seller_name"] = seal["seller_name"]
-                data["fields"] = _f
-                logger.info("印章聚焦補讀取得賣方統編：%s", seal["seller_tax_id"])
-
-    # 電子發票 QR 為權威來源：覆蓋 VLM 對應欄位（QR 解碼優先）
-    if einv:
-        fields = data.get("fields") or {}
-        fields.update({k: v for k, v in einv.items() if v not in ("", None)})
-        data["fields"] = fields
-
-    # 傳票：借貸方向改以 OCR 座標判定（VLM 判欄位歸屬不可靠）
-    if doc_types.get(type_key).get("has_entries") and ocr_lines:
-        n = _fix_entry_sides_with_ocr(data, ocr_lines)
-        if n:
-            logger.info("傳票借貸方向以 OCR 座標更正 %d 筆", n)
-
-    vlm_boxes = _normalize_boxes(data.get("boxes"), image_path)
-    # 密集表單：VLM 不出框（或框不準），框只保留 OCR 文字驗證過者，寧缺勿錯
-    dense = type_key in doc_types.NO_VLM_BOX_TYPES
-    data["boxes"] = _refine_boxes_with_ocr(data.get("fields") or {}, vlm_boxes, ocr_lines, image_path,
-                                           keep_unmatched=not dense) \
-        if ocr_lines else ({} if dense else vlm_boxes)
-
-    voucher = _build_voucher(data, type_key)
+    voucher = extract_evidence(image_path, type_key, chat, ocr_lines, ocr_text, hint=hint, company=company)
     voucher.ocr_provider = ocr_used
     voucher.structure_model = settings["structure"]
     voucher.source_image = image_path
+    if ocr is not None and not ocr_lines:
+        voucher.validation_warnings.append("OCR 未取得文字，使用圖像擷取")
+        voucher.ocr_provider = "（無，VLM 直讀）"
+    return voucher
+
+
+def _company_context(company: str) -> dict:
+    if not company:
+        return {}
+    from app.services import taxid
+    matches = [c for c in taxid.load_companies() if company in (c.get("name"), c.get("short"))]
+    return {"company": matches[0]} if len(matches) == 1 else {"company_name": company}
+
+
+def _record_evidence(data: dict, source: str, mode: str = "image") -> None:
+    evidence = data.setdefault("field_evidence", {})
+    values = {"fields." + k: v for k, v in (data.get("fields") or {}).items()}
+    for group in ("items", "entries"):
+        for index, row in enumerate(data.get(group) or []):
+            values.update({f"{group}[{index}].{k}": v for k, v in row.items()})
+    for path, value in values.items():
+        if value is not None and value != "":
+            evidence.setdefault(path, []).append({"source": source, "value": value, "input_mode": mode, "selected": True})
+
+
+def _merge_evidence_fields(data: dict, values: dict, source: str, preserve_existing: bool = False) -> None:
+    evidence = data.setdefault("field_evidence", {})
+    warnings = data.setdefault("validation_warnings", [])
+    fields = data.setdefault("fields", {})
+    for key, value in values.items():
+        if source != "manual" and value in (None, "") or preserve_existing and fields.get(key) not in (None, ""):
+            continue
+        old = fields.get(key)
+        if old not in (None, "") and _norm_amount(old) != _norm_amount(value) and _norm_roc_date(str(old)) != _norm_roc_date(str(value)):
+            warnings.append(f"{key} 證據衝突，採用 {source}，原讀值保留於證據")
+        path = "fields." + key
+        for record in evidence.get(path, []):
+            record["selected"] = False
+        evidence.setdefault(path, []).append({"source": source, "value": value, "selected": True})
+        fields[key] = value
+
+
+def reread_fields(image_path: str, type_key: str, chat, fields: list[str], *, mode="image",
+                  ocr_text="", hint="", evidence=None) -> dict:
+    """A subset of the same extraction task, without side effects on other fields."""
+    from app.core import prompts, model_invocation
+    content = [{"type": "text", "text": prompts.build_extract_prompt(type_key, mode=mode, ocr_text=ocr_text,
+                                       hint=hint, fields=fields, evidence=evidence)}]
+    if mode == "image":
+        content.append({"type": "image_url", "image_url": {"url": _data_uri(image_path)}})
+    with activity.stage("structure", "指定欄位補讀"):
+        result = model_invocation.invoke_structured(chat, content,
+                    lambda obj: _validate_image_extraction(obj, type_key, mode, image_path, fields), task="supplement", invoke=_invoke_text)
+    return result["fields"]
+
+
+def _validate_image_extraction(obj: dict, type_key: str, mode: str, image_path: str, fields=None) -> dict:
+    from app.core import prompts
+    if mode == "image" and type_key not in doc_types.NO_VLM_BOX_TYPES and "boxes" in obj:
+        boxes = obj["boxes"]
+        if not isinstance(boxes, dict):
+            raise ValueError("boxes must be an object")
+        normalized = _normalize_boxes(boxes, image_path)
+        if set(normalized) != set(boxes):
+            raise ValueError("invalid box coordinates")
+        obj = {**obj, "boxes": normalized}
+    return prompts.validate_extraction(obj, type_key, mode, fields)
+
+
+def extract_evidence(image_path: str, type_key: str, chat, ocr_lines: list, ocr_text: str,
+                     *, mode="image", hint="", company="", confirmed_fields=None) -> Voucher:
+    from app.core import barcode, prompts, model_invocation
+    context = _company_context(company)
+    candidates = barcode.parse_einvoice_qr_candidates(barcode.decode(image_path)) if mode == "image" and type_key == "invoice" else []
+    if len(candidates) == 1:
+        context["qr"] = candidates[0]
+    content = [{"type": "text", "text": prompts.build_extract_prompt(type_key, mode=mode, ocr_text=ocr_text, hint=hint, evidence=context)}]
+    if mode == "image":
+        content.append({"type": "image_url", "image_url": {"url": _data_uri(image_path)}})
+    with activity.stage("structure", "欄位萃取"):
+        data = model_invocation.invoke_structured(chat, content,
+                lambda obj: _validate_image_extraction(obj, type_key, mode, image_path), task="extract", invoke=_invoke_text)
+    _record_evidence(data, "model", mode)
+    data["validation_warnings"] = []
+    if len(candidates) == 1:
+        _merge_evidence_fields(data, candidates[0], "qr")
+    elif len(candidates) > 1:
+        data["validation_warnings"].append("多個有效 QR 內容衝突，保留圖像擷取值，請人工確認")
+        for candidate in candidates:
+            for key, value in candidate.items():
+                data["field_evidence"].setdefault("fields." + key, []).append({"source": "qr", "value": value, "selected": False})
+    if confirmed_fields:
+        confirmed_fields = prompts.validate_extraction({"fields": confirmed_fields}, type_key, mode, list(confirmed_fields))["fields"]
+        _merge_evidence_fields(data, confirmed_fields, "manual")
+    # Same trigger as before, but use each type's actual identity contract.
+    targets = {"invoice": ("seller_tax_id", "seller_name"), "receipt": ("tax_id", "vendor")}
+    if type_key in targets:
+        tax_key, name_key = targets[type_key]
+        if data["fields"].get(tax_key) in (None, "") and tax_key not in (confirmed_fields or {}):
+            missing = [key for key in (tax_key, name_key) if data["fields"].get(key) in (None, "") and key not in (confirmed_fields or {})]
+            try:
+                values = reread_fields(image_path, type_key, chat, missing, mode=mode, ocr_text=ocr_text,
+                                        hint="定位廠商印章內的名稱與統編", evidence=context)
+                if values.get(tax_key) and len(_clean_taxid(values[tax_key])) != 8:
+                    values[tax_key] = None
+                    data["validation_warnings"].append("補讀統編不是八位數，未採用")
+                _merge_evidence_fields(data, values, "model", preserve_existing=True)
+            except (ValueError, RuntimeError) as exc:
+                data["validation_warnings"].append("指定欄位補讀失敗：" + str(exc)[:120])
+    if doc_types.get(type_key).get("has_entries") and ocr_lines:
+        from copy import deepcopy
+        before = deepcopy(data.get("entries") or [])
+        _fix_entry_sides_with_ocr(data, ocr_lines)
+        for index, row in enumerate(data.get("entries") or []):
+            for key in ("debit", "credit"):
+                if before[index].get(key) != row.get(key):
+                    path = f"entries[{index}].{key}"
+                    for record in data["field_evidence"].get(path, []):
+                        record["selected"] = False
+                    data["field_evidence"].setdefault(path, []).append({"source": "ocr", "value": row[key], "selected": True})
+    vlm_boxes = _normalize_boxes(data.get("boxes"), image_path) if mode == "image" else {}
+    dense = type_key in doc_types.NO_VLM_BOX_TYPES
+    data["boxes"] = _refine_boxes_with_ocr(data["fields"], vlm_boxes, ocr_lines, image_path,
+                        keep_unmatched=mode == "image" and not dense) if ocr_lines else ({} if dense else vlm_boxes)
+    voucher = _build_voucher(data, type_key)
+    if type_key == "other":
+        voucher.validation_warnings.append("文件類型未知或無法分類，使用通用契約，請人工確認")
     return voucher
 
 
@@ -257,58 +282,29 @@ def analyze(file_path: str) -> Voucher:
     return analyze_pages(file_path)[0]
 
 
-def recognize_image(image_path: str, hint: str = "") -> Voucher:
+def recognize_image(image_path: str, hint: str = "", *, company: str = "") -> Voucher:
     """對既有單張影像重新辨識（供手動旋轉後重辨識；不再自動旋轉）。
     hint：人工修正提示（來自備註欄），會餵給 Router 與辨識提示詞作為修正指引。"""
-    v = _structure_image(image_path, image_path, 0, 1, auto_rotate=False, hint=hint)
+    v = _structure_image(image_path, image_path, 0, 1, auto_rotate=False, hint=hint, company=company)
     v.source_image = ""   # 影像已在原位，不需再複製
     return v
 
 
 def _structure_image(image_path: str, source_file: str, page_idx: int, page_count: int,
-                     auto_rotate: bool = True, hint: str = "") -> Voucher:
+                     auto_rotate: bool = True, hint: str = "", company: str = "") -> Voucher:
     """單張全流程：準備（判類型+轉正）＋內容萃取。供批次與重新辨識沿用。"""
     type_key = prepare_image(image_path, hint=hint, auto_rotate=auto_rotate)
-    voucher = extract_for_type(image_path, type_key, hint=hint)
+    voucher = extract_for_type(image_path, type_key, hint=hint, company=company)
+    voucher.field_evidence["doc_type_key"] = [{"source": "route", "value": type_key,
+                "reason": doc_router.last_result().get("reason", ""), "selected": True}]
     name = Path(source_file).name
     voucher.source_file = f"{name} p{page_idx + 1}" if page_count > 1 else name
     return voucher
 
 
 def _norm_roc_date(s: str) -> str:
-    """民國日期 → 西元 YYYY-MM-DD（如 115/06/04、114.07.23 → 2026-06-04、2025-07-23）。
-    已是西元或無法解析則原樣回傳。"""
-    import re
-
-    s = str(s or "").strip().replace("民國", "").replace("中華民國", "").strip()
-    m = re.match(r"^(\d{2,4})[/\.\-年](\d{1,2})[/\.\-月](\d{1,2})", s)
-    if not m:
-        return s
-    y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
-    if y < 200:            # 兩三位數視為民國年
-        y += 1911
-    return f"{y:04d}-{mo:02d}-{d:02d}"
-
-
-def _read_seal_taxid(image_path: str, chat) -> dict:
-    """聚焦補讀：只針對『統一發票專用章』讀賣方名稱與統編（印章顏色不定、位置多在下/右）。
-    不裁切、不靠顏色——以單一目的提示讓模型專注於印章。回 {seller_name, seller_tax_id}。"""
-    prompt = ("這是一張台灣統一發票。請只做一件事：找出『統一發票專用章』"
-              "（印章顏色可能是紅、藍、黑或紫，通常蓋在發票下方或右側），"
-              "讀出章內的賣方公司名稱與 8 位統一編號。"
-              "只回 JSON：{\"seller_name\":\"\",\"seller_tax_id\":\"\"}；"
-              "統一編號必須是 8 位純數字（電話不算），讀不到就留空字串。")
-    content = [
-        {"type": "text", "text": prompt},
-        {"type": "image_url", "image_url": {"url": _data_uri(image_path)}},
-    ]
-    try:
-        d = _parse_json(_invoke_text(chat, content))
-        return {"seller_name": str(d.get("seller_name", "")).strip(),
-                "seller_tax_id": _clean_taxid(d.get("seller_tax_id", ""))}
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("印章聚焦補讀略過：%s", exc)
-        return {}
+    from app.core.normalization import norm_date
+    return norm_date(s)
 
 
 def _clean_taxid(v):
@@ -316,7 +312,8 @@ def _clean_taxid(v):
     非數字或其他長度（可能為國外稅籍）則原樣保留。"""
     import re
 
-    s = str(v or "").strip()
+    import unicodedata
+    s = unicodedata.normalize("NFKC", str(v or "").strip())
     if not s:
         return s
     if any(c in s for c in "-()（）"):      # 電話樣式
@@ -361,47 +358,8 @@ def to_traditional(s: str) -> str:
 
 
 def _norm_amount(v):
-    """金額字串轉數字：VLM 常回「9,900」「$1,050」「NT$10,395」，即使提示詞要求純數字。
-
-    契約 kind=number 的欄位若留著千分位字串，前端 <input type="number"> 會判定為
-    無效值而顯示**空白**，看起來像辨識失敗；使用者接著按「儲存修正」，空值又會把
-    正確金額覆蓋成 null。解析失敗則原樣保留（寧可顯示原字串，也不要憑空丟值）。
-    """
-    import re
-
-    if v is None or isinstance(v, (int, float, bool)):
-        return v
-    s = str(v).strip()
-    if not s:
-        return v
-    t = s.translate(str.maketrans("０１２３４５６７８９．－，", "0123456789.-,"))
-    t = re.sub(r"(?i)NT\$?|TWD|[,\s，、$＄元]", "", t)
-    if re.fullmatch(r"-?\d+(\.\d+)?", t):
-        n = float(t)
-        return int(n) if n.is_integer() else n
-    return v
-
-
-def _reject_identifier_as_amount(v, key: str, fields: dict):
-    """把誤填進金額欄的識別碼清掉。
-
-    實測中華電信繳費通知的用戶號碼 216123417 被填進 usage_fee／subtotal，
-    整案金額從 3,532 暴增到 65 萬。這類值有共同特徵：位數遠超常見金額、
-    且與同張憑證的總計不成比例。提示詞擋不住（模型每次判斷都可能不同），
-    故在此做確定性攔截：只清掉「明顯不可能是金額」的值，不做估算或推測。
-    """
-    if not isinstance(v, (int, float)) or v <= 0:
-        return v
-    # 1 億以上的「金額」在本系統的憑證情境幾乎不可能出現（最大宗的進口報單為百萬級）
-    if v >= 100_000_000:
-        logger.warning("欄位 %s 的值 %s 位數過大，判為識別碼誤填，已清空", key, v)
-        return ""
-    # 明細金額不該遠大於總計（差 100 倍以上）；總計本身另由 check_amounts 提示人工核對
-    total = fields.get("total_amount")
-    if key != "total_amount" and isinstance(total, (int, float)) and total > 0 and v > total * 100:
-        logger.warning("欄位 %s 的值 %s 遠大於總計 %s，判為識別碼誤填，已清空", key, v, total)
-        return ""
-    return v
+    from app.core.normalization import norm_amount
+    return norm_amount(v)
 
 
 def _clean_fields(f: dict) -> dict:
@@ -504,7 +462,10 @@ def _fix_entry_sides_with_ocr(data: dict, ocr_lines: list) -> int:
     for r in rows:
         d = _norm_amount(r.get("debit")) or 0
         c = _norm_amount(r.get("credit")) or 0
-        amt = float(d or c or 0)
+        value = d or c or 0
+        if not isinstance(value, (int, float)):
+            continue
+        amt = float(value)
         if not amt or amt not in seen:
             continue
         cands = seen[amt]
@@ -521,115 +482,189 @@ def _fix_entry_sides_with_ocr(data: dict, ocr_lines: list) -> int:
             continue
         side = sides.pop()
         if side == "debit" and not d:
-            r["debit"], r["credit"] = amt, 0
+            r["debit"], r["credit"] = amt, None
             fixed += 1
         elif side == "credit" and not c:
-            r["debit"], r["credit"] = 0, amt
+            r["debit"], r["credit"] = None, amt
             fixed += 1
     return fixed
 
 
 def _entries_from_voucher_form(data: dict, spec: dict) -> dict:
-    """會計傳票（記帳憑證）：把辨識出的表格列轉成 JournalEntry。
-
-    傳票的明細本身就是分錄，與系統自動分類產生的分錄是同一種東西，故填入
-    voucher.entries 而非 items。每列只會有借方或貸方一邊有金額（另一邊 0）。
-    合計以「實際各列加總」為準——傳票底部印的合計是給人看的，若模型讀錯反而誤導。
-    """
+    """Convert observed voucher rows, without inventing a balancing side."""
     if not spec.get("has_entries"):
         return {}
     entries, dr, cr = [], 0.0, 0.0
-    for row in data.get("entries") or []:
+    incomplete = False
+    for index, row in enumerate(data.get("entries") or []):
         if not isinstance(row, dict):
             continue
-        d = _norm_amount(row.get("debit")) or 0
-        c = _norm_amount(row.get("credit")) or 0
-        d = float(d) if isinstance(d, (int, float)) else 0.0
-        c = float(c) if isinstance(c, (int, float)) else 0.0
-        if not d and not c:                     # 空白列／「以下空白」
+        d, c = _norm_amount(row.get("debit")), _norm_amount(row.get("credit"))
+        d = d if isinstance(d, (int, float)) and not isinstance(d, bool) else None
+        c = c if isinstance(c, (int, float)) and not isinstance(c, bool) else None
+        code, name = str(row.get("account_code") or ""), to_traditional(row.get("account_name") or "")
+        base = {"description": to_traditional(row.get("description") or ""), "dept": row.get("dept") or "",
+                "offset_code": row.get("offset_code") or ""}
+        sides = [("debit", d), ("credit", c)]
+        # Legacy outputs used zero for the unused side; prefer an actual nonzero side.
+        if any(value not in (None, 0) for _, value in sides):
+            sides = [(side, value) for side, value in sides if value not in (None, 0)]
+        else:
+            sides = [(side, value) for side, value in sides if value is not None]
+        if not sides:
+            if not any(row.get(key) for key in ("account_code", "account_name", "description")):
+                continue
+            incomplete = True
+            entries.append({**base, "amount": None, "raw_account_code": code, "raw_account_name": name,
+                            "evidence_paths": [f"entries[{index}]"]})
             continue
-        code = to_traditional(str(row.get("account_code", "")).strip())
-        name = to_traditional(str(row.get("account_name", "")).strip())
-        e = {"description": to_traditional(str(row.get("description", "")).strip()),
-             "amount": d or c,
-             "dept": to_traditional(str(row.get("dept", "")).strip()),
-             "offset_code": to_traditional(str(row.get("offset_code", "")).strip()),
-             "debit_account": code if d else "", "debit_account_name": name if d else "",
-             "credit_account": code if c else "", "credit_account_name": name if c else ""}
-        entries.append(e)
-        dr += d
-        cr += c
-    # 現支／收入傳票只印一面（另一面為現金，隱含於傳票類型），單面即為完整，
-    # 不能因借貸不等就判為辨識錯誤。
-    kind = str((data.get("fields") or {}).get("voucher_kind", ""))
-    one_sided_ok = any(k in kind for k in ("現支", "收入", "支出")) and bool(dr) != bool(cr)
+        for side, value in sides:
+            entry = {**base, "amount": value, side + "_account": code, side + "_account_name": name,
+                     "evidence_paths": [f"entries[{index}].{side}"]}
+            entries.append(entry)
+            if side == "debit": dr += value
+            else: cr += value
+    kind = str((data.get("fields") or {}).get("voucher_kind") or "")
+    one_sided = any(k in kind for k in ("現支", "收入", "支出")) and bool(dr) != bool(cr)
     return {"entries": entries, "debit_total": dr, "credit_total": cr,
-            "balance_check": bool(entries) and (abs(dr - cr) < 0.01 or one_sided_ok)}
+            "balance_check": bool(entries) and not incomplete and abs(dr-cr) < .01,
+            "classification_meta": {**(data.get("classification_meta") or {}), "original_checks": {
+                "complete": bool(entries) and not incomplete, "single_sided": one_sided,
+                "observed_debit_total": dr, "observed_credit_total": cr}}}
 
 
-def _build_voucher(data: dict, type_key: str) -> Voucher:
-    """把專屬 fields 對映到共同會計欄位（供統編核對/分類/日記帳/報表沿用）。"""
-    f = _clean_fields(data.get("fields") or {})
-    t = doc_types.get(type_key)
-    # 日期型欄位一律轉西元：原本只有頂層 voucher.date 有轉，fields 內仍是民國年，
-    # 審核畫面因此看到「115.05.26」這種原始值。
-    for spec in t["fields"]:
-        k = spec["key"]
-        if spec["kind"] == "date" and isinstance(f.get(k), str) and f[k]:
-            f[k] = _norm_roc_date(f[k])
-        elif spec["kind"] == "number" and f.get(k) not in (None, ""):
-            f[k] = _norm_amount(f[k])
-            f[k] = _reject_identifier_as_amount(f[k], k, f)
-    # 進出口別：專屬類型直接依類型；泛用 declaration 才用關鍵字推導
-    if type_key == "export_declaration":
-        f["direction"] = "出口"
-    elif type_key == "import_declaration":
-        f["direction"] = "進口"
-        # 進口報單：納稅義務人＝買方（本公司）、賣方＝國外出口商
-        if f.get("taxpayer") and not f.get("buyer"):
-            f["buyer"] = f.get("taxpayer")
-        if f.get("taxpayer_tax_id") and not f.get("buyer_tax_id"):
-            f["buyer_tax_id"] = f.get("taxpayer_tax_id")
-    elif type_key == "declaration":
-        cat = f"{f.get('doc_category', '')}{data.get('doc_type', '')}{data.get('note', '')}"
-        if "出口" in cat:
-            f["direction"] = "出口"
-        elif "進口" in cat:
-            f["direction"] = "進口"
+def _build_voucher(data: dict, type_key: str, *, derive_entries: bool = True, normalize_word_total: bool = True) -> Voucher:
+    """Normalize raw fields and map aliases from the document contract."""
+    from app.core.normalization import first_present
+    import math
+    raw_fields = data.get("fields") or {}
+    f = _clean_fields(raw_fields)
+    spec = doc_types.get(type_key)
+    # Refresh checks of current values after edits; keep acquisition/conflict diagnostics.
+    generated_prefixes = ("金額兜不攏：", "營業稅額 ", "日期格式無法解析：", "日期在未來（", "日期距今超過 5 年（")
+    warnings = [w for w in data.get("validation_warnings") or []
+                if not w.startswith(generated_prefixes) and "金額無法解析" not in w
+                and w not in ("seller 統編檢查碼錯誤", "buyer 統編檢查碼錯誤",
+                              "舊收據稅額語意未確認，請區分營業稅與扣繳稅額",
+                              "中文大寫與數字金額衝突，保留數字欄與大寫原文供人工核對")]
+    evidence = data.get("field_evidence") or {}
+    if doc_types.receipt_tax_ambiguous(type_key, raw_fields, evidence):
+        path = "fields.tax_amount"
+        if not any(r.get("selected") and r.get("semantic_role") == "unconfirmed_tax" for r in evidence.get(path, [])):
+            for record in evidence.get(path, []):
+                record["selected"] = False
+            evidence.setdefault(path, []).append({"source": "legacy", "value": raw_fields["tax_amount"],
+                                        "semantic_role": "unconfirmed_tax", "selected": True})
+
+    def selected_raw(path):
+        records = [r for r in evidence.get(path, []) if r.get("selected")]
+        return records[-1].get("value") if records else None
+
+    def invalid_number(value):
+        number = _norm_amount(value)
+        return isinstance(number, bool) or not isinstance(number, (int, float)) or not math.isfinite(number)
+
+    for field in spec["fields"]:
+        key, kind = field["key"], field["kind"]
+        value = f.get(key)
+        if value in (None, ""):
+            f[key] = None
+            raw = selected_raw("fields." + key)
+            if kind == "number" and raw not in (None, "") and invalid_number(raw):
+                warnings.append(f"{key} 金額無法解析，原文保留於證據")
+            continue
+        evidence.setdefault("fields." + key, [{"source": "model", "value": raw_fields.get(key), "selected": True}])
+        if kind == "date":
+            f[key] = _norm_roc_date(value)
+        elif kind == "number":
+            number = _norm_amount(value)
+            if isinstance(number, bool) or not isinstance(number, (int, float)) or not math.isfinite(number):
+                f[key] = None
+                warnings.append(f"{key} 金額無法解析，原文保留於證據")
+            else:
+                f[key] = number
+    if type_key in ("export_declaration", "import_declaration"):
+        f["direction"] = "出口" if type_key == "export_declaration" else "進口"
+    if type_key == "import_declaration":
+        f["buyer"] = f.get("taxpayer")
+        f["buyer_tax_id"] = f.get("taxpayer_tax_id")
+    # A generic declaration's direction must be explicit, never inferred from notes.
+    if type_key == "declaration" and f.get("direction") not in ("進口", "出口"):
+        f["direction"] = None
+    words = _norm_amount(f.get("amount_words"))
+    total = f.get("total_amount")
+    if isinstance(words, (int, float)):
+        if total is not None and total != words:
+            warnings.append("中文大寫與數字金額衝突，保留數字欄與大寫原文供人工核對")
+        elif total is None and normalize_word_total and not any(e.get("source") == "manual" and e.get("selected") for e in evidence.get("fields.total_amount", [])):
+            f["total_amount"] = words
+            evidence.setdefault("fields.total_amount", []).append({"source": "normalization", "value": words,
+                                           "source_path": "fields.amount_words", "selected": True})
+    for index, item in enumerate(data.get("items") or []):
+        for field in spec["item_fields"]:
+            key = field["key"]
+            if field["kind"] == "number" and item.get(key) in (None, ""):
+                raw = selected_raw(f"items[{index}].{key}")
+                if raw not in (None, "") and invalid_number(raw):
+                    warnings.append(f"items[{index}].{key} 金額無法解析")
+            if field["kind"] == "number" and item.get(key) not in (None, ""):
+                number = _norm_amount(item[key])
+                if isinstance(number, bool) or not isinstance(number, (int, float)) or not math.isfinite(number):
+                    warnings.append(f"items[{index}].{key} 金額無法解析")
+                    item[key] = None
+                else:
+                    item[key] = number
+    common = {key: first_present(f, aliases) for key, aliases in spec["common_fields"].items()}
+    if doc_types.receipt_tax_ambiguous(type_key, f, evidence):
+        common["tax_amount"] = None
     payload = {
-        "doc_type_key": type_key,
-        "doc_type": data.get("doc_type") or t["label"],
-        "fields": f,
-        "note": to_traditional(data.get("note", "")),
-        "confidence": data.get("confidence"),
-        "boxes": data.get("boxes") or {},
-        "items": [{k: (to_traditional(v) if isinstance(v, str) else v) for k, v in (it or {}).items()}
-                  for it in (data.get("items") or []) if isinstance(it, dict)],
-        **_entries_from_voucher_form(data, t),
-        "currency": f.get("currency") or "TWD",
-        "voucher_id": (f.get("voucher_id") or f.get("doc_no") or f.get("tax_bill_no")
-                       or f.get("payment_no") or f.get("po_no") or f.get("permit_no")
-                       or f.get("cheque_no") or f.get("declaration_no")
-                       or f.get("statement_no") or f.get("account") or ""),
-        "date": _norm_roc_date(f.get("date") or f.get("issue_date") or f.get("payment_date")
-                               or f.get("import_date") or f.get("pay_start") or f.get("due_date") or ""),
-        "subtotal": f.get("subtotal"),
-        "tax_amount": f.get("tax_amount") or f.get("business_tax") or f.get("tax"),
-        "total_amount": (f.get("total_amount") or f.get("total_fob_twd")
-                         or f.get("total_cif_twd") or f.get("total_tax") or f.get("principal")),
-        # 出口報單：出口人＝賣方；進口報單：納稅義務人＝買方、賣方＝國外出口商
-        "seller": {"name": (f.get("seller_name") or f.get("seller") or f.get("exporter")
-                            or f.get("supplier") or f.get("manufacturer") or f.get("vendor")
-                            or f.get("payee") or f.get("taxpayer") or f.get("trader")
-                            or f.get("provider") or f.get("broker") or ""),
-                   "tax_id": (f.get("seller_tax_id") or f.get("exporter_tax_id")
-                              or f.get("supplier_tax_id") or f.get("tax_id") or "")},
-        "buyer": {"name": (f.get("buyer_name") or f.get("buyer") or f.get("remitter")
-                           or f.get("counterparty") or f.get("applicant") or ""),
-                  "tax_id": (f.get("buyer_tax_id") or f.get("taxpayer_tax_id")
-                             or f.get("applicant_tax_id") or "")},
+        "doc_type_key": type_key, "doc_type": spec["label"], "fields": f,
+        "note": to_traditional(data.get("note") or ""), "confidence": data.get("confidence"),
+        "boxes": data.get("boxes") or {}, "items": data.get("items") or [],
+        "field_evidence": evidence, "validation_warnings": list(dict.fromkeys(warnings)),
+        "classification_meta": data.get("classification_meta") or {},
+        **(_entries_from_voucher_form(data, spec) if derive_entries else {}),
+        "currency": "TWD" if type_key in ("import_declaration", "export_declaration") and common["total_amount"] is not None else f.get("currency") or "TWD", "voucher_id": common["voucher_id"] or "",
+        "date": common["date"] or "", "subtotal": common["subtotal"],
+        "tax_amount": common["tax_amount"], "total_amount": common["total_amount"],
+        "seller": {"name": common["seller_name"] or "", "tax_id": common["seller_tax_id"] or ""},
+        "buyer": {"name": common["buyer_name"] or "", "tax_id": common["buyer_tax_id"] or ""},
     }
+    from app.services import taxid
+    checks = taxid.check_voucher(payload)
+    amount_check = taxid.check_amounts(payload)
+    if amount_check.get("ok") is False:
+        payload["validation_warnings"].append(amount_check["warn"])
+    date_check = taxid.check_date(payload["date"])
+    if date_check.get("ok") is False:
+        payload["validation_warnings"].append(date_check["warn"])
+    for side, check in checks.items():
+        if check.get("checksum_valid") is False:
+            payload["validation_warnings"].append(side + " 統編檢查碼錯誤")
+    if spec.get("has_entries") and derive_entries:
+        dr, cr = payload["debit_total"], payload["credit_total"]
+        printed_checks = []
+        for key, computed in (("debit_total", dr), ("credit_total", cr)):
+            printed = f.get(key)
+            if printed is not None:
+                printed_checks.append(abs(printed - computed) < .01)
+            if printed is not None and abs(printed - computed) >= .01:
+                payload["validation_warnings"].append(f"{key} 印刷合計與逐列加總不一致")
+        original = payload["classification_meta"]["original_checks"]
+        original["printed_totals_match"] = all(printed_checks) if printed_checks else None
+        if dr != cr and not original["single_sided"]:
+            payload["validation_warnings"].append("原始傳票借貸不平衡，未補造分錄")
+    payload["validation_warnings"] = list(dict.fromkeys(payload["validation_warnings"]))
     return Voucher.model_validate(payload)
+
+
+def canonicalize_voucher(data: dict) -> dict:
+    """One mapping path for form saves; retain stored metadata/unknown attributes."""
+    if not data.get("doc_type_key") or not data.get("fields"):
+        return data
+    normalized = _build_voucher(data, data["doc_type_key"], derive_entries=False, normalize_word_total=False).model_dump()
+    mapped = {key: normalized[key] for key in ("fields", "voucher_id", "date", "subtotal", "tax_amount", "total_amount", "currency", "seller", "buyer", "items", "validation_warnings", "field_evidence")}
+    return {**data, **mapped}
 
 
 def _auto_orient_ocr(image_path: str, ocr) -> tuple[str, int]:
@@ -766,7 +801,7 @@ def _apply_rotation(image_path: str, degrees_cw: int) -> str:
 def _normalize_boxes(raw, image_path: str) -> dict:
     """VLM 座標空間不一致（時而 0~1、時而 0~1000、時而絕對像素）。
     自動偵測後統一輸出正規化 0~1000（[x1,y1,x2,y2]）。"""
-    if not isinstance(raw, dict):
+    if not isinstance(raw, dict) or not raw:
         return {}
     from PIL import Image
 
@@ -777,12 +812,15 @@ def _normalize_boxes(raw, image_path: str) -> dict:
 
     parsed = {}
     allvals = []
+    import math
     for k, b in raw.items():
-        if not isinstance(b, (list, tuple)) or len(b) < 4:
+        if not isinstance(b, (list, tuple)) or len(b) != 4 or any(isinstance(v, bool) for v in b):
             continue
         try:
             vals = [float(b[0]), float(b[1]), float(b[2]), float(b[3])]
         except (TypeError, ValueError):
+            continue
+        if not all(math.isfinite(v) for v in vals):
             continue
         parsed[k] = vals
         allvals.extend(vals)
@@ -820,132 +858,5 @@ def _data_uri(image_path: str) -> str:
     return f"data:image/{mime};base64,{b64}"
 
 
-def _invoke_text(chat, content, tries: int = 3) -> str:
-    """呼叫 VLM 並取回文字；空回應或例外時重試。
-
-    地端 Ollama 偶發性失敗（實測見過 CUDA error 500、以及回傳空字串），
-    單次失敗就讓整張憑證辨識中斷太脆弱——批次提取時等於整批少一張。
-    """
-    import time
-    from app.core import invocation_trace
-
-    last = None
-    for i in range(tries):
-        try:
-            with invocation_trace.timed_call(content, i + 1) as traced:
-                resp = chat.invoke([{"role": "user", "content": content}])
-                text = resp.content if hasattr(resp, "content") else str(resp)
-                traced["response"] = str(text)
-            if str(text).strip():
-                return text
-            last = "空回應"
-        except Exception as exc:  # noqa: BLE001
-            last = f"{type(exc).__name__}: {exc}"
-        if i < tries - 1:
-            logger.warning("VLM 呼叫失敗（%s），第 %d 次重試", str(last)[:80], i + 1)
-            time.sleep(1.5 * (i + 1))
-    raise RuntimeError(f"VLM 連續 {tries} 次無有效回應：{str(last)[:120]}")
-
-
-def _parse_json(text: str) -> dict:
-    """儘量把 VLM 輸出解析為 dict：處理 code fence、全形引號、註解、尾逗號、
-    未加引號或單引號的鍵等常見瑕疵。逐步套用由輕到重的修復，最先成功者勝。"""
-    import re
-
-    t = text.strip()
-    if t.startswith("```"):
-        t = t.split("```", 2)[1] if "```" in t[3:] else t[3:]
-        if t.startswith("json"):
-            t = t[4:]
-        t = t.strip().rstrip("`").strip()
-    # 取第一個 { 到最後一個 }
-    s, e = t.find("{"), t.rfind("}")
-    frag = t[s : e + 1] if s >= 0 and e > s else t
-
-    def _fancy(x):   # 全形／彎引號 → 直引號
-        return (x.replace("“", '"').replace("”", '"')
-                 .replace("‘", "'").replace("’", "'"))
-
-    def _decomment(x):   # 去 // 與 /* */ 註解
-        x = re.sub(r"//[^\n\"]*", "", x)
-        return re.sub(r"/\*.*?\*/", "", x, flags=re.S)
-
-    def _trailing(x):    # 去尾逗號
-        return re.sub(r",(\s*[}\]])", r"\1", x)
-
-    def _thousands(x):
-        """數值欄位的千分位逗號 → 去掉（"debit": 33,390.00 是非法 JSON）。
-
-        傳票的金額欄印成「2,406.00」，模型會原樣抄進 JSON 數值欄位，
-        json.loads 在逗號處整個崩掉（回報 char 0，看起來像沒有 JSON）。
-        一般發票印「2830」不帶逗號，所以只有傳票這類單據會踩到。
-        只處理「冒號後、以 } ] , 結尾」的純數字，不動字串內容（摘要可能含逗號）。
-        """
-        return re.sub(
-            r'(:\s*)(-?\d{1,3}(?:,\d{3})+(?:\.\d+)?)(\s*[,}\]])',
-            lambda m: m.group(1) + m.group(2).replace(",", "") + m.group(3), x)
-
-    def _expr(x):
-        """數值欄位寫成算式 → 取等號後的結果。
-
-        實測電信帳單（多筆費用項目）會讓模型在 JSON 裡邊算邊寫：
-        `"usage_fee": 2161 + 952 - (19 - 19) = 3124`。取 = 之後的數字即可，
-        不自行計算（避免誤解模型的意圖）。
-        """
-        return re.sub(r"(:\s*)[-\d\s+*/().]*?=\s*(-?\d+(?:\.\d+)?)(\s*[,}\]])",
-                      r"\1\2\3", x)
-
-    def _close(x):
-        """補上缺少的收尾括號（模型偶爾漏掉 } 或 ]）。字串內的括號不計。"""
-        depth_c = depth_s = 0
-        in_str = esc = False
-        for ch in x:
-            if in_str:
-                if esc:
-                    esc = False
-                elif ch == "\\":
-                    esc = True
-                elif ch == '"':
-                    in_str = False
-                continue
-            if ch == '"':
-                in_str = True
-            elif ch == "{":
-                depth_c += 1
-            elif ch == "}":
-                depth_c -= 1
-            elif ch == "[":
-                depth_s += 1
-            elif ch == "]":
-                depth_s -= 1
-        return x + ('"' if in_str else "") + "]" * max(0, depth_s) + "}" * max(0, depth_c)
-
-    def _sq_key(x):      # 單引號 key → 雙引號
-        return re.sub(r"([{,]\s*)'([^']*?)'(\s*:)", r'\1"\2"\3', x)
-
-    def _sq_all(x):      # 其餘單引號字串（值／陣列元素）→ 雙引號
-        return re.sub(r"'([^'\"]*)'", r'"\1"', x)
-
-    def _bare_key(x):    # 未加引號 key → 雙引號（最後手段，較可能誤傷字串內容）
-        return re.sub(r'([{,]\s*)([A-Za-z_][\w-]*)(\s*:)', r'\1"\2"\3', x)
-
-    # 逐步累加修復，最先能解析成功的版本勝出
-    candidates, cur = [frag], frag
-    for step in (_fancy, _decomment, _thousands, _expr, _trailing, _sq_key, _sq_all, _bare_key, _close):
-        cur = step(cur)
-        candidates.append(cur)
-    for c in candidates:
-        try:
-            return json.loads(c)
-        except json.JSONDecodeError:
-            pass
-        # 後面還接了東西（qwen3 等會在 JSON 之後補說明或再吐一個物件，
-        # 造成 "Extra data"）→ 只取第一個完整物件，忽略其餘。
-        try:
-            obj, _ = json.JSONDecoder().raw_decode(c.lstrip())
-            if isinstance(obj, dict):
-                return obj
-        except (json.JSONDecodeError, ValueError):
-            continue
-    logger.warning("VLM JSON 解析失敗，原始輸出前 600 字：%s", frag[:600])
-    raise json.JSONDecodeError("VLM 回傳非合法 JSON", frag, 0)
+# Compatibility entry points for existing tools/tests.
+from app.core.model_invocation import _invoke_text, _parse_json

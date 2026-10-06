@@ -202,7 +202,8 @@ def _ollama_ps() -> dict:
 def api_doc_types():
     """各單據類型的欄位契約，供前端動態渲染審核欄位。"""
     return {"types": {k: {"label": v["label"], "fields": v["fields"],
-                          "has_items": v.get("has_items", False)}
+                          "has_items": v.get("has_items", False), "item_fields": v["item_fields"],
+                          "has_entries": v.get("has_entries", False), "entry_fields": v["entry_fields"]}
                       for k, v in doc_types.DOC_TYPES.items()}}
 
 
@@ -227,6 +228,8 @@ def api_save_accounts(payload: dict = Body(...)):
 
 @app.post("/api/taxid/check")
 def api_taxid_check(voucher: dict = Body(...)):
+    from app.core.pipeline import canonicalize_voucher
+    voucher = canonicalize_voucher(voucher)
     return taxid.check_voucher(voucher)
 
 
@@ -665,10 +668,12 @@ def api_classify(rec_id: int):
     try:
         voucher = Voucher.model_validate(json.loads(rec.current_json))
         voucher = classify.classify(voucher, company=rec.company)
-        review.update_current(rec_id, voucher.model_dump())
+        review.update_current(rec_id, voucher.model_dump(), mark_manual=False)
         return {"ok": True, "entries": [e.model_dump() for e in voucher.entries],
                 "debit_total": voucher.debit_total, "credit_total": voucher.credit_total,
-                "balance_check": voucher.balance_check}
+                "balance_check": voucher.balance_check, "classification_meta": voucher.classification_meta,
+                "warnings": voucher.classification_meta.get("warnings", []),
+                "validation_warnings": voucher.validation_warnings}
     except Exception as exc:  # noqa: BLE001
         logger.exception("科目分類失敗")
         return JSONResponse({"ok": False, "detail": f"分類失敗：{exc}"}, status_code=500)

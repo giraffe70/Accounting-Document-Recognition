@@ -67,9 +67,12 @@ def check_amounts(voucher: dict) -> dict:
     模型不是。回 {ok, warn}；缺值不算錯（很多單據本來就只有總計）。
     """
     f = (voucher or {}).get("fields") or {}
+    from app.core.doc_types import receipt_tax_ambiguous
+    if receipt_tax_ambiguous(voucher.get("doc_type_key"), f, voucher.get("field_evidence")):
+        return {"ok": False, "warn": "舊收據稅額語意未確認，請區分營業稅與扣繳稅額"}
 
     def num(k):
-        v = f.get(k)
+        v = f[k] if k in f else voucher.get(k)
         if v in (None, ""):
             return None
         try:

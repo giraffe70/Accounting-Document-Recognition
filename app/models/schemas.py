@@ -8,7 +8,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Optional, get_args
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class Confidence(str, Enum):
@@ -80,6 +80,9 @@ class LineItem(_StrCoerceModel):
     quantity: Optional[float] = None
     unit_price: Optional[float] = None
     amount: Optional[float] = None   # 合計（該列）
+    hs_code: Optional[str] = None
+    origin_country: Optional[str] = None
+    model_config = ConfigDict(extra="allow")
 
 
 class JournalEntry(_StrCoerceModel):
@@ -96,6 +99,8 @@ class JournalEntry(_StrCoerceModel):
     credit_account_name: str = ""
     dept: str = ""            # 部門別（傳票）
     offset_code: str = ""     # 立沖帳目：往來對象代號，如 047 聯邦快遞（傳票）
+    evidence_paths: list[str] = Field(default_factory=list)
+    model_config = ConfigDict(extra="allow")
 
 
 class Voucher(_StrCoerceModel):
@@ -122,6 +127,10 @@ class Voucher(_StrCoerceModel):
     balance_check: bool = False
 
     confidence: Optional[Confidence] = None
+    field_evidence: dict = Field(default_factory=dict)
+    validation_warnings: list[str] = Field(default_factory=list)
+    classification_meta: dict = Field(default_factory=dict)
+    model_config = ConfigDict(extra="allow")
 
     # 關鍵欄位在掃描影像上的邊界框（正規化 0–1000，[x1,y1,x2,y2]），供視覺對照
     boxes: dict = Field(default_factory=dict)

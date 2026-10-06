@@ -321,14 +321,11 @@ def create_run(payload: dict):
         if not ds or not pages:
             return JSONResponse({"detail": "資料集不存在或沒有可辨識頁面"}, status_code=400)
         rid = uuid.uuid4().hex
-        prompt_material = (Path(__file__).with_name("core").joinpath("doc_router.py").read_bytes()
-                           + Path(__file__).with_name("core").joinpath("doc_types.py").read_bytes())
-        code_material = prompt_material + Path(__file__).read_bytes() + Path(__file__).with_name("core").joinpath("pipeline.py").read_bytes()
+        from app.core import model_invocation
         settings = {"combinations": combos, "repeats": repeats,
                     "warmup": bool(payload.get("warmup", False)), "timeout_seconds": timeout,
                     "max_edge": max_edge, "concurrency": 1,
-                    "prompt_version_sha256": hashlib.sha256(prompt_material).hexdigest(),
-                    "code_version_sha256": hashlib.sha256(code_material).hexdigest(),
+                    **model_invocation.source_versions(),
                     "model_parameters": {"temperature": 0, "seed": 42},
                     "environment": {"python": platform.python_version(), "platform": platform.platform(),
                                     "processor": platform.processor()}}
@@ -475,6 +472,11 @@ def _set_run_action(run_id, action):
             return JSONResponse({"detail": "找不到驗證批次"}, status_code=404)
         if run["status"] == "terminated":
             return JSONResponse({"detail": "此批次已終止，無法續跑或重跑"}, status_code=409)
+        if action in ("resume", "retry"):
+            from app.core.model_invocation import same_execution_version
+            saved = json.loads(run["settings_json"] or "{}")
+            if not same_execution_version(saved):
+                return JSONResponse({"detail": "程式、契約或政策版本已改變（或屬舊版批次），請建立新驗證批次；歷史結果仍可查看匯出"}, status_code=409)
         if action == "terminate":
             if run["status"] not in ("queued", "running", "cancelling", "cancelled", "interrupted"):
                 return JSONResponse({"detail": "此批次已完成，無須終止"}, status_code=409)
@@ -604,8 +606,17 @@ def _scheduler():
         with _connect() as con:
             run = con.execute("SELECT settings_json FROM runs WHERE id=?", (task["run_id"],)).fetchone()
         settings = json.loads(run["settings_json"])
+        from app.core.model_invocation import same_execution_version
+        if not same_execution_version(settings):
+            with _db_lock, _connect() as con:
+                con.execute("UPDATE runs SET status='interrupted',cancel_requested=1,current=? WHERE id=?",
+                            ("版本已改變，請建立新批次", task["run_id"]))
+                con.execute("UPDATE results SET status='cancelled',error=? WHERE run_id=? AND status IN ('queued','running')",
+                            ("版本已改變", task["run_id"]))
+            continue
         combo = next(c for c in settings["combinations"] if c["id"] == task["combo_id"])
-        payload = {**task, "combo": combo, "max_edge": settings["max_edge"], "run_id": task["run_id"]}
+        payload = {**task, "combo": combo, "max_edge": settings["max_edge"], "run_id": task["run_id"],
+                   "execution_version_sha256": settings["execution_version_sha256"]}
         response = _run_child(payload, settings["timeout_seconds"])
         _save_response(task, response)
         _finalize_runs()
@@ -691,37 +702,15 @@ def _annotate(source: Path, boxes: dict, output: Path):
 
 
 def _text_classify(ocr_text, model_setting):
-    from app.core import activity, doc_router, model_factory, pipeline, settings_store
-    provider, model = settings_store.parse_setting(model_setting)
-    chat = model_factory.get_chat_model(provider, model, temperature=0.0)
-    prompt = (doc_router.ROUTER_PROMPT.replace("這張掃描件", "以下 OCR 文字所屬的掃描件")
-              + "\n純文字模式沒有圖片，rotate 固定回 0。\n\nOCR 文字：\n" + ocr_text)
-    with activity.stage("structure", model_setting + "（OCR 純文字判類型）"):
-        raw = pipeline._invoke_text(chat, prompt)
-    obj = pipeline._parse_json(raw)
-    cand = str(obj.get("type", "")).lower()
-    from app.core import doc_types
-    return cand if cand in doc_types.DOC_TYPES else "other"
+    from app.core import doc_router
+    return doc_router.classify(mode="ocr_text", ocr_text=ocr_text, model_setting=model_setting)[0]
 
 
 def _text_extract(image_path, type_key, ocr_lines, ocr_text, model_setting):
-    from app.core import activity, doc_types, model_factory, pipeline, settings_store
+    from app.core import model_factory, pipeline, settings_store
     provider, model = settings_store.parse_setting(model_setting)
     chat = model_factory.get_chat_model(provider, model, temperature=0.0)
-    prompt = doc_types.build_extract_prompt(type_key)
-    prompt = prompt.replace("以下提供原圖與 OCR 文字（供校對，數字以圖為準）。",
-                            "以下僅提供 OCR 文字，請勿臆測 OCR 中不存在的內容。")
-    prompt = "\n".join(line for line in prompt.splitlines()
-                         if "boxes" not in line and "邊界框" not in line and "座標正規化" not in line)
-    prompt += "\n純文字模式不可輸出 boxes。\n\nOCR 文字：\n" + ocr_text
-    with activity.stage("structure", model_setting + "（OCR 純文字欄位萃取）"):
-        raw = pipeline._invoke_text(chat, prompt)
-    data = pipeline._parse_json(raw)
-    data["boxes"] = pipeline._refine_boxes_with_ocr(data.get("fields") or {}, {}, ocr_lines,
-                                                     image_path, keep_unmatched=False)
-    if doc_types.get(type_key).get("has_entries"):
-        pipeline._fix_entry_sides_with_ocr(data, ocr_lines)
-    voucher = pipeline._build_voucher(data, type_key)
+    voucher = pipeline.extract_evidence(image_path, type_key, chat, ocr_lines, ocr_text, mode="ocr_text")
     voucher.ocr_provider = "paddle/pp-ocrv5"
     voucher.structure_model = model_setting
     return voucher
@@ -729,6 +718,10 @@ def _text_extract(image_path, type_key, ocr_lines, ocr_text, model_setting):
 
 def _recognize(payload):
     from app.core import activity, invocation_trace, model_factory, pipeline, settings_store
+    from app.core.model_invocation import source_versions
+    expected_version = payload.get("execution_version_sha256")
+    if expected_version and expected_version != source_versions()["execution_version_sha256"]:
+        raise ValueError("辨識前版本已改變，請建立新批次")
     result_dir = RUNS / payload["run_id"] / payload["id"]
     result_dir.mkdir(parents=True, exist_ok=True)
     original = Path(payload["page_path"])
@@ -776,6 +769,10 @@ def _recognize(payload):
     recognition = time.perf_counter() - recognition_started
     voucher.source_file = f"{payload['relative_path']} p{payload['page_no']}"
     data = voucher.model_dump(mode="json")
+    if expected_version:
+        if expected_version != source_versions()["execution_version_sha256"]:
+            raise ValueError("辨識期間版本已改變，結果未納入原批次，請建立新批次")
+        data["execution_version_sha256"] = expected_version
     if ocr_fallback:
         data["validation_warning"] = ocr_fallback
     evidence_started = time.perf_counter()
@@ -865,10 +862,10 @@ def _export_data(run_id):
 def _csv_files(data):
     files = {}
     specs = {
-      "vouchers.csv": ["result_id","source","page","combo","mode","actual_path","repeat","attempt","status","doc_type","voucher_id","date","total_amount","recognition_seconds","complete_seconds","error"],
+      "vouchers.csv": ["result_id","source","page","combo","mode","actual_path","repeat","attempt","status","doc_type","voucher_id","date","total_amount","recognition_seconds","complete_seconds","error","field_evidence_json","validation_warnings_json","classification_meta_json"],
       "fields.csv": ["result_id","source","field","value","box","located"],
-      "items.csv": ["result_id","source","index","description","quantity","unit_price","amount"],
-      "entries.csv": ["result_id","source","index","description","amount","debit_account","debit_account_name","credit_account","credit_account_name"]}
+      "items.csv": ["result_id","source","index","description","quantity","unit_price","amount","hs_code","origin_country"],
+      "entries.csv": ["result_id","source","index","description","amount","debit_account","debit_account_name","credit_account","credit_account_name","evidence_paths_json"]}
     buffers = {name: io.StringIO(newline="") for name in specs}
     writers = {name: csv.DictWriter(buffers[name], fieldnames=fields, extrasaction="ignore") for name, fields in specs.items()}
     for writer in writers.values(): writer.writeheader()
@@ -880,7 +877,10 @@ def _csv_files(data):
           "doc_type": _csv_safe(voucher.get("doc_type")), "voucher_id": _csv_safe(voucher.get("voucher_id")),
           "date": _csv_safe(voucher.get("date")), "total_amount": voucher.get("total_amount"),
           "recognition_seconds": result["timings"].get("recognition_seconds"),
-          "complete_seconds": result["timings"].get("complete_seconds"), "error": _csv_safe(result["error"])})
+          "complete_seconds": result["timings"].get("complete_seconds"), "error": _csv_safe(result["error"]),
+          "field_evidence_json": json.dumps(voucher.get("field_evidence") or {}, ensure_ascii=False),
+          "validation_warnings_json": json.dumps(voucher.get("validation_warnings") or [], ensure_ascii=False),
+          "classification_meta_json": json.dumps(voucher.get("classification_meta") or {}, ensure_ascii=False)})
         boxes = voucher.get("boxes") or {}
         fields = {"voucher_id": voucher.get("voucher_id"), "date": voucher.get("date"),
                   "doc_type": voucher.get("doc_type"), "subtotal": voucher.get("subtotal"),
@@ -894,6 +894,7 @@ def _csv_files(data):
             writers["items.csv"].writerow({"result_id": result["id"], "source": _csv_safe(source), "index": index,
                                            **{k: _csv_safe(v) for k, v in item.items()}})
         for index, item in enumerate(voucher.get("entries") or [], 1):
+            item = {**item, "evidence_paths_json": json.dumps(item.get("evidence_paths") or [], ensure_ascii=False)}
             writers["entries.csv"].writerow({"result_id": result["id"], "source": _csv_safe(source), "index": index,
                                              **{k: _csv_safe(v) for k, v in item.items()}})
     for name, buffer in buffers.items(): files[name] = "\ufeff" + buffer.getvalue()

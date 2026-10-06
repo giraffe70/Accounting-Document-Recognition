@@ -73,12 +73,58 @@ def get_voucher(rec_id: int) -> Optional[VoucherRecord]:
         return s.get(VoucherRecord, rec_id)
 
 
-def update_current(rec_id: int, voucher_dict: dict) -> Optional[VoucherRecord]:
+def update_current(rec_id: int, voucher_dict: dict, *, mark_manual: bool = True) -> Optional[VoucherRecord]:
     """人工修正欄位（不動 ai_json，只更新 current_json）。"""
     with get_session() as s:
         rec = s.get(VoucherRecord, rec_id)
         if not rec:
             return None
+        from app.core import pipeline
+        previous = json.loads(rec.current_json)
+        old_fields = previous.get("fields") or {}
+        voucher_dict = {**previous, **voucher_dict}
+        # Browser copies can lag behind earlier saves; audit history is server-owned.
+        from copy import deepcopy
+        voucher_dict["field_evidence"] = deepcopy(previous.get("field_evidence") or {})
+        if mark_manual:
+            voucher_dict["validation_warnings"] = list(previous.get("validation_warnings") or [])
+            voucher_dict["classification_meta"] = deepcopy(previous.get("classification_meta") or {})
+        if voucher_dict.get("fields") is not None:
+            voucher_dict["fields"] = {**old_fields, **voucher_dict["fields"]}
+        if mark_manual:
+            evidence = voucher_dict.setdefault("field_evidence", {})
+            changed = False
+            for key, value in (voucher_dict.get("fields") or {}).items():
+                if old_fields.get(key) != value:
+                    if any(r.get("source") == "manual" and r.get("selected") and r.get("value") == value
+                           for r in evidence.get("fields." + key, [])):
+                        continue  # same raw input as before normalization, not a new edit
+                    changed = True
+                    for item in evidence.get("fields." + key, []):
+                        item["selected"] = False
+                    evidence.setdefault("fields." + key, []).append({"source": "manual", "value": value, "selected": True})
+            for index, row in enumerate(voucher_dict.get("items") or []):
+                old_rows = previous.get("items") or []
+                old_row = old_rows[index] if index < len(old_rows) else {}
+                for key, value in row.items():
+                    if old_row.get(key) != value:
+                        path = f"items[{index}].{key}"
+                        if any(r.get("source") == "manual" and r.get("selected") and r.get("value") == value
+                               for r in evidence.get(path, [])):
+                            continue
+                        changed = True
+                        for item in evidence.get(path, []):
+                            item["selected"] = False
+                        evidence.setdefault(path, []).append({"source": "manual", "value": value, "selected": True})
+            if (len(voucher_dict.get("items") or []) != len(previous.get("items") or [])
+                    or voucher_dict.get("note") != previous.get("note")
+                    or voucher_dict.get("doc_type_key") != previous.get("doc_type_key")):
+                changed = True
+            if changed and voucher_dict.get("classification_meta"):
+                meta = voucher_dict["classification_meta"]
+                meta.update(status="candidate", stale=True)
+                meta["warnings"] = list(dict.fromkeys([*(meta.get("warnings") or []), "資料已人工修改，原分錄待重新確認"]))
+        voucher_dict = pipeline.canonicalize_voucher(voucher_dict)
         rec.current_json = json.dumps(voucher_dict, ensure_ascii=False)
         rec.period = _period_of(voucher_dict.get("date", "")) or rec.period
         rec.updated_at = datetime.now()
@@ -310,7 +356,7 @@ def re_recognize(rec_id: int) -> Optional[VoucherRecord]:
     if not rec or not rec.image_path:
         return None
     hint = "；".join(n for n in (rec.dev_note, rec.clerk_note, rec.accountant_note) if n)
-    v = pipeline.recognize_image(str(config.UPLOAD_DIR / rec.image_path), hint=hint)
+    v = pipeline.recognize_image(str(config.UPLOAD_DIR / rec.image_path), hint=hint, company=rec.company)
     with get_session() as s:
         r = s.get(VoucherRecord, rec_id)
         blob = json.dumps(v.model_dump(), ensure_ascii=False)
@@ -318,6 +364,8 @@ def re_recognize(rec_id: int) -> Optional[VoucherRecord]:
         r.current_json = blob
         r.confidence = str(v.confidence or "")
         r.structure_model = v.structure_model
+        r.ocr_provider = v.ocr_provider
+        r.period = _period_of(v.date) or r.period
         r.updated_at = datetime.now()
         s.add(r)
         s.commit()
@@ -412,7 +460,8 @@ def recognize_record(rec_id: int) -> Optional[VoucherRecord]:
     cur = json.loads(rec.current_json)
     type_key = cur.get("doc_type_key") or "other"
     hint = "；".join(n for n in (rec.dev_note, rec.clerk_note, rec.accountant_note) if n)
-    v = pipeline.extract_for_type(str(config.UPLOAD_DIR / rec.image_path), type_key, hint=hint)
+    v = pipeline.extract_for_type(str(config.UPLOAD_DIR / rec.image_path), type_key, hint=hint, company=rec.company)
+    v.field_evidence["doc_type_key"] = cur.get("field_evidence", {}).get("doc_type_key") or [{"source": "manual", "value": type_key, "reason": "已確認單據類型", "selected": True}]
     v.source_image = ""   # 影像已在原位
     with get_session() as s:
         r = s.get(VoucherRecord, rec_id)

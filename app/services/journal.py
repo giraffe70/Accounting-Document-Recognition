@@ -5,6 +5,7 @@
 import json
 
 from app.db.models import ReviewStatus
+from app.core import doc_types
 from app.services import review
 
 
@@ -20,14 +21,18 @@ def build_journal(period: str, company: str = "") -> dict:
     recs = review.list_vouchers(status=ReviewStatus.accountant_approved,
                                 company=company, period=period)
     rows = []
+    complete = True
     for rec in recs:
         cur = json.loads(rec.current_json)
+        if doc_types.is_supporting(cur.get("doc_type_key", "")):
+            continue
         date = cur.get("date", "")
         vid = cur.get("voucher_id", "")
         for e in cur.get("entries", []):
-            amt = e.get("amount") or 0
+            amt = e.get("amount")
             has_debit = bool(e.get("debit_account") or e.get("debit_account_name"))
             has_credit = bool(e.get("credit_account") or e.get("credit_account_name"))
+            complete = complete and amt is not None and has_debit != has_credit
             rows.append({
                 "date": date,
                 "voucher_id": vid,
@@ -36,6 +41,10 @@ def build_journal(period: str, company: str = "") -> dict:
                 "credit_account": f"{e.get('credit_account','')} {e.get('credit_account_name','')}".strip(),
                 "debit_amount": amt if has_debit else None,
                 "credit_amount": amt if has_credit else None,
+                "evidence_paths": e.get("evidence_paths") or [],
+                "field_evidence": cur.get("field_evidence") or {},
+                "validation_warnings": cur.get("validation_warnings") or [],
+                "classification_meta": cur.get("classification_meta") or {},
             })
     rows.sort(key=lambda r: (r["date"], r["voucher_id"]))
     debit_total = sum(r["debit_amount"] or 0 for r in rows)
@@ -47,5 +56,5 @@ def build_journal(period: str, company: str = "") -> dict:
         "count": len(recs),
         "debit_total": debit_total,
         "credit_total": credit_total,
-        "balance_check": abs(debit_total - credit_total) < 0.01,
+        "balance_check": bool(rows) and complete and abs(debit_total - credit_total) < 0.01,
     }

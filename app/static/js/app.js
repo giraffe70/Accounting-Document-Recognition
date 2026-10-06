@@ -275,6 +275,7 @@
     renderDatecheck(rec.datecheck);
     renderAmountcheck(rec.amountcheck);
     renderEntries(v.entries || [], v.debit_total, v.credit_total, v.balance_check);
+    renderWarnings();
     setupImage(id, rec.has_image, v.boxes || {});
     renderPages(id, rec.attachments || 0);
     $("revSrc").textContent = `來源：${rec.source_file || "—"}　OCR：${rec.ocr_provider || "—"}　結構化：${rec.structure_model || "—"}`;
@@ -532,18 +533,28 @@
     renderTaxcheck(r);
   }
 
+  function itemSpecs() {
+    const spec = DOC_TYPES[$("revTypeSel").value || currentVoucher.doc_type_key] || DOC_TYPES.other;
+    return (spec && spec.item_fields && spec.item_fields.length) ? spec.item_fields : [
+      {key:"description",label:"品名",kind:"text"}, {key:"quantity",label:"數量",kind:"number"},
+      {key:"unit_price",label:"單價",kind:"number"}, {key:"amount",label:"合計",kind:"number"}];
+  }
   function renderItems(items) {
     const body = $("itemsBody");
+    const header = $("itemsSection").querySelector("thead tr");
+    if (header) header.innerHTML = itemSpecs().map((f) => `<th>${esc(f.label)}</th>`).join("") + "<th></th>";
     body.innerHTML = (items.length ? items : [{}]).map(itemRow).join("");
     bindItemRows();
   }
   function itemRow(it) {
-    return `<tr>
-      <td><input class="it-desc" value="${esc(it.description)}"></td>
-      <td><input class="it-qty" type="number" value="${it.quantity ?? ""}"></td>
-      <td><input class="it-price" type="number" value="${it.unit_price ?? ""}"></td>
-      <td><input class="it-amt" type="number" value="${it.amount ?? ""}"></td>
-      <td><button class="btn btn-sm del">✕</button></td></tr>`;
+    return `<tr data-original="${esc(JSON.stringify(it))}">${itemSpecs().map((f) => {
+      let value = it[f.key], type = f.kind === "number" ? "number" : "text";
+      if (type === "number" && value != null && value !== "") {
+        const number = Number(String(value).replace(/(?:NT)?\$|[,\s，、＄元]/gi, ""));
+        if (Number.isFinite(number)) value = number; else type = "text";
+      }
+      return `<td><input data-item-key="${esc(f.key)}" data-kind="${f.kind}" type="${type}" value="${esc(value ?? "")}"></td>`;
+    }).join("")}<td><button class="btn btn-sm del">✕</button></td></tr>`;
   }
   function bindItemRows() {
     $("itemsBody").querySelectorAll(".del").forEach((b) =>
@@ -554,45 +565,55 @@
   });
 
   function collectForm() {
-    // 動態欄位值
-    const fields = {};
+    const fields = {...(currentVoucher.fields || {})};
     activeFields.forEach((f) => {
       const el = $(f.el); if (!el) return;
-      fields[f.key] = f.kind === "number" ? (el.value === "" ? null : Number(el.value)) : el.value;
+      fields[f.key] = el.value === "" ? null : f.kind === "number" && el.type === "number" ? Number(el.value) : el.value;
     });
-    const items = Array.from($("itemsBody").querySelectorAll("tr")).map((tr) => ({
-      description: tr.querySelector(".it-desc").value,
-      quantity: tr.querySelector(".it-qty").value === "" ? null : Number(tr.querySelector(".it-qty").value),
-      unit_price: tr.querySelector(".it-price").value === "" ? null : Number(tr.querySelector(".it-price").value),
-      amount: tr.querySelector(".it-amt").value === "" ? null : Number(tr.querySelector(".it-amt").value),
-    })).filter((it) => it.description || it.amount != null);
-    const g = (k) => fields[k];
-    const first = (...ks) => { for (const k of ks) { const x = g(k); if (x != null && x !== "") return x; } return null; };
-    // 對映共同會計欄位（與後端 _build_voucher 一致，供統編核對/分類/日記帳沿用）
-    return {
-      ...currentVoucher, fields, items, note: $("f-note").value,
-      voucher_id: first("voucher_id", "doc_no", "cheque_no", "declaration_no", "statement_no") || "",
-      date: first("date", "issue_date") || "",
-      subtotal: g("subtotal") ?? null,
-      tax_amount: (g("tax_amount") ?? g("business_tax")) ?? null,
-      total_amount: (g("total_amount") ?? g("principal")) ?? null,
-      currency: g("currency") || "TWD",
-      seller: { name: first("seller_name", "vendor", "payee", "taxpayer", "trader", "provider") || "", tax_id: first("seller_tax_id", "tax_id") || "" },
-      buyer: { name: first("buyer_name", "remitter") || "", tax_id: g("buyer_tax_id") || "" },
-    };
+    const items = Array.from($("itemsBody").querySelectorAll("tr")).map((tr) => {
+      const item = JSON.parse(tr.dataset.original || "{}");
+      tr.querySelectorAll("[data-item-key]").forEach((el) => {
+        item[el.dataset.itemKey] = el.value === "" ? null : el.dataset.kind === "number" && el.type === "number" ? Number(el.value) : el.value;
+      });
+      return item;
+    }).filter((it) => Object.values(it).some((value) => value != null && value !== ""));
+    // The server owns common-field mapping; retain every unrendered field/attribute.
+    return {...currentVoucher, fields, items, note: $("f-note").value};
+  }
+
+  function renderWarnings() {
+    let box = $("voucherWarnings");
+    if (!box) {
+      box = document.createElement("div"); box.id = "voucherWarnings"; box.className = "hint warn";
+      $("balanceInfo").insertAdjacentElement("afterend", box);
+    }
+    const meta = currentVoucher.classification_meta || {};
+    const lines = [...(currentVoucher.validation_warnings || []), ...(meta.warnings || []), ...(meta.assumptions || [])];
+    if (meta.status === "candidate") lines.unshift("候選分錄：請核對證據與假設後再審核。");
+    if (meta.original_checks && meta.original_checks.single_sided) lines.unshift("保留原始單面傳票；借貸平衡與原印合計分開檢查。");
+    if (meta.status === "skipped" && meta.reason === "supporting") lines.unshift("佐證附頁不單獨產生分錄。");
+    box.textContent = Array.from(new Set(lines)).join("；");
+    box.classList.toggle("hidden", !lines.length);
   }
 
   $("btnClassify").addEventListener("click", async () => {
     // 先存目前編輯，再產生分錄
-    await fetch(`/api/vouchers/${currentId}`, { method: "PUT", headers: json(), body: JSON.stringify(collectForm()) });
-    const r = await withInferProgress("科目分類中…", () =>
-      fetch(`/api/vouchers/${currentId}/classify`, { method: "POST" }).then((x) => x.json()));
-    if (!r.ok) { alert(errText(r, "分類失敗")); return; }
-    currentVoucher.entries = r.entries;
-    currentVoucher.debit_total = r.debit_total; currentVoucher.credit_total = r.credit_total;
-    currentVoucher.balance_check = r.balance_check;
-    renderEntries(r.entries, r.debit_total, r.credit_total, r.balance_check);
-    toast("已產生會計分錄");
+    try {
+      await persistCurrentEdits();
+      const r = await withInferProgress("科目分類中…", () =>
+        fetch(`/api/vouchers/${currentId}/classify`, { method: "POST" }).then((x) => x.json()));
+      if (!r.ok) { alert(errText(r, "分類失敗")); return; }
+      currentVoucher.entries = r.entries;
+      currentVoucher.debit_total = r.debit_total; currentVoucher.credit_total = r.credit_total;
+      currentVoucher.balance_check = r.balance_check;
+      currentVoucher.classification_meta = r.classification_meta || {};
+      currentVoucher.validation_warnings = r.validation_warnings || [];
+      renderWarnings();
+      renderEntries(r.entries, r.debit_total, r.credit_total, r.balance_check);
+      toast("已產生會計分錄");
+    } catch (err) {
+      alert(`分類失敗：${err.message}`);
+    }
   });
 
   // 三個備註欄不在 collectForm()（那是憑證內容），需另存；它們是下次辨識的人工修正提示
@@ -619,6 +640,9 @@
       method: "PUT", headers: json(), body: JSON.stringify(collectForm()),
     });
     if (!voucherResp.ok) throw new Error(await responseError(voucherResp, "儲存修正失敗"));
+    const record = await voucherResp.json();
+    currentVoucher = record.current || currentVoucher;
+    renderWarnings();
 
     const notesResp = await saveNotes();
     if (!notesResp.ok) throw new Error(await responseError(notesResp, "儲存備註失敗"));
@@ -1138,43 +1162,55 @@
   }
 
   // ── 列印 / PDF（瀏覽器列印，可另存 PDF）──
-  function printWindow(title, bodyHtml) {
-    const w = window.open("", "_blank");
-    w.document.write(`<!DOCTYPE html><html lang="zh-TW"><head><meta charset="UTF-8"><title>${title}</title>
+  function printWindow(title, bodyHtml, targetWindow = null) {
+    const w = targetWindow || window.open("", "_blank");
+    w.document.write(`<!DOCTYPE html><html lang="zh-TW"><head><meta charset="UTF-8"><title>${esc(title)}</title>
       <style>body{font-family:"Microsoft JhengHei",sans-serif;padding:24px;color:#1f2328;}
       h1{font-size:20px;margin-bottom:4px;} .meta{color:#636c76;font-size:12px;margin-bottom:16px;}
       table{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:10px;}
       th,td{border:1px solid #999;padding:5px 8px;text-align:left;} th{background:#eee;}
       .num{text-align:right;} .kv td{border:none;padding:2px 8px;}
-      tfoot td{font-weight:700;background:#f3f3f3;}</style></head><body>${bodyHtml}
+      tfoot td{font-weight:700;background:#f3f3f3;} pre.audit{white-space:pre-wrap;overflow-wrap:anywhere;font-size:10.5px;}</style></head><body>${bodyHtml}
       <script>window.onload=function(){window.print();}<\/script></body></html>`);
     w.document.close();
   }
 
-  function printVoucher() {
-    const v = collectForm();
-    const items = (v.items || []).map((i) => `<tr><td>${esc(i.description)}</td><td class="num">${nf(i.quantity)}</td><td class="num">${nf(i.unit_price)}</td><td class="num">${nf(i.amount)}</td></tr>`).join("");
-    const entries = (currentVoucher.entries || []).map((e) => `<tr><td>${esc(e.description)}</td><td>${esc(e.debit_account)} ${esc(e.debit_account_name)}</td><td>${esc(e.credit_account)} ${esc(e.credit_account_name)}</td><td class="num">${nf(e.amount)}</td></tr>`).join("");
+  async function printVoucher() {
+    const preview = window.open("", "_blank");
+    if (!preview) { alert("請允許開啟列印視窗"); return; }
+    const response = await fetch(`/api/vouchers/${currentId}`, {method:"PUT",headers:json(),body:JSON.stringify(collectForm())});
+    if (!response.ok) { preview.close(); alert("列印前儲存失敗"); return; }
+    const record = await response.json();
+    const v = record.current || {}; currentVoucher = v;
+    const specs = itemSpecs();
+    const items = (v.items || []).map((i) => `<tr>${specs.map((f) => `<td>${f.kind === "number" ? nf(i[f.key]) : esc(i[f.key])}</td>`).join("")}</tr>`).join("");
+    const meta = v.classification_meta || {};
+    const warnings = [meta.status === "candidate" ? "候選分錄，需人工核對" : "", ...(v.validation_warnings || []), ...(meta.warnings || []), ...(meta.assumptions || [])].filter(Boolean);
+    const entries = (currentVoucher.entries || []).map((e) => `<tr><td>${esc(e.description)}</td><td>${esc(e.debit_account)} ${esc(e.debit_account_name)}</td><td>${esc(e.credit_account)} ${esc(e.credit_account_name)}</td><td class="num">${nf(e.amount)}</td><td>${esc((e.evidence_paths || []).join("、"))}</td></tr>`).join("");
+    const audit = {field_evidence: v.field_evidence || {}, validation_warnings: v.validation_warnings || [],
+      classification_meta: meta, items: v.items || [], entries: v.entries || []};
     printWindow(`憑證 ${v.voucher_id}`, `
       <h1>會計憑證審核報告</h1>
       <div class="meta">憑證號 ${esc(v.voucher_id)}　日期 ${esc(v.date)}　類型 ${esc(v.doc_type)}</div>
       <table class="kv"><tr><td>賣方</td><td>${esc(v.seller.name)}（${esc(v.seller.tax_id)}）</td><td>買方</td><td>${esc(v.buyer.name)}（${esc(v.buyer.tax_id)}）</td></tr>
       <tr><td>未稅</td><td>${nf(v.subtotal)}</td><td>稅額</td><td>${nf(v.tax_amount)}</td></tr>
       <tr><td>總計</td><td>${nf(v.total_amount)} ${esc(v.currency)}</td><td>摘要</td><td>${esc(v.note)}</td></tr></table>
-      ${items ? `<h3>明細</h3><table><thead><tr><th>品名</th><th>數量</th><th>單價</th><th>合計</th></tr></thead><tbody>${items}</tbody></table>` : ""}
-      ${entries ? `<h3>會計分錄</h3><table><thead><tr><th>摘要</th><th>借方科目</th><th>貸方科目</th><th>金額</th></tr></thead><tbody>${entries}</tbody></table>` : ""}`);
+      ${items ? `<h3>明細</h3><table><thead><tr>${specs.map((f) => `<th>${esc(f.label)}</th>`).join("")}</tr></thead><tbody>${items}</tbody></table>` : ""}
+      ${warnings.length ? `<p>${warnings.map(esc).join("；")}</p>` : ""}
+      ${entries ? `<h3>會計分錄</h3><table><thead><tr><th>摘要</th><th>借方科目</th><th>貸方科目</th><th>金額</th><th>金額來源</th></tr></thead><tbody>${entries}</tbody></table>` : ""}
+      <h3>來源、驗證與政策紀錄</h3><pre class="audit">${esc(JSON.stringify(audit, null, 2))}</pre>`, preview);
   }
   $("btnPrintVoucher").addEventListener("click", printVoucher);
 
   $("btnPrintJournal").addEventListener("click", () => {
     if (!journalData || !journalData.rows || !journalData.rows.length) { alert("無資料可列印"); return; }
-    const rows = journalData.rows.map((r) => `<tr><td>${esc(r.date)}</td><td>${esc(r.voucher_id)}</td><td>${esc(r.summary)}</td><td>${esc(r.debit_account)}</td><td>${esc(r.credit_account)}</td><td class="num">${r.debit_amount == null ? "" : nf(r.debit_amount)}</td><td class="num">${r.credit_amount == null ? "" : nf(r.credit_amount)}</td></tr>`).join("");
+    const rows = journalData.rows.map((r) => `<tr><td>${esc(r.date)}</td><td>${esc(r.voucher_id)}</td><td>${esc(r.summary)}</td><td>${esc(r.debit_account)}</td><td>${esc(r.credit_account)}</td><td class="num">${r.debit_amount == null ? "" : nf(r.debit_amount)}</td><td class="num">${r.credit_amount == null ? "" : nf(r.credit_amount)}</td><td>${esc((r.evidence_paths || []).join("、"))}</td></tr>`).join("");
     printWindow(`日記帳 ${journalData.period}`, `
       <h1>單月日記帳　${esc(journalData.period)}</h1>
       <div class="meta">${journalData.company ? "公司 " + esc(journalData.company) + "　" : ""}${journalData.count} 張已核定憑證</div>
-      <table><thead><tr><th>日期</th><th>憑證號</th><th>摘要</th><th>借方科目</th><th>貸方科目</th><th>借方金額</th><th>貸方金額</th></tr></thead>
+      <table><thead><tr><th>日期</th><th>憑證號</th><th>摘要</th><th>借方科目</th><th>貸方科目</th><th>借方金額</th><th>貸方金額</th><th>金額來源</th></tr></thead>
       <tbody>${rows}</tbody>
-      <tfoot><tr><td colspan="5">合計</td><td class="num">${nf(journalData.debit_total)}</td><td class="num">${nf(journalData.credit_total)}</td></tr></tfoot></table>`);
+      <tfoot><tr><td colspan="5">合計</td><td class="num">${nf(journalData.debit_total)}</td><td class="num">${nf(journalData.credit_total)}</td><td></td></tr></tfoot></table>`);
   });
 
   // 深連結：#v=<id> 自動開啟該筆審核
