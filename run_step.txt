@@ -1,0 +1,10 @@
+conda create -y -n pdfscan312 python=3.12
+conda activate pdfscan312
+
+pip install -r requirements.txt -r requirements-ocr.txt
+
+---
+ollama pull qwen2.5vl:7b && ollama pull qwen2.5:7b && ollama pull bge-m3
+start_webui.bat   # http://127.0.0.1:8090
+
+---
