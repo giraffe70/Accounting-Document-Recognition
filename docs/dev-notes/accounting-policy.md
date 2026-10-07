@@ -81,6 +81,16 @@
 
 修改預設或公司覆寫時，應提高 `version`。`roles` 內每個值必須是包含 `name` 及可選字串 `code` 的物件。顯式代碼若不存在於當次科目表，該角色的 code 留空並由分類結果留下 warning；手續費缺科目時不得併入其他金額。
 
+## 金額來源與欄位用途
+
+每個金額欄位的契約 metadata 描述 `purpose`、`currency`、`policy_key`；它決定金額用途和適用政策角色，不單獨證明讀值正確。每列分錄的 `amount_source` 是金額主來源；舊資料只有一條 `evidence_path` 時可相容地沿用為主來源，兩條以上必須明示主要來源，不依金額相等猜測來源。VAT 借方或貸方金額都必須引用用途為 VAT 且 Decimal 數值相等的來源（例如 5.0 與 5 相等，5.001 與 5 不相等）；多項相加的總額僅可使用程式產生的 `derived_amounts`，不可由模型把若干 OCR 數字自行合併。選取證據只代表送交本次模型的資料，不代表人工已確認。
+
+`broker_note.customs_duty`、`broker_fee`、`edi_fee`、`tax` 各有對應來源用途及政策鍵。通用 `declaration` 的估價金額預設不納入進口分錄；僅由已確認的文件用途及當次政策決定入帳範圍。幣別沿用文件可確認的幣別；進口稅費預設台幣，不與外幣貨款混加。
+
+## 付款狀態
+
+`payment_state` 同時保存文件上的付款原文與正規化結果。狀態限定為 `paid`、`unpaid`、`unknown`；付款方式限定為 `bank`、`cash`、`other`、`unknown`。像「已結清」的原始字樣保留，並正規化為已付款；付款方式未知時不可假設銀行或現金。分類 API 回應附上 `payment_state` 供前端收取，日記帳列提供主金額來源與付款狀態。舊保存資料沒有此欄位時維持可讀，新增輸出可包含其 JSON 值。
+
 ## 候選分錄與付款證據
 
 會計模板由 `_accounting_context()` 傳入完整憑證、可用金額來源、程式推導值、科目表及政策。明示已付款時還需付款方式才能選擇 `bank` 或 `cash`；若付款方式不明，列 warning，不強制貸記銀行。未付款進口使用 `payable_goods`；未付款採購／商品使用 `payable_goods`，其他已判為費用的文件使用 `payable_expense`。若收支方向不明，保留候選與警告，不強制貸記銀行或應付款。
@@ -95,6 +105,6 @@
 
 現有保存層須繼續讀取沒有新增 metadata 的舊憑證；新版 API 可追加 metadata 欄位，不要求舊記錄補造證據。`accounting_policies.json` 是影響分類結果的設定，已納入系統備份與還原範圍。
 
-批次分類使用 v2 metadata：完整來源清單及 runtime digest 都納入版本摘要；前端、CSV 及 hash v2 已整合。舊批次保留唯讀；不得在舊批次上接續寫入新版本結果，也不得讓 v1 與 v2 設定／來源混用於同一批次。全範圍離線驗收 74 項通過；真實模型比較仍另行待辦。
+批次分類使用 v2 metadata：完整來源清單及 runtime digest 都納入版本摘要；前端、CSV 及 hash v2 已整合。舊批次保留唯讀；不得在舊批次上接續寫入新版本結果，也不得讓 v1 與 v2 設定／來源混用於同一批次。本輪全套離線驗收 107 項通過；前輪 74 項為歷史基準。真實模型比較仍另行待辦。
 
 相關說明：[提示詞改版盤點](prompt-review.md)、[系統架構](architecture.md)。程式介面：[政策載入與角色解析](../../app/services/accounting_policy.py)、[會計分類](../../app/services/classify.py)、[提示模板](../../app/core/prompts.py)、[憑證與分錄契約](../../app/models/schemas.py)。設定檔位置為執行期 `app/data/accounting_policies.json`，不屬於版控文件。

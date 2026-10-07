@@ -132,8 +132,8 @@ class RefactorFlowTests(unittest.TestCase):
         self.assertEqual(len(requests), 2)
         self.assertEqual(v.seller.name, "原廠商")
         self.assertEqual(v.seller.tax_id, "12345678")
-        self.assertIn('"tax_id":null', requests[1][0]["text"])
-        self.assertNotIn('"vendor":null', requests[1][0]["text"])
+        self.assertIn('"tax_id":null', requests[1][0]["content"])
+        self.assertNotIn('"vendor":null', requests[1][0]["content"])
         decoder.assert_not_called()
         self.assertFalse(any(p.get("type") == "image_url" for req in requests for p in req))
 
@@ -219,7 +219,9 @@ class RefactorFlowTests(unittest.TestCase):
         self.assertTrue(result.balance_check)
         self.assertEqual(result.credit_total, 260036)
         self.assertEqual(result.classification_meta["status"], "proposed")
-        request = chat.invoke.call_args.args[0][0]["content"]
+        messages = chat.invoke.call_args.args[0]
+        self.assertEqual(messages[1]["role"], "user")
+        request = "\n".join(part.get("text", "") for part in messages[1]["content"] if part.get("type") == "text")
         self.assertIn('"hs_code":"1234"', request)
         self.assertIn('"invoice_amount":999', request)
         ctx = classify._accounting_context(v, accounting_policy.load_policy("", v.model_dump(), CHART))

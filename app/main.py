@@ -673,7 +673,7 @@ def api_classify(rec_id: int):
                 "debit_total": voucher.debit_total, "credit_total": voucher.credit_total,
                 "balance_check": voucher.balance_check, "classification_meta": voucher.classification_meta,
                 "warnings": voucher.classification_meta.get("warnings", []),
-                "validation_warnings": voucher.validation_warnings}
+                "validation_warnings": voucher.validation_warnings, "payment_state": voucher.payment_state}
     except Exception as exc:  # noqa: BLE001
         logger.exception("科目分類失敗")
         return JSONResponse({"ok": False, "detail": f"分類失敗：{exc}"}, status_code=500)

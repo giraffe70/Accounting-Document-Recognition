@@ -11,18 +11,18 @@ ROUTER_PROMPT = prompts.build_route_prompt()
 
 
 def validate_route(obj: dict, mode="image") -> dict:
-    if not isinstance(obj.get("type"), str) or "rotate" not in obj or set(obj) - {"type", "rotate", "reason"}:
-        raise ValueError("route requires type, rotate and optional reason")
+    obj = prompts.RouteOutput.model_validate(obj).model_dump()
     candidate = obj["type"].strip().lower()
     key = candidate if candidate in doc_types.DOC_TYPES else next((key for key, spec in doc_types.DOC_TYPES.items()
           if candidate == spec["label"].lower() or candidate in [str(a).lower() for a in spec.get("aliases", [])]), "other")
-    reason = str(obj.get("reason") or ("未知文件類型：" + candidate if key == "other" else ""))
-    try:
-        rotate = int(obj["rotate"])
-    except (TypeError, ValueError):
-        rotate = 0
-    if mode == "ocr_text" or rotate not in (0, 90, 180, 270):
-        rotate = 0
+    reason = obj["reason"].strip()
+    if key == "other" and not reason:
+        if candidate in ("other", *doc_types.DOC_TYPES["other"]["aliases"]):
+            raise ValueError("other requires nonempty reason")
+        reason = "未知文件類型：" + candidate
+    rotate = obj["rotate"]
+    if rotate not in ((0,) if mode == "ocr_text" else (0, 90, 180, 270)):
+        raise ValueError("rotate allowed: 0" if mode == "ocr_text" else "rotate allowed: 0,90,180,270")
     return {"type": key, "rotate": rotate, "reason": reason}
 
 

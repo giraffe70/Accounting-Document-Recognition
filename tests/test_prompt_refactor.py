@@ -109,12 +109,50 @@ class StructuredInvocationTests(unittest.TestCase):
 
         self.assertEqual(result, self._valid_invoice())
         self.assertEqual(len(requests), 2)
-        self.assertEqual(requests[0], content)
-        self.assertEqual(requests[1][:2], content)
-        self.assertIn("原始 OCR", requests[1][1]["text"])
-        self.assertIn("依原任務及全部原證據", requests[1][-1]["text"])
+        original_messages = prompts.task_messages(content)
+        self.assertEqual(requests[0], original_messages)
+        original_user = next(message for message in original_messages if message["role"] == "user")
+        self.assertIn("原始 OCR", json.dumps(original_user["content"], ensure_ascii=False))
+        self.assertEqual(requests[1][0]["role"], "system")
+        self.assertIn("依原任務及全部原證據", requests[1][0]["content"])
+        self.assertEqual(requests[1][1], original_user)
+        self.assertEqual(requests[1][-1]["role"], "user")
+        self.assertIn("contract_errors", requests[1][-1]["content"])
+        self.assertNotIn("contract_errors", requests[1][0]["content"])
         self.assertEqual([r["round"] for r in trace if r["kind"] == "structured_round"], [1, 2])
         self.assertEqual([r["round"] for r in trace if r["kind"] == "contract_error"], [1])
+
+    def test_contract_retry_appends_instruction_to_existing_system_prefix(self):
+        content = [
+            {"type": "text", "text": prompts.build_extract_prompt("invoice", ocr_text="SYSTEM CASE OCR")},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,fixture"}},
+        ]
+        requests = []
+
+        def invoke(_chat, request):
+            requests.append(request)
+            return json.dumps({"fields": {"wrong": None}} if len(requests) == 1 else self._valid_invoice(), ensure_ascii=False)
+
+        model_invocation.invoke_structured(
+            object(), content,
+            lambda value: prompts.validate_extraction(value, "invoice", "image"),
+            invoke=invoke,
+        )
+
+        original = prompts.task_messages(content)
+        self.assertEqual(original[0]["role"], "system")
+        self.assertEqual(original[1]["role"], "user")
+        self.assertEqual(requests[0], original)
+        retry = requests[1]
+        self.assertEqual(retry[0]["role"], "system")
+        self.assertTrue(retry[0]["content"].startswith(original[0]["content"] + "\n"))
+        self.assertIn("依原任務及全部原證據", retry[0]["content"])
+        self.assertNotIn("contract_errors", retry[0]["content"])
+        self.assertEqual(retry[1], original[1])
+        self.assertIn("SYSTEM CASE OCR", json.dumps(retry[1]["content"], ensure_ascii=False))
+        self.assertEqual(retry[2]["role"], "user")
+        diagnostic = json.loads(retry[2]["content"])
+        self.assertIn("contract_errors", diagnostic)
 
     def test_two_invalid_semantic_rounds_are_the_limit(self):
         calls = []

@@ -92,3 +92,23 @@ def norm_date(value: str) -> str:
 
 def first_present(fields: dict, keys: list[str], default=None):
     return next((fields[k] for k in keys if fields.get(k) is not None and fields.get(k) != ""), default)
+
+
+def normalize_payment(status=None, method=None) -> dict:
+    """Keep the observed words; normalize only explicit settlement evidence."""
+    def text(value):
+        return re.sub(r"\s+", "", unicodedata.normalize("NFKC", str(value or ""))).lower()
+    state, way = text(status), text(method)
+    unpaid = {"未付", "未付款", "尚未付款", "未繳", "未繳款", "未結清", "尚未結清", "待付款", "待繳款", "unpaid", "unsettled", "outstanding"}
+    paid = {"已付", "已付款", "已繳", "已繳款", "已結清", "已繳清", "付款完成", "付款成功", "匯款成功", "扣款成功", "交易成功", "paid", "settled"}
+    normalized = "unpaid" if state in unpaid else "paid" if state in paid else "unknown"
+    bank = {"銀行", "銀行轉帳", "銀行扣款", "銀行匯款", "匯款", "轉帳", "自動扣繳", "電匯", "bank", "banktransfer", "wire"}
+    normalized_method = "cash" if way in {"現金", "cash"} else "bank" if way in bank else "other" if way else "unknown"
+    return {"raw_status": status, "raw_method": method, "status": normalized, "method": normalized_method}
+
+
+def normalize_currency(value) -> str | None:
+    s = unicodedata.normalize("NFKC", str(value or "")).strip().upper()
+    aliases = {"新臺幣": "TWD", "新台幣": "TWD", "臺幣": "TWD", "台幣": "TWD", "NTD": "TWD", "NT$": "TWD",
+               "美元": "USD", "US$": "USD", "日圓": "JPY", "日元": "JPY", "人民幣": "CNY", "RMB": "CNY", "歐元": "EUR"}
+    return aliases.get(s, s if re.fullmatch(r"[A-Z]{3}", s) else None)

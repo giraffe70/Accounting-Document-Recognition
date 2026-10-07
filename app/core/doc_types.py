@@ -7,6 +7,7 @@
 
 新增類型只要在 DOC_TYPES 加一筆即可，三處自動同步。
 """
+from copy import deepcopy
 
 
 def _f(key, label, kind="text"):
@@ -80,7 +81,7 @@ DOC_TYPES = {
     "export_declaration": {
         "label": "出口報單",
         "aliases": ["出口報單", "出口報關", "export declaration", "外貨復出口", "外貨出口"],
-        "has_items": False,   # 48 格已含明細區(32-41)，主要明細以欄位呈現
+        "has_items": True,    # 保留首項欄位相容舊紀錄，多項貨物以 items 保存
         "fields": [
             _f("transport_mode", "海空運別(1)"), _f("doc_category", "報單類別(2)"),
             _f("declaration_no", "報單號碼(3)"), _f("customs_clear_no", "海關通關號碼(4)"),
@@ -364,7 +365,7 @@ TYPE_HINTS = {
     "cheque": ["只讀支票區域；出票人與受款人不同。amount_words 抄錄票面大寫原文。"],
     "remittance": ["交易金額是本金，扣款金額及手續費分別讀取；付款人與收款人分開。"],
     "customs_tax": ["多聯內容相同時讀完整一聯，不跨聯混填；營業稅稅基不是營業稅。"],
-    "export_declaration": ["依格位標題及編號定位；32至41格讀第一項貨物。"],
+    "export_declaration": ["按商品序號逐列讀取全部可見貨物及續頁；32至41格首項仍填原 fields，items 不重複底列合計。"],
     "import_declaration": ["納稅義務人是進口商，賣方是國外出口商；items.amount 讀完稅價格新臺幣。"],
     "broker_note": ["代墊稅費與報關勞務費分開；預收費、應收退金額不是總計。"],
     "declaration": ["direction 只依文件明示的進口或出口填入。"],
@@ -374,8 +375,8 @@ TYPE_HINTS = {
     "statement": ["表列發票號碼是參照號，填 ref_invoice_no。issuer 是開立方，customer 是客戶。"],
     "purchase_order": ["buyer 是採購方，supplier 是供應商；採購訂單不代表已付款。"],
     "fda_import": ["applicant 是報驗進口商，manufacturer 是生產廠；許可通知不是稅費繳款證明。"],
-    "social_insurance": ["單位與個人負擔只有文件分列才讀取；各費用代號分列 items。"],
-    "bill_detail": ["只讀純費用明細附頁；載明繳費總額的繳費結果通知應分類為 utility。"],
+    "social_insurance": ["單位與個人負擔只有文件分列才讀取；每項費用代號填 items.fee_code，不猜代號。"],
+    "bill_detail": ["只讀純佐證費用明細；含繳費總額的公用事業或電信通知用 utility，其他付款文件依用途分類。"],
     "journal_voucher": ["entries 照印出各列讀取；借貸依所在欄，單面傳票不補另一面；底列合計不是分錄。"],
     "other": [],
 }
@@ -398,8 +399,8 @@ COMMON_FIELDS = {
 }
 for _key, _spec in DOC_TYPES.items():
     _spec["type_hints"] = TYPE_HINTS[_key]
-    _spec["item_fields"] = list(ITEM_FIELDS) if _spec.get("has_items") else []
-    _spec["entry_fields"] = list(ENTRY_FIELDS) if _spec.get("has_entries") else []
+    _spec["item_fields"] = deepcopy(ITEM_FIELDS) if _spec.get("has_items") else []
+    _spec["entry_fields"] = deepcopy(ENTRY_FIELDS) if _spec.get("has_entries") else []
     _allowed_fields = {f["key"] for f in _spec["fields"]}
     if _key == "import_declaration":
         _allowed_fields.update(("buyer", "buyer_tax_id"))
@@ -412,6 +413,54 @@ for _key, _spec in DOC_TYPES.items():
                 _spec["fields"].append(_field)
 DOC_TYPES["import_declaration"]["item_fields"] += [_f("hs_code", "貨品分類號列"), _f("origin_country", "生產國別")]
 DOC_TYPES["broker_note"]["fields"].append(_f("direction", "明示進出口別"))
+DOC_TYPES["social_insurance"]["item_fields"].append(_f("fee_code", "費用代號"))
+DOC_TYPES["export_declaration"]["fields"].append(_f("currency", "外幣發票幣別"))
+DOC_TYPES["statement"]["fields"].append(_f("currency", "帳款幣別"))
+DOC_TYPES["export_declaration"]["item_fields"] += [
+    _f("item_no", "商品序號"), _f("hs_code", "貨品分類號列"), _f("origin_country", "生產國別"),
+    _f("brand", "廠牌"), _f("unit", "計價單位"), _f("stat_qty", "統計數量", "number"),
+    _f("stat_unit", "統計單位"), _f("net_weight", "淨重公斤", "number")]
+for _fob_field in DOC_TYPES["export_declaration"]["item_fields"]:
+    if _fob_field["key"] == "amount":
+        _fob_field["label"] = "商品離岸價格新臺幣"
+
+# 金額用途、幣別與政策鍵由契約登錄；數量/重量不會成為可記帳金額。
+# $document 表示文件明示幣別，無法確認時保留 unknown。
+def _money(purpose, currency="TWD", policy_key=None):
+    return {"purpose": purpose, "currency": currency, "policy_key": policy_key}
+
+
+MONEY_CONTRACTS = {
+    "invoice": {"subtotal": _money("subtotal"), "tax_amount": _money("vat", policy_key="business_tax"), "total_amount": _money("document_total")},
+    "cheque": {"total_amount": _money("document_total")},
+    "remittance": {"total_amount": _money("document_total", "$document"), "debit_amount": _money("payment_total", "$document"), "fee": _money("fee", "$document", "fee")},
+    "customs_tax": {"duty": _money("duty", policy_key="duty"), "trade_fee": _money("tax_fee", policy_key="trade_fee"), "business_tax": _money("vat", policy_key="business_tax"), "total_amount": _money("document_total")},
+    "import_declaration": {"invoice_amount": _money("goods_value", "$document"), "freight": _money("valuation_adjustment", "$document"), "insurance": _money("valuation_adjustment", "$document"), "total_cif_twd": _money("goods_value"), "duty": _money("duty", policy_key="duty"), "business_tax": _money("vat", policy_key="business_tax"), "trade_fee": _money("tax_fee", policy_key="trade_fee"), "commodity_tax": _money("tax_fee", policy_key="commodity_tax"), "total_tax": _money("document_total")},
+    "export_declaration": {"invoice_amount": _money("goods_value", "$document"), "freight": _money("valuation_adjustment", "$document"), "insurance": _money("valuation_adjustment", "$document"), "add_fee": _money("valuation_adjustment", "$document"), "deduct_fee": _money("valuation_adjustment", "$document"), "total_fob_twd": _money("goods_value"), "fob_value_twd": _money("goods_value")},
+    "broker_note": {"customs_duty": _money("duty", policy_key="duty"), "broker_fee": _money("fee", policy_key="fee"), "edi_fee": _money("fee", policy_key="fee"), "subtotal": _money("subtotal"), "tax": _money("vat", policy_key="business_tax"), "total_amount": _money("document_total"), "prepaid": _money("prepayment"), "balance": _money("outstanding")},
+    "declaration": {"total_amount": _money("goods_value")},
+    "tax_bill": {"principal": _money("tax_fee"), "surcharge": _money("fee"), "total_amount": _money("document_total")},
+    "utility": {"basic_fee": _money("fee"), "usage_fee": _money("fee"), "subtotal": _money("subtotal"), "business_tax": _money("vat", policy_key="business_tax"), "levy_fee": _money("fee"), "total_amount": _money("document_total")},
+    "receipt": {"subtotal": _money("subtotal"), "tax_amount": _money("vat", policy_key="business_tax"), "withholding_tax": _money("withholding"), "total_amount": _money("document_total")},
+    "statement": {"subtotal": _money("subtotal", "$document"), "tax_amount": _money("vat", "$document", "business_tax"), "total_amount": _money("document_total", "$document")},
+    "purchase_order": {"total_amount": _money("document_total", "$document")},
+    "fda_import": {},
+    "social_insurance": {"employer_share": _money("fee"), "employee_share": _money("fee"), "surcharge": _money("fee"), "total_amount": _money("document_total")},
+    "bill_detail": {"total_amount": _money("document_total")},
+    "journal_voucher": {"debit_total": _money("printed_total"), "credit_total": _money("printed_total")},
+    "other": {"subtotal": _money("subtotal"), "tax_amount": _money("vat", policy_key="business_tax"), "total_amount": _money("document_total")},
+}
+for _key, _spec in DOC_TYPES.items():
+    _spec["default_currency"] = None if any(f["key"] == "currency" for f in _spec["fields"]) else "TWD"
+    for _field in _spec["fields"]:
+        if _field["key"] in MONEY_CONTRACTS[_key]:
+            _field["money"] = MONEY_CONTRACTS[_key][_field["key"]]
+    for _field in _spec["item_fields"]:
+        if _field["key"] == "amount":
+            _field["money"] = _money("goods_value" if _key in ("import_declaration", "export_declaration", "declaration") else "line_amount",
+                "TWD" if _key in ("export_declaration", "declaration") else "$document")
+    _spec["common_money"] = {name: next((MONEY_CONTRACTS[_key][alias] for alias in _spec["common_fields"].get(name, []) if alias in MONEY_CONTRACTS[_key]), None)
+                            for name in ("subtotal", "tax_amount", "total_amount")}
 
 
 def build_extract_prompt(type_key: str, **kwargs) -> str:

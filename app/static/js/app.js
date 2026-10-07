@@ -608,6 +608,7 @@
       currentVoucher.balance_check = r.balance_check;
       currentVoucher.classification_meta = r.classification_meta || {};
       currentVoucher.validation_warnings = r.validation_warnings || [];
+      currentVoucher.payment_state = r.payment_state || {};
       renderWarnings();
       renderEntries(r.entries, r.debit_total, r.credit_total, r.balance_check);
       toast("已產生會計分錄");
@@ -1186,9 +1187,9 @@
     const items = (v.items || []).map((i) => `<tr>${specs.map((f) => `<td>${f.kind === "number" ? nf(i[f.key]) : esc(i[f.key])}</td>`).join("")}</tr>`).join("");
     const meta = v.classification_meta || {};
     const warnings = [meta.status === "candidate" ? "候選分錄，需人工核對" : "", ...(v.validation_warnings || []), ...(meta.warnings || []), ...(meta.assumptions || [])].filter(Boolean);
-    const entries = (currentVoucher.entries || []).map((e) => `<tr><td>${esc(e.description)}</td><td>${esc(e.debit_account)} ${esc(e.debit_account_name)}</td><td>${esc(e.credit_account)} ${esc(e.credit_account_name)}</td><td class="num">${nf(e.amount)}</td><td>${esc((e.evidence_paths || []).join("、"))}</td></tr>`).join("");
+    const entries = (currentVoucher.entries || []).map((e) => `<tr><td>${esc(e.description)}</td><td>${esc(e.debit_account)} ${esc(e.debit_account_name)}</td><td>${esc(e.credit_account)} ${esc(e.credit_account_name)}</td><td class="num">${nf(e.amount)}</td><td>${esc(e.amount_source)}</td><td>${esc((e.evidence_paths || []).join("、"))}</td></tr>`).join("");
     const audit = {field_evidence: v.field_evidence || {}, validation_warnings: v.validation_warnings || [],
-      classification_meta: meta, items: v.items || [], entries: v.entries || []};
+      classification_meta: meta, payment_state: v.payment_state || {}, items: v.items || [], entries: v.entries || []};
     printWindow(`憑證 ${v.voucher_id}`, `
       <h1>會計憑證審核報告</h1>
       <div class="meta">憑證號 ${esc(v.voucher_id)}　日期 ${esc(v.date)}　類型 ${esc(v.doc_type)}</div>
@@ -1197,18 +1198,18 @@
       <tr><td>總計</td><td>${nf(v.total_amount)} ${esc(v.currency)}</td><td>摘要</td><td>${esc(v.note)}</td></tr></table>
       ${items ? `<h3>明細</h3><table><thead><tr>${specs.map((f) => `<th>${esc(f.label)}</th>`).join("")}</tr></thead><tbody>${items}</tbody></table>` : ""}
       ${warnings.length ? `<p>${warnings.map(esc).join("；")}</p>` : ""}
-      ${entries ? `<h3>會計分錄</h3><table><thead><tr><th>摘要</th><th>借方科目</th><th>貸方科目</th><th>金額</th><th>金額來源</th></tr></thead><tbody>${entries}</tbody></table>` : ""}
+      ${entries ? `<h3>會計分錄</h3><table><thead><tr><th>摘要</th><th>借方科目</th><th>貸方科目</th><th>金額</th><th>主要金額來源</th><th>輔助證據路徑</th></tr></thead><tbody>${entries}</tbody></table>` : ""}
       <h3>來源、驗證與政策紀錄</h3><pre class="audit">${esc(JSON.stringify(audit, null, 2))}</pre>`, preview);
   }
   $("btnPrintVoucher").addEventListener("click", printVoucher);
 
   $("btnPrintJournal").addEventListener("click", () => {
     if (!journalData || !journalData.rows || !journalData.rows.length) { alert("無資料可列印"); return; }
-    const rows = journalData.rows.map((r) => `<tr><td>${esc(r.date)}</td><td>${esc(r.voucher_id)}</td><td>${esc(r.summary)}</td><td>${esc(r.debit_account)}</td><td>${esc(r.credit_account)}</td><td class="num">${r.debit_amount == null ? "" : nf(r.debit_amount)}</td><td class="num">${r.credit_amount == null ? "" : nf(r.credit_amount)}</td><td>${esc((r.evidence_paths || []).join("、"))}</td></tr>`).join("");
+    const rows = journalData.rows.map((r) => `<tr><td>${esc(r.date)}</td><td>${esc(r.voucher_id)}</td><td>${esc(r.summary)}</td><td>${esc(r.debit_account)}</td><td>${esc(r.credit_account)}</td><td class="num">${r.debit_amount == null ? "" : nf(r.debit_amount)}</td><td class="num">${r.credit_amount == null ? "" : nf(r.credit_amount)}</td><td>${esc(r.amount_source)}</td><td>${esc((r.evidence_paths || []).join("、"))}</td><td>${esc(r.payment_state == null ? "" : JSON.stringify(r.payment_state))}</td></tr>`).join("");
     printWindow(`日記帳 ${journalData.period}`, `
       <h1>單月日記帳　${esc(journalData.period)}</h1>
       <div class="meta">${journalData.company ? "公司 " + esc(journalData.company) + "　" : ""}${journalData.count} 張已核定憑證</div>
-      <table><thead><tr><th>日期</th><th>憑證號</th><th>摘要</th><th>借方科目</th><th>貸方科目</th><th>借方金額</th><th>貸方金額</th><th>金額來源</th></tr></thead>
+      <table><thead><tr><th>日期</th><th>憑證號</th><th>摘要</th><th>借方科目</th><th>貸方科目</th><th>借方金額</th><th>貸方金額</th><th>主要金額來源</th><th>輔助證據路徑</th><th>付款狀態</th></tr></thead>
       <tbody>${rows}</tbody>
       <tfoot><tr><td colspan="5">合計</td><td class="num">${nf(journalData.debit_total)}</td><td class="num">${nf(journalData.credit_total)}</td><td></td></tr></tfoot></table>`);
   });

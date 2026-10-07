@@ -862,10 +862,10 @@ def _export_data(run_id):
 def _csv_files(data):
     files = {}
     specs = {
-      "vouchers.csv": ["result_id","source","page","combo","mode","actual_path","repeat","attempt","status","doc_type","voucher_id","date","total_amount","recognition_seconds","complete_seconds","error","field_evidence_json","validation_warnings_json","classification_meta_json"],
+      "vouchers.csv": ["result_id","source","page","combo","mode","actual_path","repeat","attempt","status","doc_type","voucher_id","date","total_amount","recognition_seconds","complete_seconds","error","field_evidence_json","validation_warnings_json","classification_meta_json","payment_state_json"],
       "fields.csv": ["result_id","source","field","value","box","located"],
-      "items.csv": ["result_id","source","index","description","quantity","unit_price","amount","hs_code","origin_country"],
-      "entries.csv": ["result_id","source","index","description","amount","debit_account","debit_account_name","credit_account","credit_account_name","evidence_paths_json"]}
+      "items.csv": ["result_id","source","index","description","quantity","unit_price","amount","hs_code","origin_country","fee_code"],
+      "entries.csv": ["result_id","source","index","description","amount","debit_account","debit_account_name","credit_account","credit_account_name","evidence_paths_json","amount_source"]}
     buffers = {name: io.StringIO(newline="") for name in specs}
     writers = {name: csv.DictWriter(buffers[name], fieldnames=fields, extrasaction="ignore") for name, fields in specs.items()}
     for writer in writers.values(): writer.writeheader()
@@ -880,7 +880,8 @@ def _csv_files(data):
           "complete_seconds": result["timings"].get("complete_seconds"), "error": _csv_safe(result["error"]),
           "field_evidence_json": json.dumps(voucher.get("field_evidence") or {}, ensure_ascii=False),
           "validation_warnings_json": json.dumps(voucher.get("validation_warnings") or [], ensure_ascii=False),
-          "classification_meta_json": json.dumps(voucher.get("classification_meta") or {}, ensure_ascii=False)})
+          "classification_meta_json": json.dumps(voucher.get("classification_meta") or {}, ensure_ascii=False),
+          "payment_state_json": json.dumps(voucher.get("payment_state") or {}, ensure_ascii=False)})
         boxes = voucher.get("boxes") or {}
         fields = {"voucher_id": voucher.get("voucher_id"), "date": voucher.get("date"),
                   "doc_type": voucher.get("doc_type"), "subtotal": voucher.get("subtotal"),

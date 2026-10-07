@@ -43,6 +43,10 @@ class ApiContractTests(unittest.TestCase):
         response = endpoint()
         import_item_keys = {field["key"] for field in response["types"]["import_declaration"]["item_fields"]}
         self.assertTrue({"hs_code", "origin_country"} <= import_item_keys)
+        self.assertIn("fee_code", {f["key"] for f in response["types"]["social_insurance"]["item_fields"]})
+        self.assertTrue(response["types"]["export_declaration"]["has_items"])
+        broker_tax = next(f for f in response["types"]["broker_note"]["fields"] if f["key"] == "tax")
+        self.assertEqual(broker_tax["money"]["purpose"], "vat")
 
     def test_classify_endpoint_keeps_response_and_voucher_metadata(self):
         extra = {"legacy_extension": {"retained": True}}
@@ -61,6 +65,7 @@ class ApiContractTests(unittest.TestCase):
                 description="invoice payment", amount=120,
                 debit_account="6000", credit_account="1000",
                 evidence_paths=["fields.total_amount"],
+                amount_source="fields.total_amount",
             )]
             voucher.debit_total = 120
             voucher.credit_total = 120
@@ -70,6 +75,7 @@ class ApiContractTests(unittest.TestCase):
                 "assumptions": ["payment date not shown"],
             }
             voucher.validation_warnings = ["amount source requires review"]
+            voucher.payment_state = {"status": "paid", "raw_status": "已結清"}
             return voucher
 
         endpoint = load_endpoint("api_classify", {
@@ -84,6 +90,8 @@ class ApiContractTests(unittest.TestCase):
         response = endpoint(7)
         self.assertTrue(response["ok"])
         self.assertEqual(response["entries"][0]["evidence_paths"], ["fields.total_amount"])
+        self.assertEqual(response["entries"][0]["amount_source"], "fields.total_amount")
+        self.assertEqual(response["payment_state"]["status"], "paid")
         self.assertEqual(response["debit_total"], 120)
         self.assertEqual(response["credit_total"], 120)
         self.assertTrue(response["balance_check"])

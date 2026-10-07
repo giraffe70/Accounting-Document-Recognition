@@ -43,7 +43,7 @@ def _esc(value) -> str:
 def _audit(c: dict) -> str:
     """Render optional provenance and validation data without dropping new fields."""
     audit = {}
-    for key in ("field_evidence", "validation_warnings", "classification_meta"):
+    for key in ("field_evidence", "validation_warnings", "classification_meta", "payment_state"):
         value = c.get(key)
         if value not in (None, {}, [], ""):
             audit[key] = value
@@ -58,9 +58,10 @@ def _audit(c: dict) -> str:
         audit["item_extra_fields"] = extra_items
 
     entry_evidence = [
-        {"entry": index, "evidence_paths": entry.get("evidence_paths")}
+        {"entry": index, "amount_source": entry.get("amount_source"),
+         "evidence_paths": entry.get("evidence_paths") or []}
         for index, entry in enumerate(c.get("entries") or [], 1)
-        if entry.get("evidence_paths")
+        if entry.get("amount_source") or entry.get("evidence_paths")
     ]
     if entry_evidence:
         audit["entry_evidence_paths"] = entry_evidence

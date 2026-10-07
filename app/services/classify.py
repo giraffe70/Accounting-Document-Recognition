@@ -5,18 +5,17 @@ import logging
 import math
 from decimal import Decimal
 import requests
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import Field
 from app import config
 from app.core import activity, doc_types, model_factory, prompts, settings_store, model_invocation
-from app.core.normalization import norm_amount
+from app.core.normalization import norm_amount, normalize_currency, normalize_payment
 from app.db.models import ReviewStatus
 from app.models.schemas import JournalEntry, Voucher
 from app.services import accounting_policy, accounts, review
 
 logger = logging.getLogger("pdf_scan.classify")
 EMBED_MODEL = "bge-m3"
-MONETARY_FIELDS = {"subtotal", "tax_amount", "total_amount", "invoice_amount", "freight", "insurance", "add_fee", "deduct_fee",
- "total_fob_twd", "fob_value_twd", "total_cif_twd", "duty", "business_tax", "trade_fee", "commodity_tax", "total_tax", "customs_duty", "broker_fee", "edi_fee", "tax", "prepaid", "balance", "principal", "surcharge", "basic_fee", "usage_fee", "levy_fee", "debit_amount", "fee", "employer_share", "employee_share", "withholding_tax"}
+
 
 class ProposedEntry(prompts.RawContract):
     description: str
@@ -26,6 +25,7 @@ class ProposedEntry(prompts.RawContract):
     credit_account: str
     credit_account_name: str
     evidence_paths: list[str] = Field(default_factory=list)
+    amount_source: str | None = None
     dept: str = ""
     offset_code: str = ""
 
@@ -45,7 +45,7 @@ def _validate_output(obj):
 
 def _voucher_brief(v: Voucher) -> dict:
     # This compatibility name now returns the complete relevant document, not a lossy summary.
-    result = v.model_dump(mode="json", include={"doc_type", "doc_type_key", "voucher_id", "date", "fields", "buyer", "seller", "items", "subtotal", "tax_amount", "total_amount", "currency", "note", "validation_warnings"})
+    result = v.model_dump(mode="json", include={"doc_type", "doc_type_key", "voucher_id", "date", "fields", "buyer", "seller", "items", "subtotal", "tax_amount", "total_amount", "currency", "note", "validation_warnings", "payment_state"})
     # Audit history stays stored; classification needs current evidence, not every past edit.
     result["field_evidence"] = {path: selected for path, records in v.field_evidence.items()
         if isinstance(records, list) and (selected := [r for r in records if isinstance(r, dict) and r.get("selected")])}
@@ -53,37 +53,62 @@ def _voucher_brief(v: Voucher) -> dict:
 
 
 def _accounting_context(v: Voucher, policy: dict) -> dict:
-    sources = {}
-    def add(path, value):
+    spec = doc_types.get(v.doc_type_key)
+    sources, metadata, derived = {}, {}, {}
+    posting_currency = normalize_currency(policy["rules"].get("posting_currency", v.currency))
+    document_currency = normalize_currency(v.fields.get("currency")) or spec["default_currency"]
+    ambiguous_tax = doc_types.receipt_tax_ambiguous(v.doc_type_key, v.fields, v.field_evidence)
+
+    def add(path, value, contract):
+        if not contract or ambiguous_tax and contract["purpose"] == "vat":
+            return
         value = norm_amount(value)
-        if not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value):
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            return
+        currency = document_currency if contract["currency"] == "$document" else normalize_currency(contract["currency"])
+        eligible = currency is not None and currency == posting_currency
+        if policy["purpose"] == "import" and contract["purpose"] in ("goods_value", "valuation_adjustment", "unit_price"):
+            eligible = eligible and policy["rules"].get("include_goods_values", False)
+        selected = [r for r in v.field_evidence.get(path, []) if isinstance(r, dict) and r.get("selected")]
+        confirmation = "manual_confirmed" if any(r.get("source") == "manual" for r in selected) else "observed" if selected else "unverified"
+        debit_roles = policy["rules"].get("debit_roles", {})
+        role = debit_roles.get(path.removeprefix("fields."), debit_roles.get(contract.get("policy_key")))
+        metadata[path] = {**contract, "currency": currency, "eligible": bool(eligible), "policy_role": role,
+                          "confirmation_status": confirmation, "amount": value}
+        if eligible:
             sources[path] = value
-    for key, value in v.fields.items():
-        if key in MONETARY_FIELDS:
-            if key == "tax_amount" and doc_types.receipt_tax_ambiguous(v.doc_type_key, v.fields, v.field_evidence):
-                continue  # Legacy receipt prompts used this key for withholding; require review.
-            if policy["purpose"] == "import" and key not in {*policy["rules"]["debit_roles"], "total_tax", "total_amount"}:
-                continue
-            add("fields." + key, value)
+    for field in spec["fields"]:
+        add("fields." + field["key"], v.fields.get(field["key"]), field.get("money"))
     for key in ("subtotal", "tax_amount", "total_amount"):
-        if policy["purpose"] == "import" and key != "tax_amount" and v.doc_type_key != "customs_tax":
-            continue
-        if v.fields.get(key) is None and getattr(v, key) is not None:
-            add(key, getattr(v, key))
+        aliases = spec["common_fields"].get(key, [])
+        if not any(v.fields.get(alias) is not None for alias in aliases):
+            add(key, getattr(v, key), spec["common_money"][key])
     for index, item in enumerate(v.items):
-        if policy["purpose"] == "import" and v.doc_type_key == "import_declaration" and not policy["rules"].get("include_goods_values"):
-            continue
-        add(f"items[{index}].amount", item.amount)
-    derived = {}
+        for field in spec["item_fields"]:
+            add(f"items[{index}].{field['key']}", item.model_dump().get(field["key"]), field.get("money"))
     if policy["purpose"] == "import":
-        paths = ["fields." + key for key in policy["rules"]["payment_sum_fields"] if "fields." + key in sources]
+        sum_keys = policy["rules"]["payment_sum_fields"]
+        applicable = ["fields." + f["key"] for f in spec["fields"] if f.get("money") and
+                      (f["key"] in sum_keys or f["money"].get("policy_key") in sum_keys)]
+        paths = [p for p in applicable if p in sources]
         if paths:
-            derived["derived.import_payment"] = {"amount": float(sum(Decimal(str(sources[p])) for p in paths)), "source_paths": paths, "operation": "sum"}
-            printed = v.fields.get("total_tax") if v.doc_type_key == "import_declaration" else v.fields.get("total_amount")
-            derived["derived.import_payment"]["verified_by_printed_total"] = isinstance(printed, (int, float)) and abs(printed-derived["derived.import_payment"]["amount"]) < .01
-            sources["derived.import_payment"] = derived["derived.import_payment"]["amount"]
+            amount = float(sum(Decimal(str(sources[p])) for p in paths))
+            totals = [p for p in sources if p.startswith("fields.") and metadata[p]["purpose"] == "document_total"]
+            verified = any(abs(sources[p] - amount) < .01 for p in totals)
+            complete = len(paths) == len(applicable)
+            # A partial sum cannot stand in for the whole payment. A contradictory
+            # printed total also blocks settlement, even if all named costs exist.
+            eligible = verified or complete and not totals
+            path = "derived.import_payment" if eligible else "derived.import_costs_subtotal"
+            derived[path] = {"amount": amount, "source_paths": paths, "operation": "sum", "complete": complete,
+                             "verified_by_printed_total": verified, "eligible": eligible, "currency": posting_currency}
+            metadata[path] = {"amount": amount, "purpose": "payment_total" if eligible else "partial_sum",
+                              "currency": posting_currency, "eligible": eligible, "policy_key": None, "policy_role": None,
+                              "confirmation_status": "program_derived", "source_paths": paths}
+            if eligible:
+                sources[path] = amount
     return {"voucher": _voucher_brief(v), "amount_sources": sources, "derived_amounts": derived,
-            "posting_currency": policy["rules"].get("posting_currency", v.currency)}
+            "amount_source_meta": metadata, "posting_currency": posting_currency}
 
 
 def _transaction_direction(v: Voucher, company: str) -> str | None:
@@ -102,25 +127,25 @@ def _transaction_direction(v: Voucher, company: str) -> str | None:
 
 
 def _payment_assumptions(v: Voucher, policy: dict) -> list[str]:
-    status = v.fields.get("payment_status")
-    if status not in ("已付", "已付款", "已繳", "已繳款", "付款成功", "扣款成功", "交易成功", "未付", "未付款", "尚未付款", "未繳"):
+    state = normalize_payment(v.fields.get("payment_status"), v.fields.get("payment_method"))
+    if state["status"] == "unknown":
         if policy.get("transaction_direction") != "expense":
             return ["付款／收款狀態未確認，請人工核對結算科目"]
         role = policy["rules"].get("unpaid_role", "payable_expense")
         return ["付款狀態未確認，暫以未付款候選處理：" + policy["account_roles"][role]["name"]]
-    if status in ("已付", "已付款", "已繳", "已繳款", "付款成功", "扣款成功", "交易成功") and not v.fields.get("payment_method"):
+    if state["status"] == "paid" and state["method"] == "unknown":
         return ["付款方式未確認，現金或銀行待人工選擇"]
-    if status in ("已付", "已付款", "已繳", "已繳款", "付款成功", "扣款成功", "交易成功") and v.fields.get("payment_method") not in ("現金", "cash", "銀行", "銀行轉帳", "銀行扣款", "匯款", "轉帳", "自動扣繳", "bank"):
+    if state["status"] == "paid" and state["method"] == "other":
         return ["付款方式缺少適用的科目角色，請人工核對"]
     return []
 
 
 def _payment_role(v: Voucher, policy: dict) -> str | None:
-    status, method = v.fields.get("payment_status"), v.fields.get("payment_method")
-    if status in ("已付", "已付款", "已繳", "已繳款", "付款成功", "扣款成功", "交易成功"):
-        if method in ("現金", "cash"):
+    state = normalize_payment(v.fields.get("payment_status"), v.fields.get("payment_method"))
+    if state["status"] == "paid":
+        if state["method"] == "cash":
             return policy["payment_roles"]["cash"]
-        if method in ("銀行", "銀行轉帳", "銀行扣款", "匯款", "轉帳", "自動扣繳", "bank"):
+        if state["method"] == "bank":
             return policy["payment_roles"]["bank"]
         return None
     if policy["purpose"] == "import":
@@ -141,21 +166,19 @@ def _checked_entries(result: dict, context: dict, chart: list, policy: dict):
     for index, raw in enumerate(result["entries"]):
         row = dict(raw)
         amount = norm_amount(row["amount"])
-        paths = row["evidence_paths"]
+        paths = list(dict.fromkeys(row["evidence_paths"]))
+        primary = row.get("amount_source") or (paths[0] if len(paths) == 1 else None)
         if amount is not None and (isinstance(amount, bool) or not isinstance(amount, (int, float)) or not math.isfinite(amount)):
             amount = None
         valid_paths = [p for p in paths if p in context["amount_sources"]]
-        matched = amount is not None and any(abs(context["amount_sources"][p] - amount) < .01 for p in valid_paths)
-        if not paths and amount is not None:
-            matches = [p for p, value in context["amount_sources"].items() if abs(value - amount) < .01]
-            if matches:
-                valid_paths = matches
-                matched = True
-                warnings.append(f"分錄{index+1}未指定金額來源，依已知值匹配，需人工核對")
+        source_meta = context["amount_source_meta"].get(primary, {})
+        matched = (primary in context["amount_sources"] and source_meta.get("eligible") and
+                   source_meta.get("currency") == context["posting_currency"] and amount is not None and
+                   Decimal(str(context["amount_sources"][primary])) == Decimal(str(amount)))
         if amount is None or not matched or len(valid_paths) != len(paths) and bool(paths):
             warnings.append(f"分錄{index+1}缺少有效金額證據，金額留空")
             amount = None
-        row["amount"], row["evidence_paths"] = amount, valid_paths
+        row["amount"], row["evidence_paths"], row["amount_source"] = amount, valid_paths, primary
         for side in ("debit", "credit"):
             code = row[side + "_account"]
             if code and code not in by_code:
@@ -164,11 +187,14 @@ def _checked_entries(result: dict, context: dict, chart: list, policy: dict):
             elif code:
                 row[side + "_account_name"] = by_code[code]["name"]
         tax_account = policy["account_roles"]["input_tax"]["code"]
-        if tax_account and row["debit_account"] == tax_account and not any(p in ("tax_amount", "fields.tax_amount", "fields.business_tax", "fields.tax") for p in valid_paths):
-            warnings.append(f"分錄{index+1}沒有明示營業稅來源，進項稅額科目留空")
-            row["debit_account"] = ""
+        if tax_account and tax_account in (row["debit_account"], row["credit_account"]) and (source_meta.get("purpose") != "vat" or amount is None):
+            warnings.append(f"分錄{index+1}主要金額來源並非有效營業稅，金額與進項稅額科目留空")
+            for side in ("debit", "credit"):
+                if row[side + "_account"] == tax_account:
+                    row[side + "_account"] = row[side + "_account_name"] = ""
+            row["amount"] = None
         if policy["purpose"] == "import" and not row["credit_account"]:
-            roles = {policy["rules"]["debit_roles"][p.removeprefix("fields.")] for p in valid_paths if p.removeprefix("fields.") in policy["rules"]["debit_roles"]}
+            roles = {source_meta["policy_role"]} if source_meta.get("policy_role") and row["amount"] is not None else set()
             if len(roles) == 1:
                 expected = policy["account_roles"][roles.pop()]
                 if row["debit_account"] != expected["code"]:
@@ -211,6 +237,7 @@ def classify(voucher: Voucher, company: str = "") -> Voucher:
         voucher.balance_check = False
         voucher.classification_meta = {"status": "skipped", "reason": "supporting", "warnings": ["佐證附頁不單獨產生分錄"], "assumptions": []}
         return voucher
+    voucher.payment_state = normalize_payment(voucher.fields.get("payment_status"), voucher.fields.get("payment_method"))
     chart = accounts.load_accounts(company)
     policy = accounting_policy.load_policy(company, voucher.model_dump(), chart)
     policy["transaction_direction"] = _transaction_direction(voucher, company)
@@ -246,7 +273,7 @@ def classify(voucher: Voucher, company: str = "") -> Voucher:
     voucher.classification_meta = {"status": "candidate" if warnings or assumptions else "proposed", "company": company,
         "policy_version": policy["policy_version"], "policy_sha256": policy["policy_sha256"], "purpose": policy["purpose"],
         "warnings": list(dict.fromkeys(warnings)), "assumptions": list(dict.fromkeys(assumptions)), "derived_amounts": context["derived_amounts"],
-        "posting_currency": context["posting_currency"]}
+        "posting_currency": context["posting_currency"], "amount_source_meta": context["amount_source_meta"], "payment_state": voucher.payment_state}
     return voucher
 
 

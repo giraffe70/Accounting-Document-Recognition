@@ -42,6 +42,8 @@ def build_journal(period: str, company: str = "") -> dict:
                 "debit_amount": amt if has_debit else None,
                 "credit_amount": amt if has_credit else None,
                 "evidence_paths": e.get("evidence_paths") or [],
+                "amount_source": e.get("amount_source"),
+                "payment_state": cur.get("payment_state") or {},
                 "field_evidence": cur.get("field_evidence") or {},
                 "validation_warnings": cur.get("validation_warnings") or [],
                 "classification_meta": cur.get("classification_meta") or {},

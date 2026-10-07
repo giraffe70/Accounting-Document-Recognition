@@ -5,7 +5,9 @@
 
 ## 0. 本輪實作與驗證狀態
 
-2026-10-06 已完成三個共用提示模板與 18 類契約重構；全範圍離線驗收 74 項通過。沒有啟動真實模型、讀取私有掃描或 gold，也沒有證據可宣稱辨識準確率提升。真實模型比較仍待使用凍結資料、固定執行條件及相同模型設定完成。
+2026-10-06 已完成三個共用提示模板與 18 類契約重構。此前全範圍離線驗收 74 項是前輪基準；本輪全套離線驗收 107 項通過。沒有啟動真實模型、讀取私有掃描或 gold，也沒有證據可宣稱辨識準確率提升。真實模型比較仍待使用凍結資料、固定執行條件及相同模型設定完成。
+
+本輪文件同步範圍（全套離線驗收 107 項通過）：每列 `amount_source` 為主來源；只有一條舊證據路徑時可相容地提升為主來源，兩條以上必須明示主來源，不依金額匹配猜測。借方／貸方 VAT 金額均需有 Decimal 數值相等且 purpose 為 VAT 的來源（5.0 與 5 相等，5.001 與 5 不相等），`evidence_paths` 僅補證，多項合計引用程式 derived 值。18 類 money metadata 列明 purpose/currency/policy_key，報關行各費稅分別有來源，通用報單估價預設排除；付款狀態保留原文及 paid/unpaid/unknown，方式為 bank/cash/other/unknown，含「已結清」正規化。Router 限定 utility 為公用事業電信、rotate 僅四個直角方向、other 要原因；confidence 列舉來自契約且重試列可用值。勞健保 items 增 fee_code，出口完整 items 與既有首項相容。固定任務指令在 system，OCR／備註／政策／案例為無指令權威的 user JSON 資料，選取不代表人工確認；契約重試把靜態說明合併到第一個 system 訊息（保留 task 前綴），錯誤另作 user JSON，原 user 證據不變。Schema defaults、CSV `amount_source`／`fee_code`／`payment_state_json` 及列印保留一併記錄；statement currency 未知時不預設 TWD，金額 metadata 使用文件幣別，且不擴大現行對帳單會計政策或發票勾稽範圍。每種類型的 item metadata 深拷貝，避免跨類型污染。改版前 catalog 快照維持不動。
 
 | 項目 | 本輪實作狀態 |
 |---|---|
@@ -18,15 +20,15 @@
 | 傳票與列印 | `original_checks` 保存完整性、單側狀態、觀察總額及列印總額核對；`balance_check` 僅表示實際借貸相等。原始傳票保留檢查結果並略過新分錄；日記帳列保留 null 金額與證據、忽略舊 `bill_detail` 分錄列。前端／列印附上 escaped 來源、驗證及政策紀錄；重複舊瀏覽器儲存不覆蓋服務端 audit/stale 標記 |
 | 公司政策 | 設定檔為 `accounting_policies.json`；角色鍵為 `import_prepayment`、`input_tax`、`fees`、`bank`、`cash`、`payable_goods`、`payable_expense`、`insurance`，各角色值為 `{name, code?}` 物件。付款已付時須有付款方式才選銀行／現金；未付款進口／商品用 `payable_goods`，一般未付費用用 `payable_expense`，未明方向不強制貸方。完整範例見 [會計政策](accounting-policy.md) |
 | 候選狀態與範例 | 缺金額／科目或有 warning/assumption 時為 `candidate`；`skipped` 只標佐證附頁或保留原始傳票分錄。範例須同公司、同一當次 hash、`proposed`、已核定且有效平衡；舊未限定公司種子略過 |
-| 相容性與批次版本 | 舊保存資料仍可讀，API、前端及 CSV 已追加 metadata；hash v2 含完整來源清單及 runtime digest。舊批次唯讀，新舊版本禁止混續 |
+| 相容性與批次版本 | 舊保存資料仍可讀，API、前端及 CSV 已追加 metadata；分類 API 交付 `payment_state`，日記帳列提供 `amount_source` 與付款狀態；hash v2 含完整來源清單及 runtime digest。舊批次唯讀，新舊版本禁止混續 |
 
 ### 比較方式與已產出報告
 
-比較時使用同一份合成 OCR 證據，對齊改版前與現行生成器完整文字輸入，計入核心指令、契約、語意提示及 OCR；不計圖片 bytes、不加公司資料或動態案例。單位是 Unicode 字元，不是模型 token、速度或準確率。報告顯示 image 平均 1641.0→1231.8（-24.9%），OCR text 平均 1544.3→1227.7（-20.5%）；出口報單及進口報單因契約欄位豐富而增加，不能推論所有任務輸入成本下降。完整逐型資料見 [提示長度比較報告](prompt-length-report.md) 與 [JSON 報告](prompt-length-report.json)。
+比較時使用同一份合成 OCR 證據，對齊改版前與現行生成器完整文字輸入，計入核心指令、契約、語意提示及 OCR；不計圖片 bytes、不加公司資料或動態案例。單位是 Unicode 字元，不是模型 token、速度或準確率。最新報告顯示 image 平均 1641.0→1437.8（-12.4%），OCR text 平均 1544.3→1433.7（-7.2%）；出口報單及進口報單因契約欄位豐富而增加，不能推論所有任務輸入成本下降。完整逐型資料見 [提示長度比較報告](prompt-length-report.md) 與 [JSON 報告](prompt-length-report.json)。
 
 重試上限按語意輪與傳輸輪分開計算：Router 3→6、欄位擷取 9→6、選配補讀 3→6、會計分類 1→6；每任務正常回應仍只呼叫一次。含補讀的欄位擷取最壞上限維持 12 次。真實模型正確率、漏填率、人工修改量、實際重試數及延遲仍待固定資料集比較。
 
-全範圍離線驗收 74 項通過；離線驗收與真實模型比較分開記錄。
+本輪全套離線驗收 107 項通過；前輪 74 項紀錄保留作歷史。離線驗收與真實模型比較分開記錄。
 
 ### 真實模型比較待辦
 

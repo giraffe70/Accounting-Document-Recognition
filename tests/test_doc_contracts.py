@@ -89,20 +89,51 @@ class DocumentContractTests(unittest.TestCase):
         self.assertEqual(result, ("invoice", 90))
 
     def test_router_rejects_bad_rotation_and_falls_back_for_unknown_or_failed_response(self):
-        self.assertEqual(self._classify_with_response('{"type":"支票","rotate":45}'), ("cheque", 0))
+        self.assertEqual(self._classify_with_response('{"type":"支票","rotate":45}'), ("other", 0))
         self.assertEqual(self._classify_with_response('{"type":"unlisted","rotate":180}'), ("other", 180))
         self.assertEqual(self._classify_with_response(error=RuntimeError("mock failure")), ("other", 0))
 
+    def test_router_rejects_non_integer_rotation_types_and_requires_other_reason(self):
+        for rotate in (45.0, True, None):
+            with self.subTest(rotate=rotate):
+                response = json.dumps({"type": "receipt", "rotate": rotate, "reason": "receipt"})
+                self.assertEqual(self._classify_with_response(response), ("other", 0))
+
+        self.assertEqual(self._classify_with_response('{"type":"unlisted","rotate":0,"reason":""}'), ("other", 0))
+        self.assertTrue(doc_router.last_result()["reason"].startswith("未知文件類型"))
+        self.assertEqual(self._classify_with_response('{"type":"other","rotate":0,"reason":""}'), ("other", 0))
+        self.assertIn("分類失敗", doc_router.last_result()["reason"])
+
+    def test_router_text_mode_accepts_only_zero_and_routes_ocr_without_image(self):
+        calls = []
+        settings = {"structure": "fake/provider"}
+        response = '{"type":"receipt","rotate":0,"reason":"receipt text"}'
+        with patch("app.core.settings_store.get_settings", return_value=settings), \
+             patch("app.core.settings_store.parse_setting", return_value=("fake", "model")), \
+             patch("app.core.model_factory.get_chat_model", return_value=object()), \
+             patch("app.core.pipeline._data_uri") as data_uri, \
+             patch("app.core.pipeline._invoke_text", side_effect=lambda _chat, messages: calls.append(messages) or response), \
+             patch("app.core.activity.stage", return_value=nullcontext()):
+            result = doc_router.classify("", mode="ocr_text", ocr_text="OCR ONLY SENTINEL")
+        self.assertEqual(result, ("receipt", 0))
+        data_uri.assert_not_called()
+        self.assertEqual(len(calls), 1)
+        self.assertIn("純文字模式", calls[0][0]["content"])
+        self.assertIn("OCR ONLY SENTINEL", json.dumps(calls[0][1]["content"], ensure_ascii=False))
+
+        invalid = '{"type":"receipt","rotate":90,"reason":"receipt text"}'
+        self.assertEqual(self._classify_with_response(invalid, mode="ocr_text"), ("other", 0))
+
     @staticmethod
-    def _classify_with_response(response: str | None = None, error: Exception | None = None):
+    def _classify_with_response(response: str | None = None, error: Exception | None = None, mode="image"):
         settings = {"structure": "fake/provider"}
         with patch("app.core.settings_store.get_settings", return_value=settings), \
              patch("app.core.settings_store.parse_setting", return_value=("fake", "model")), \
              patch("app.core.model_factory.get_chat_model", return_value=object()), \
              patch("app.core.pipeline._data_uri", return_value="data:image/png;base64,offline"), \
-             patch("app.core.pipeline._invoke_text", side_effect=error or [response]), \
+             patch("app.core.pipeline._invoke_text", side_effect=error, return_value=response), \
              patch("app.core.activity.stage", return_value=nullcontext()):
-            return doc_router.classify("does-not-exist.png")
+            return doc_router.classify("does-not-exist.png", mode=mode, ocr_text="OCR ONLY SENTINEL" if mode == "ocr_text" else "")
 
     def test_pure_pipeline_normalization_helpers(self):
         self.assertEqual(pipeline._norm_roc_date("民國115/06/04"), "2026-06-04")

@@ -82,6 +82,7 @@ class LineItem(_StrCoerceModel):
     amount: Optional[float] = None   # 合計（該列）
     hs_code: Optional[str] = None
     origin_country: Optional[str] = None
+    fee_code: Optional[str] = None   # 勞健保費用代號
     model_config = ConfigDict(extra="allow")
 
 
@@ -100,6 +101,7 @@ class JournalEntry(_StrCoerceModel):
     dept: str = ""            # 部門別（傳票）
     offset_code: str = ""     # 立沖帳目：往來對象代號，如 047 聯邦快遞（傳票）
     evidence_paths: list[str] = Field(default_factory=list)
+    amount_source: Optional[str] = None  # 主要金額來源
     model_config = ConfigDict(extra="allow")
 
 
@@ -130,6 +132,7 @@ class Voucher(_StrCoerceModel):
     field_evidence: dict = Field(default_factory=dict)
     validation_warnings: list[str] = Field(default_factory=list)
     classification_meta: dict = Field(default_factory=dict)
+    payment_state: dict = Field(default_factory=dict)  # 原始與正規化付款資訊
     model_config = ConfigDict(extra="allow")
 
     # 關鍵欄位在掃描影像上的邊界框（正規化 0–1000，[x1,y1,x2,y2]），供視覺對照

@@ -2,6 +2,8 @@
 
 > **目前架構索引（2026-10-06 改版）**：正式流程使用 `ROUTE_TEMPLATE`、`EXTRACT_TEMPLATE`、`ACCOUNTING_TEMPLATE`，定義於 [prompts.py](../../app/core/prompts.py)；路由及萃取分別由 `build_route_prompt(mode='image', ocr_text='', hint='')`、`build_extract_prompt(type_key, mode='image', ocr_text='', hint='', fields=None)` 組裝。[18 類 DOC_TYPES 契約](../../app/core/doc_types.py) 以 `type_hints` 提供類型差異，包含 `receipt.withholding_tax` 及貨物明細 `hs_code`／`origin_country`。欄位補讀共用兩語意輪、每輪最多 3 次傳輸嘗試；QR 多來源衝突保留警告。會計政策、範例篩選及設定格式見 [會計政策](accounting-policy.md)。
 >
+> **現行訊息與資料契約補充（2026-10-06）**：固定任務指令由 system 訊息承載；OCR、備註、政策及案例透過 user JSON 作為資料傳入，不具有指令權威。契約重試把靜態修復指示合併到第一個 system 訊息並保留 task 前綴，錯誤另作 user JSON，原 user 證據不變；選取證據不等於人工確認。每列分錄以 `amount_source` 表示主金額來源：僅一條舊證據路徑可相容地沿用為主來源，兩條以上需明示，不能按數值匹配猜來源。借方與貸方 VAT 均僅可引用 Decimal 數值相等且用途為 VAT 的來源（5.0 與 5 相等，5.001 與 5 不相等）；`evidence_paths` 是佐證，多項合計只使用程式推導值。confidence 為契約生成的 high／medium／low 列舉。分類 API 回應與前端含 `payment_state`，日記帳列含主金額來源與付款狀態。對帳單幣別未知時不預設 TWD，明細契約以深拷貝隔離；現行對帳單政策與發票勾稽範圍不變。以下快照仍保留原始改版前內容，不以本段補改。
+>
 > **改版前基準（保留原始內容）**：以下第 1 節起的 43 份提示快照與第 5 節 10 個動態片段，均為本輪重構前的 2026-10-06 程式基準。保留其完整文字、舊來源雜湊與盤點結果，供變更對照；不得當作現行提示詞、契約或執行行為。舊 43 份展開快照不等於現行有 43 套模板。
 >
 > 原快照使用的動態值以 `{{...}}` 表示，不含私有掃描、歷史分錄、種子或人工備註實際內容。變更前的分析見 [提示詞盤點與架構分析](prompt-review.md)；現行實作說明見 [目前系統架構](architecture.md)。

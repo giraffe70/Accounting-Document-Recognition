@@ -157,7 +157,7 @@ flowchart TD
     M --> O[ACCOUNTING_TEMPLATE：公司政策與完整上下文]
 ```
 
-路由由 `ROUTE_TEMPLATE` 負責；人工確認後以 `EXTRACT_TEMPLATE` 配合 18 類契約及 `type_hints` 擷取。重新辨識仍按入口需要判定類型；一般內容提取不再判類型或旋轉。模型傳輸及語意重試由共用 `model_invocation.py` 管理，輸出清洗由 `normalization.py` 負責。
+路由由 `ROUTE_TEMPLATE` 負責；`utility` 僅代表水電／電信等公用事業，`rotate` 嚴格限制 0、90、180、270，`other` 必須說明原因。人工確認後以 `EXTRACT_TEMPLATE` 配合 18 類契約及 `type_hints` 擷取。重新辨識仍按入口需要判定類型；一般內容提取不再判類型或旋轉。模型傳輸及語意重試由共用 `model_invocation.py` 管理，輸出清洗由 `normalization.py` 負責。
 
 多頁 PDF 預設逐頁建立紀錄，一頁多張單據則需人工分割。合併紀錄會保存附頁供檢視，但目前內容提取只讀主影像，沒有自動整合附頁內容。
 
@@ -190,17 +190,17 @@ flowchart TD
 | `EXTRACT_TEMPLATE` | 依已確認類型契約擷取欄位、明細與來源證據 | `build_extract_prompt(type_key, mode='image', ocr_text='', hint='', fields=None)` |
 | `ACCOUNTING_TEMPLATE` | 依公司科目表、政策及完整憑證上下文提出會計候選分錄 | 一般與已確認進口類型使用同一模板，政策區塊決定角色差異 |
 
-18 類 keys 保持穩定；舊 `extra` 改用 `type_hints`。`receipt` 增加 `withholding_tax`；`LineItem` 增加 `hs_code`、`origin_country`。提示生成與欄位契約均由正式程式提供，不再使用舊獨立印章補讀或 JSON 修正模板。
+18 類 keys 保持穩定；舊 `extra` 改用 `type_hints`。`receipt` 增加 `withholding_tax`；`LineItem` 增加 `hs_code`、`origin_country` 及勞健保用 `fee_code`。每個金額欄位另帶 `purpose`、`currency`、`policy_key` metadata；報關行費用與稅額分欄追溯來源，通用報單估價預設不納入分錄，出口多商品明細保留並兼容既有首項欄位。對帳單幣別未知時保留未知、不預設 TWD；各金額欄使用文件幣別 metadata，但不擴大現行對帳單會計政策或發票勾稽範圍。類型契約的明細欄位以深拷貝隔離，避免跨類型 metadata 污染。提示生成與欄位契約均由正式程式提供，不再使用舊獨立印章補讀或 JSON 修正模板。
 
-`model_invocation.py` 將執行分為兩個語意輪：初次請求及一次契約重試；每輪傳輸最多 3 次呼叫。正常回應每任務仍只呼叫一次。新舊最壞呼叫上限：Router 3→6、欄位擷取 9→6、選配補讀 3→6、會計分類 1→6；含補讀的擷取最壞上限維持 12 次。這不表示所有任務成本都下降。`normalization.py` 集中處理日期、金額、字元及契約輸出整理。QR 來源支援多個候選值；值互相衝突時保留 `validation_warnings`，供人員檢視，不靜默覆蓋。
+`model_invocation.py` 將執行分為兩個語意輪：初次請求及一次契約重試；每輪傳輸最多 3 次呼叫。契約重試保留原始訊息；將靜態 retry 指示合併至第一個 system 訊息並保留原任務前綴，將錯誤另作 user JSON，原 user 證據不變，不額外交錯附加 system/user 訊息。正常回應每任務仍只呼叫一次。上一輪記錄的新舊最壞呼叫上限為 Router 3→6、欄位擷取 9→6、選配補讀 3→6、會計分類 1→6；含補讀的擷取最壞上限維持 12 次，這些是前輪基準，不能推論本輪提示長度或成本。`normalization.py` 集中處理日期、金額、字元及契約輸出整理。QR 來源支援多個候選值；值互相衝突時保留 `validation_warnings`，供人員檢視，不靜默覆蓋。
 
-擷取結果保留 `Voucher.field_evidence` 與 `Voucher.validation_warnings`。`classify._accounting_context()` 將欄位、明細、付款狀態、金額來源與證據交給會計分類，不只使用舊版摘要；會計模型只收到已選取的現行證據，完整證據歷史仍保存。人工修改後會重新計算日期、金額、統編等目前警告，同時保留原始來源與衝突診斷。`Voucher.classification_meta` 保存 `status`、`policy_version`、`policy_sha256`、`purpose`、`warnings`、`assumptions`、`derived_amounts`；`JournalEntry.evidence_paths` 指向分錄來源。舊保存資料維持可讀，新 API 可追加 metadata。人工修改後刷新日期、金額、統編等目前警告，並保留原始來源與衝突診斷；舊瀏覽器重複儲存不覆蓋服務端 audit/stale 標記。前端及報表列印附上 escaped 來源、驗證及政策紀錄。舊收據稅額語意未明時以 `field_evidence.semantic_role=unconfirmed_tax` 保存，canonical 再存不映射為共同營業稅；人工移至 `withholding_tax` 後解除。日記帳列保留 null 金額與證據路徑，忽略舊 `bill_detail` 分錄列。
+擷取結果保留 `Voucher.field_evidence` 與 `Voucher.validation_warnings`。`classify._accounting_context()` 將欄位、明細、付款狀態、金額來源與證據交給會計分類，不只使用舊版摘要；會計模型只收到已選取的現行證據，完整證據歷史仍保存。人工修改後會重新計算日期、金額、統編等目前警告，同時保留原始來源與衝突診斷。`Voucher.classification_meta` 保存 `status`、`policy_version`、`policy_sha256`、`purpose`、`warnings`、`assumptions`、`derived_amounts`；`JournalEntry.evidence_paths` 指向分錄來源。舊保存資料維持可讀，新 API 可追加 metadata。金額主來源記錄於 `amount_source`；舊資料僅有一條證據路徑時可相容地沿用，兩條以上必須明示主來源，不依數值匹配猜測來源。VAT 借方或貸方金額都需有用途為 VAT 且 Decimal 數值相等的契約來源（5.0 與 5 相等，5.001 與 5 不相等）；多項合計只用程式 `derived_amounts`。`evidence_paths` 僅作佐證。`payment_state` 保留原文與正規化狀態（`paid`／`unpaid`／`unknown`）及方式（`bank`／`cash`／`other`／`unknown`），包含「已結清」語意；分類 API 回應附加此物件供前端收取，日記帳列也提供主金額來源與付款狀態。舊瀏覽器重複儲存不覆蓋服務端 audit/stale 標記。前端及報表列印附上 escaped 來源、驗證及政策紀錄。舊收據稅額語意未明時以 `field_evidence.semantic_role=unconfirmed_tax` 保存，canonical 再存不映射為共同營業稅；人工移至 `withholding_tax` 後解除。日記帳列保留 null 金額與證據路徑，忽略舊 `bill_detail` 分錄列。
 
 政策預設為 `default-v1`：進口稅費對應預付費用、海關營業稅對應進項稅額、銀行手續費對應其他費用。進口政策預設 `include_goods_values=false`、`posting_currency=TWD`；外幣發票與明細仍完整保存，但不把外幣貨款和臺幣稅費混加。明示已付款仍須有付款方式才能選銀行或現金；未付款進口／商品用應付帳款，一般未付款費用用應付費用。角色由當次公司科目表解析；進口政策不套用出口。付款狀態或收支方向不明時保留候選及 warning，不強制貸記銀行。缺金額或科目為 `candidate`；原始單面傳票再次分類時標記 `status=skipped`、`reason=original_entries`，保留原列及 `original_checks` 且不生成另一側；檢查包含 `complete`、`single_sided`、`observed_totals` 與 `printed_totals_match`。`balance_check` 僅表示借貸實際相等，單面完整不等於平衡；其他 `skipped` 僅表示佐證附頁。
 
 會計分類範例僅接受同公司、同一當次 `policy_sha256`、`status=proposed`、已核定且有效平衡的分錄。缺少公司範圍或政策 hash 的舊 `entry_examples.json` 略過。設定範例、範例選擇與備份要求見[會計政策](accounting-policy.md)。
 
-全範圍離線驗收 74 項通過；尚未用真實模型或可比資料比較新舊結果，因此不宣稱準確率提升。改版前 43 份模板快照及 10 個動態片段仍保留於[提示詞目錄](prompt-catalog.md)，僅作變更前基準；舊盤點問題及真模型待辦見[提示詞檢視](prompt-review.md)。提示長度比較報告已產出。在同一合成 OCR、完整文字輸入（不含圖片 bytes、公司資料或動態案例）下，image 平均 Unicode 字元長度 1641.0→1231.8（-24.9%），OCR text 1544.3→1227.7（-20.5%）；部分長契約增加，不能推論所有任務成本下降。詳見[提示長度報告](prompt-length-report.md)及[JSON 資料](prompt-length-report.json)。
+本輪全套離線驗收 107 項通過；前輪驗收基準為 74 項。沒有用真實模型或可比資料比較新舊辨識結果，因此不宣稱準確率提升。改版前 43 份模板快照及 10 個動態片段仍保留於[提示詞目錄](prompt-catalog.md)，僅作變更前基準；舊盤點問題及真模型待辦見[提示詞檢視](prompt-review.md)。最新提示長度報告已重產：同一合成 OCR、完整文字輸入（不含圖片 bytes、公司資料或動態案例）下，影像平均由 1641.0 降至 1437.8 字元（-12.4%），純文字由 1544.3 降至 1433.7 字元（-7.2%）。這是字元數比較，不代表 token、耗時、辨識準確率或所有任務成本都下降。部分長契約增加，不能推論所有任務成本下降。詳見[提示長度報告](prompt-length-report.md)及[JSON 資料](prompt-length-report.json)。
 
 來源：[提示模板](../../app/core/prompts.py)、[18 類契約](../../app/core/doc_types.py)、[模型呼叫](../../app/core/model_invocation.py)、[正規化](../../app/core/normalization.py)、[QR 解碼](../../app/core/barcode.py)、[憑證資料模型](../../app/models/schemas.py)、[分類服務](../../app/services/classify.py)。
 
@@ -252,11 +252,11 @@ OCR 本身不直接解析一般單據的語意欄位，主要內容仍由 VLM �
 
 ### 5.6 回應修復、正規化與品質檢查
 
-`model_invocation.py` 將模型執行分為兩個語意輪：初次請求及一次契約重試；每個語意輪的傳輸最多重試 3 次。重試上限分層計算，不能解讀成每個空回應、例外及契約錯誤都再疊加獨立的三次重試。JSON／欄位輸出由共用契約檢查與 `normalization.py` 處理，不再發送獨立 JSON 修正提示。
+`model_invocation.py` 將模型執行分為兩個語意輪：初次請求及一次契約重試；每個語意輪的傳輸最多重試 3 次。第二輪將靜態 retry 說明併入第一個 system 訊息、另以 user JSON 提供契約錯誤，保留原 user 證據。重試上限分層計算，不能解讀成每個空回應、例外及契約錯誤都再疊加獨立的三次重試。JSON／欄位輸出由共用契約檢查與 `normalization.py` 處理，不再發送獨立 JSON 修正提示。
 
 後處理包含日期與金額正規化、繁體字元轉換、統編／電話混淆清理、欄位值誤填座標與明顯識別碼誤填金額的攔截、QR 衝突警告、OCR 借貸／欄位框校正，再對映共同欄位並建立 Pydantic `Voucher`。來源讀值、正規化值和程式推導值須由證據欄位及 metadata 區分。
 
-查看完整憑證時另計算統編核對、日期合理性與金額算術一致性；傳票擷取／科目分類也計算借貸平衡。這些提供人工核對訊號，並不代表已建立所有類型必填欄位、科目合法性及跨欄位一致性的強制核定閘門。`confidence` 是模型自報的 high／medium／low，尚未整合 OCR 分數、欄位來源及規則檢查成欄位級品質判定。
+查看完整憑證時另計算統編核對、日期合理性與金額算術一致性；傳票擷取／科目分類也計算借貸平衡。這些提供人工核對訊號，並不代表已建立所有類型必填欄位、科目合法性及跨欄位一致性的強制核定閘門。`confidence` 由契約限定為 high／medium／low 列舉，重試錯誤會包含允許值；它仍是模型自報值，尚未整合 OCR 分數、欄位來源及規則檢查成欄位級品質判定。
 
 來源：[解析與欄位清理](../../app/core/pipeline.py)、[資料契約](../../app/models/schemas.py)、[日期／金額／統編檢查](../../app/services/taxid.py)。
 
@@ -272,7 +272,7 @@ OCR 本身不直接解析一般單據的語意欄位，主要內容仍由 VLM �
 
 驗證的 `classify_model` 用於單據類型分類，`structure_model` 用於欄位擷取；兩者名稱與正式流程中負責會計科目的 `classify` 設定須分開理解。驗證沿用部分管線與契約，但不代表每次都執行會計科目分類。
 
-批次 metadata v2 記錄完整來源清單及 runtime digest，前端及 CSV 已接入；舊批次唯讀，不能在既有批次中續跑新版資料，新舊 metadata 版本不可混用。全範圍離線驗收 74 項通過。提示長度報告比較方式與結果見第 5.3 節；真實模型品質仍待固定資料集比較。
+批次 metadata v2 記錄完整來源清單及 runtime digest，前端及 CSV 已接入；新增 CSV 欄位 `amount_source`、`fee_code`、`payment_state_json`，列印保留相關資料。舊批次唯讀，不能在既有批次中續跑新版資料，新舊 metadata 版本不可混用。本輪全套離線驗收 107 項通過；前輪驗收基準為 74 項。提示長度報告比較方式與結果見第 5.3 節；真實模型品質仍待固定資料集比較。
 
 驗證輸入另轉 RGB、以 LANCZOS 縮至指定長邊並保存 quality=95 的 JPEG，預設長邊 1180，可設定 640～2400；正式圖片流程沒有相同的統一轉換。驗證會保存原圖、輸入圖、含框圖、結果 JSON、OCR、單據分類／擷取的模型呼叫 trace 與計時，並記錄提示詞／程式雜湊及模型參數。模型呼叫共用 `model_invocation.py` 的重試及 trace 路徑。批次 metadata v2 包含完整來源清單和 runtime digest；舊批次唯讀，新舊版本不得混續。資料集與批次另存 `app/data/validation/validation.db`；正式匯入／提取工作的進度仍在記憶體。
 

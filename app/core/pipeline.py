@@ -630,6 +630,11 @@ def _build_voucher(data: dict, type_key: str, *, derive_entries: bool = True, no
         "seller": {"name": common["seller_name"] or "", "tax_id": common["seller_tax_id"] or ""},
         "buyer": {"name": common["buyer_name"] or "", "tax_id": common["buyer_tax_id"] or ""},
     }
+    from app.core.normalization import normalize_payment
+    payload["payment_state"] = normalize_payment(f.get("payment_status"), f.get("payment_method"))
+    total_contract = spec["common_money"].get("total_amount")
+    if common["total_amount"] is not None and total_contract and total_contract["currency"] != "$document":
+        payload["currency"] = total_contract["currency"]
     from app.services import taxid
     checks = taxid.check_voucher(payload)
     amount_check = taxid.check_amounts(payload)
@@ -663,7 +668,7 @@ def canonicalize_voucher(data: dict) -> dict:
     if not data.get("doc_type_key") or not data.get("fields"):
         return data
     normalized = _build_voucher(data, data["doc_type_key"], derive_entries=False, normalize_word_total=False).model_dump()
-    mapped = {key: normalized[key] for key in ("fields", "voucher_id", "date", "subtotal", "tax_amount", "total_amount", "currency", "seller", "buyer", "items", "validation_warnings", "field_evidence")}
+    mapped = {key: normalized[key] for key in ("fields", "voucher_id", "date", "subtotal", "tax_amount", "total_amount", "currency", "seller", "buyer", "items", "validation_warnings", "field_evidence", "payment_state")}
     return {**data, **mapped}
 
 

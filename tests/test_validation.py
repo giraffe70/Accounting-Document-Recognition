@@ -18,9 +18,14 @@ class _Response:
 
 class _Chat:
     def invoke(self, messages):
-        content = messages[0]["content"]
-        text = content if isinstance(content, str) else "\n".join(
-            part.get("text", "") for part in content if part.get("type") == "text")
+        text_parts = []
+        for message in messages:
+            content = message.get("content", "")
+            if isinstance(content, str):
+                text_parts.append(content)
+            elif isinstance(content, list):
+                text_parts.extend(part.get("text", "") for part in content if part.get("type") == "text")
+        text = "\n".join(text_parts)
         if prompts.ROUTE_TEMPLATE in text:
             return _Response('{"type":"receipt","rotate":0}')
         mode = "ocr_text" if "沒有圖片" in text else "image"
