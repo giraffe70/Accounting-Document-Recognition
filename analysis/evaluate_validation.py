@@ -21,8 +21,10 @@ from pathlib import Path
 
 try:
     from .gold_io import load_frozen
+    from .document_scoring import score_documents
 except ImportError:
     from gold_io import load_frozen
+    from document_scoring import score_documents
 
 FIELDS = (
     "doc_type_key", "date", "voucher_id", "total_amount", "subtotal",
@@ -74,6 +76,39 @@ def load_run(path: Path) -> dict[tuple[str, int], dict]:
     return result
 
 
+def _has_multi_document_pages(run_paths, gold_path=None):
+    """Detect the additive vouchers/pages export without changing legacy loading."""
+    if gold_path is not None:
+        gold_rows = json.loads(Path(gold_path).read_text(encoding="utf-8"))
+        if any("documents" in row for row in gold_rows):
+            return True
+    for path in run_paths.values():
+        voucher_path = Path(path) / "vouchers.csv"
+        if not voucher_path.is_file():
+            continue
+        with voucher_path.open(encoding="utf-8-sig", newline="") as stream:
+            reader = csv.DictReader(stream)
+            rows = list(reader)
+        seen = set()
+        for row in rows:
+            key = (row.get("source") or row.get("relative_path") or row.get("parent_result_id"),
+                   row.get("page") or row.get("page_no"))
+            if key[0] and key in seen:
+                return True
+            if key[0]:
+                seen.add(key)
+            origin = row.get("origin_json") or "{}"
+            try:
+                origin = json.loads(origin) if isinstance(origin, str) else origin
+            except json.JSONDecodeError:
+                origin = {}
+            has_region = bool(row.get("source_region") or
+                              (isinstance(origin, dict) and (origin.get("region") or origin.get("source_region"))))
+            if row.get("document_id") or row.get("parent_result_id") or has_region:
+                return True
+    return False
+
+
 def normalized(field: str, value: object) -> str:
     if value is None:
         return ""
@@ -107,6 +142,45 @@ def evaluate(run_paths, gold_path, output_dir, dataset_id, page_db=None, run_ids
     gold_path = Path(gold_path).resolve()
     if output_dir.exists():
         raise ValueError("Output directory must be new; existing results are never overwritten")
+    if len(run_paths) != 2:
+        raise ValueError("Exactly two named runs are required")
+    if _has_multi_document_pages(run_paths, gold_path):
+        # A page can contain several independently located documents. Preserve
+        # the legacy evaluator for its one-row-per-page contract and publish the
+        # additive document metrics for this export shape.
+        inputs = [Path(gold_path).resolve()]
+        for path in run_paths.values():
+            inputs.extend(p for p in (Path(path) / "vouchers.csv", Path(path) / "pages.csv",
+                                      Path(path) / "fields.csv", Path(path) / "items.csv") if p.is_file())
+        for path in inputs:
+            if path.resolve().is_relative_to(output_dir):
+                raise ValueError("Output directory must not contain input files")
+        hashes = {str(p.resolve()): hashlib.sha256(p.read_bytes()).hexdigest() for p in inputs}
+        document_scores = score_documents(run_paths, gold_path)
+        output_dir.mkdir(parents=True, exist_ok=False)
+        detail = document_scores.pop("page_details")
+        if detail:
+            with (output_dir / "document_comparison.csv").open("w", encoding="utf-8-sig", newline="") as stream:
+                writer = csv.DictWriter(stream, fieldnames=list(detail[0]))
+                writer.writeheader()
+                writer.writerows(detail)
+        for path in inputs:
+            if hashlib.sha256(path.read_bytes()).hexdigest() != hashes[str(path.resolve())]:
+                raise ValueError(f"Input changed during evaluation: {path}")
+        summary = {"common_pages": document_scores["raw_common_pages"],
+                   "comparability_verified": False, "csv_run_identity_verified": False,
+                   "raw_common_pages": document_scores["raw_common_pages"],
+                   "unique_image_pages": document_scores["unique_image_pages"],
+                   "legacy_page_metrics_available": False,
+                   "document_scoring": document_scores,
+                   "provenance": {"dataset_id": dataset_id,
+                                  "runs": {name: str(Path(path).resolve()) for name, path in run_paths.items()},
+                                  "input_sha256": hashes,
+                                  "scorer_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+                                  "created_at_utc": datetime.now(timezone.utc).isoformat()}}
+        (output_dir / "validation_summary.json").write_text(
+            json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+        return summary
     inputs = [gold_path] + [Path(p) / f for p in run_paths.values()
                            for f in ("vouchers.csv", "fields.csv", "items.csv", "entries.csv")]
     for path in inputs:
@@ -378,6 +452,10 @@ def evaluate(run_paths, gold_path, output_dir, dataset_id, page_db=None, run_ids
     summary["journal_entry_scores"] = {
         name: {metric: dict(counts) for metric, counts in scores.items()}
         for name, scores in journal_scores.items()}
+    # For new exports with a single document on each page, add document metrics
+    # while retaining every legacy page-level metric and output column.
+    if any((Path(path) / "pages.csv").is_file() for path in run_paths.values()):
+        summary["document_scoring"] = score_documents(run_paths, gold_path)
     for path in inputs:
         if hashlib.sha256(path.read_bytes()).hexdigest() != input_hashes[str(path.resolve())]:
             raise ValueError(f"Input changed during evaluation: {path}")

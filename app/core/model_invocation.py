@@ -18,7 +18,10 @@ def _invoke_text(chat, content, tries: int = 3) -> str:
     messages = prompts.task_messages(content)
     for i in range(tries):
         try:
-            with invocation_trace.timed_call(messages, i + 1) as traced:
+            underlying = getattr(chat, "bound", chat)
+            parameters = {k: getattr(underlying, k, None) for k in ("model", "temperature", "seed", "num_ctx", "num_predict", "format")}
+            parameters.update(getattr(chat, "kwargs", {}) or {})
+            with invocation_trace.timed_call(messages, i + 1, parameters) as traced:
                 resp = chat.invoke(messages)
                 text = resp.content if hasattr(resp, "content") else str(resp)
                 if text is None:
@@ -30,6 +33,8 @@ def _invoke_text(chat, content, tries: int = 3) -> str:
                 return text
             last = "空回應"
         except Exception as exc:  # noqa: BLE001
+            if _format_rejected(exc):
+                raise
             last = f"{type(exc).__name__}: {exc}"
         if i < tries - 1:
             logger.warning("VLM 呼叫失敗（%s），第 %d 次重試", str(last)[:80], i + 1)
@@ -91,27 +96,45 @@ def _parse_json(text: str) -> dict:
     for step in (_fancy, _decomment, _thousands, _trailing, _sq_key, _sq_all, _bare_key):
         cur = step(cur)
         candidates.append(cur)
-    for c in candidates:
+    parse_errors = []
+    for index, c in enumerate(candidates):
         try:
-            return json.loads(c)
-        except json.JSONDecodeError:
-            pass
+            result = json.loads(c)
+            if parse_errors:
+                invocation_trace.add({"kind": "parse_repair", "candidate": index, "errors": parse_errors})
+            return result
+        except json.JSONDecodeError as exc:
+            parse_errors.append({"message": exc.msg, "line": exc.lineno, "column": exc.colno, "position": exc.pos})
         # 後面還接了東西（qwen3 等會在 JSON 之後補說明或再吐一個物件，
         # 造成 "Extra data"）→ 只取第一個完整物件，忽略其餘。
         try:
             obj, _ = json.JSONDecoder().raw_decode(c.lstrip())
             if isinstance(obj, dict):
+                invocation_trace.add({"kind": "parse_repair", "candidate": index, "errors": parse_errors, "method": "first_object"})
                 return obj
         except (json.JSONDecodeError, ValueError):
             continue
     logger.warning("VLM JSON 解析失敗，原始輸出前 600 字：%s", frag[:600])
-    raise json.JSONDecodeError("VLM 回傳非合法 JSON", frag, 0)
+    invocation_trace.add({"kind": "parse_error", "raw": text, "attempts": parse_errors})
+    first = parse_errors[0] if parse_errors else {"position": 0}
+    raise json.JSONDecodeError("VLM 回傳非合法 JSON", frag, first["position"])
 
 
-def invoke_structured(chat, content, validator, task="extract", invoke=None) -> dict:
+def _format_rejected(exc):
+    """Only an explicit backend format rejection permits a weaker output mode."""
+    message = str(exc).lower()
+    return (getattr(exc, "status_code", None) in (400, 422) or isinstance(exc, ValueError)) and any(
+        marker in message for marker in ("unsupported format", "format is not supported", "invalid format", "unsupported schema", "invalid json schema", "json schema is not supported", "cannot unmarshal object into go struct field chatrequest.format"))
+
+
+def invoke_structured(chat, content, validator, task="extract", invoke=None, schema=None) -> dict:
     """At most two semantic rounds, each with at most three transport attempts."""
     caller = invoke or _invoke_text
     errors = ""
+    previous_raw = ""
+    is_ollama = "ollama" in type(chat).__module__.lower()
+    formats = [schema, "json", None] if schema and is_ollama and hasattr(chat, "bind") else [None]
+    format_index = 0
     original = prompts.task_messages(content)
     for round_no in (1, 2):
         request = deepcopy(original)
@@ -121,9 +144,22 @@ def invoke_structured(chat, content, validator, task="extract", invoke=None) -> 
                 request[0]["content"] += "\n" + instruction
             else:
                 request.insert(0, {"role": "system", "content": instruction})
-            request.append({"role": "user", "content": json.dumps({"contract_errors": errors}, ensure_ascii=False)})
+            request.append({"role": "user", "content": json.dumps({"contract_errors": errors, "previous_output_raw": previous_raw}, ensure_ascii=False)})
         invocation_trace.add({"kind": "structured_round", "task": task, "round": round_no, "errors": errors})
-        raw = caller(chat, request)
+        while True:
+            selected_format = formats[format_index]
+            bound = chat.bind(format=selected_format) if selected_format is not None else chat
+            invocation_trace.add({"kind": "output_mode", "task": task, "mode": "schema" if isinstance(selected_format, dict) else "json" if selected_format else "text"})
+            try:
+                raw = caller(bound, request)
+                break
+            except Exception as exc:
+                if format_index >= len(formats) - 1 or not _format_rejected(exc):
+                    raise
+                invocation_trace.add({"kind": "format_fallback", "error": str(exc), "task": task})
+                format_index += 1
+        previous_raw = str(raw)
+        invocation_trace.add({"kind": "structured_response", "task": task, "round": round_no, "raw": previous_raw})
         try:
             data = _parse_json(str(raw))
             if not isinstance(data, dict):
@@ -136,7 +172,7 @@ def invoke_structured(chat, content, validator, task="extract", invoke=None) -> 
                     ("; allowed=" + str(e["ctx"]["expected"]) if (e.get("ctx") or {}).get("expected") else "") for e in exc.errors())
             else:
                 errors = str(exc)[:800]
-            invocation_trace.add({"kind": "contract_error", "task": task, "round": round_no, "errors": errors})
+            invocation_trace.add({"kind": "contract_error", "task": task, "round": round_no, "errors": errors, "raw": previous_raw})
     raise ValueError(f"{task} output invalid after 2 rounds: {errors}")
 
 
@@ -148,18 +184,27 @@ def source_versions() -> dict:
     root = Path(__file__).resolve().parents[1]
     names = {p.relative_to(root).as_posix() for p in (root / "core").glob("*.py")}
     names.update({"models/schemas.py", "services/accounting_policy.py", "services/classify.py",
-                  "services/importdecl.py", "services/accounts.py", "services/taxid.py", "validation.py"})
+                  "services/importdecl.py", "services/accounts.py", "services/taxid.py", "services/review.py",
+                  "db/models.py", "db/session.py", "config.py", "validation.py"})
     sources = {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in sorted(names)}
     runtime = {name: hashlib.sha256((config.DATA_DIR / name).read_bytes()).hexdigest()
                if (config.DATA_DIR / name).exists() else None
                for name in ("accounting_policies.json", "accounts.json", "companies.json", "entry_examples.json")}
+    from importlib.metadata import version, PackageNotFoundError
+    dependencies = {}
+    for package in ("langchain-ollama", "ollama", "pydantic", "Pillow"):
+        try:
+            dependencies[package] = version(package)
+        except PackageNotFoundError:
+            dependencies[package] = None
     def digest(value):
         return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
     prompt_sources = {key: sources[key] for key in ("core/prompts.py", "core/doc_types.py", "core/doc_router.py")}
-    return {"hash_version": 2, "source_sha256": sources, "runtime_sha256": runtime,
+    return {"hash_version": 2, "source_sha256": sources, "runtime_sha256": runtime, "dependencies": dependencies,
+            "recognition_contract": {"version": 1, "coordinates": "normalized_1000", "max_regions": 16, "split_iou_max": .1, "supplement_tasks": 1, "supplement_max_edge": 2400},
             "prompt_version_sha256": digest(prompt_sources), "code_version_sha256": digest(sources),
             "policy_version_sha256": digest({"source": sources["services/accounting_policy.py"], "runtime": runtime}),
-            "execution_version_sha256": digest({"sources": sources, "runtime": runtime})}
+            "execution_version_sha256": digest({"sources": sources, "runtime": runtime, "dependencies": dependencies})}
 
 
 def same_execution_version(saved: dict) -> bool:

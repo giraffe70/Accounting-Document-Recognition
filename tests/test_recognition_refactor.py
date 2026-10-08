@@ -122,13 +122,16 @@ class RefactorFlowTests(unittest.TestCase):
 
     def test_receipt_reread_targets_actual_tax_id_and_never_overwrites_existing_vendor(self):
         initial = prompts.extraction_example("receipt", "ocr_text")
-        initial["fields"].update(vendor="原廠商", total_amount=100)
+        initial["fields"].update(vendor="原廠商", total_amount=100, date="2026-06-04")
+        for key in doc_types.get("receipt")["common_fields"]["voucher_id"]:
+            if key in initial["fields"]:
+                initial["fields"][key] = "R-001"
         requests = []
         def invoke(chat, content):
             requests.append(content)
             return json.dumps(initial if len(requests) == 1 else {"fields": {"tax_id": "12345678"}})
         with patch("app.core.pipeline._invoke_text", side_effect=invoke), patch("app.core.barcode.decode") as decoder:
-            v = pipeline.extract_evidence("fake.png", "receipt", object(), [], "原始OCR", mode="ocr_text")
+            v = pipeline.extract_evidence("fake.png", "receipt", object(), [], "原始OCR 12345678", mode="ocr_text")
         self.assertEqual(len(requests), 2)
         self.assertEqual(v.seller.name, "原廠商")
         self.assertEqual(v.seller.tax_id, "12345678")
@@ -169,19 +172,21 @@ class RefactorFlowTests(unittest.TestCase):
         self.assertTrue(classified.classification_meta["original_checks"]["single_sided"])
         self.assertFalse(classified.balance_check)
 
-    def test_box_coordinate_spaces_are_normalized_before_schema_validation(self):
+    def test_box_coordinate_units_are_explicit_and_invalid_boxes_do_not_drop_content(self):
         from PIL import Image
         image = Path(self.temp.name, "synthetic.png")
         Image.new("RGB", (1200, 1200)).save(image)
-        for box in ([.1, .1, .9, .9], [100, 100, 900, 900], [120, 120, 1080, 1080]):
-            raw = prompts.extraction_example("invoice")
-            raw["boxes"] = {"total_amount": box}
+        raw = prompts.extraction_example("invoice")
+        raw["boxes"] = {"total_amount": [100,100,900,900]}
+        result = pipeline._validate_image_extraction(raw, "invoice", "image", str(image))
+        self.assertEqual(result["boxes"]["total_amount"], [100,100,900,900])
+        self.assertEqual(pipeline._normalize_boxes({"total_amount":[120,120,1080,1080]}, str(image), unit="pixels"), {"total_amount":[100,100,900,900]})
+        for box in ([.1,.1,.9,.9], [120,120,1080,1080], [True,100,900,900], [100,100,900,900,1], [0,0,float("inf"),100]):
+            raw["boxes"] = {"total_amount":box}
             result = pipeline._validate_image_extraction(raw, "invoice", "image", str(image))
-            self.assertEqual(result["boxes"]["total_amount"], [100, 100, 900, 900])
-        for box in ([True, 100, 900, 900], [100, 100, 900, 900, 1], [0, 0, float("inf"), 100]):
-            raw["boxes"] = {"total_amount": box}
-            with self.assertRaises(ValueError):
-                pipeline._validate_image_extraction(raw, "invoice", "image", str(image))
+            self.assertEqual(result["fields"], raw["fields"])
+            self.assertEqual(result["boxes"], {})
+            self.assertEqual(len(result["box_issues"]), 1)
 
     def test_import_routing_does_not_use_notes_or_export_substrings(self):
         self.assertTrue(importdecl.is_import({"doc_type_key": "customs_tax"}))
@@ -322,7 +327,7 @@ class RefactorFlowTests(unittest.TestCase):
         result = dict(id="synthetic", relative_path="synthetic.png", page_no=1, combo_name="test", mode="ocr_llm", actual_path="ocr_llm",
                       repeat_no=1, attempt=1, status="succeeded", timings={}, error="", voucher=v)
         files = validation._csv_files({"results": [result]})
-        self.assertEqual(set(files), {"vouchers.csv", "fields.csv", "items.csv", "entries.csv"})
+        self.assertEqual(set(files), {"vouchers.csv", "fields.csv", "items.csv", "entries.csv", "pages.csv"})
         read = lambda name: list(csv.DictReader(io.StringIO(files[name].lstrip("\ufeff"))))
         self.assertEqual(read("items.csv")[0]["hs_code"], "1234")
         self.assertEqual(json.loads(read("entries.csv")[0]["evidence_paths_json"]), ["fields.total_amount"])

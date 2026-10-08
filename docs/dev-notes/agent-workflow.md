@@ -15,6 +15,16 @@
 
 測試使用合成資料、暫存目錄及模擬模型，入口阻擋 TCP 連線。Windows asyncio 的內部 socketpair 通道仍可使用。無模型契約測試涵蓋類型欄位唯一性、手冊/報表映射、Router 回應解析、日期/金額與 JSON 修復；這些測試不代表實際辨識準確率。
 
+## 多單據結果與 offline 驗收
+
+驗證輸出格式、辨識版本或單據切分契約有變時，建立新版本的驗證批次再檢查；已保存的舊批次不會補上 `documents[]`、`origin` 或 `quality`。可用合成輸入與模擬模型驗證 API、JSON/CSV 匯出和畫面，不把私人掃描檔、資料集或 gold 放進測試。`pages.csv` 每個輸入頁面只列一列；`vouchers.csv` 可依頁面所含文件展開多列，頁面耗時以 `pages.csv` 為準，避免按單據數重複加總。
+
+前端離線檢查可執行 `node --check app/static/js/validation.js` 與 `python -m unittest tests.test_frontend_form`；驗證 API／匯出契約使用 `scripts\verify.bat -Scope validation`。這些檢查不啟動真實模型，也不替代獨立人工證據核對。
+
+新結果以頁面 `result.id` 和單據 `parent_result_id` 關聯；單據 `id` 唯一識別單據，`document_index` 在資料中從 0 起算。`origin` 記錄來源頁與區域，`quality` 記錄內容類型、品質狀態及問題。舊結果沒有 `quality` 時應顯示未評估。品質狀態與 `completed_rate` 用於提示是否需要覆核及頁面擷取是否完成，均不代表欄位準確率；準確率只能由獨立覆核證據與標註評估。空白 `skipped` 頁不計入完成率分母，待分割 `partial` 頁仍需人工處理。來源頁只作追溯，不作為財務單據計入。
+
+CSV 匯出新增 `pages.csv` 後，沿用含 `vouchers.csv`、`fields.csv`、`items.csv`、`entries.csv` 的相容格式進行評分；不要把 `pages.csv` 當作 vouchers 表格讀取。離線驗收不啟動 OCR/VLM/LLM，也不以結果完成率取代準確率檢查。
+
 ## 保存結果評分
 
 所有命令以 `pdfscan312` Python 的 `-B -X utf8` 執行。新輸出目錄必須不存在，不覆寫舊結果。

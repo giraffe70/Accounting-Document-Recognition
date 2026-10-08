@@ -38,6 +38,9 @@ class VoucherRecord(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     source_file: str = ""
+    record_role: str = "voucher"
+    source_parent_id: Optional[int] = Field(default=None, foreign_key="voucher_records.id")
+    recognition_history: str = "[]"
     company: str = ""                      # 中意/仲彬/天干（多公司支援）
     period: str = ""                       # 所屬期別 YYYY-MM（供日記帳彙整）
 

@@ -75,19 +75,27 @@ def norm_amount(value):
 
 
 def norm_date(value: str) -> str:
-    s = unicodedata.normalize("NFKC", str(value or "").strip())
+    original = str(value or "").strip()
+    s = unicodedata.normalize("NFKC", original)
+    roc_explicit = "民國" in s
     s = s.replace("中華民國", "").replace("民國", "").strip()
+    # A complete date may include a time. Keep the date and discard only a
+    # clearly separated time suffix; date ranges and month-only values stay raw.
+    s = re.sub(r"(?<=[\d日])[T\s]+(?:(?:上午|下午|早上|晚上|AM|PM)\s*)?\d{1,2}(?::\d{2}(?::\d{2}(?:\.\d+)?)?|時\d{1,2}分(?:\d{1,2}秒)?)(?:\s*(?:AM|PM)|Z|[+-]\d{2}:?\d{2})?$", "", s, flags=re.I)
+    # Taiwanese forms commonly include spaces around the era/year or date parts.
+    s = re.sub(r"\s+", "", s)
     compact = re.fullmatch(r"(\d{3,4})(\d{2})(\d{2})", s)
     match = compact or re.fullmatch(r"(\d{1,4})[/\.\-年](\d{1,2})[/\.\-月](\d{1,2})日?", s)
     if not match:
-        return s
+        return original
     year, month, day = map(int, match.groups())
-    if len(match.group(1)) <= 3:
+    # Leading-zero ROC years and an explicit ROC era retain their calendar meaning.
+    if roc_explicit or len(match.group(1)) <= 3 or year < 1000:
         year += 1911
     try:
         return date(year, month, day).isoformat()
     except ValueError:
-        return s
+        return original
 
 
 def first_present(fields: dict, keys: list[str], default=None):

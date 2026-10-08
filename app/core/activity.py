@@ -26,6 +26,8 @@ class stage:
         self.note = note
 
     def __enter__(self):
+        from app.core import invocation_trace
+        invocation_trace.add({"kind": "stage_start", "stage": self.name, "note": self.note})
         self._perf_started = time.perf_counter()
         with _lock:
             _running[self.name] = {"note": self.note, "started": time.time()}

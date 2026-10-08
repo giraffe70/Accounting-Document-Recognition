@@ -78,6 +78,8 @@ class ApiContractTests(unittest.TestCase):
             voucher.payment_state = {"status": "paid", "raw_status": "已結清"}
             return voucher
 
+        review._check_model_write = Mock()
+        review.RecognitionProtected = type("RecognitionProtected", (ValueError,), {})
         endpoint = load_endpoint("api_classify", {
             "json": json,
             "Voucher": Voucher,

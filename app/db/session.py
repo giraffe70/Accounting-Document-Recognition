@@ -29,6 +29,9 @@ def _migrate():
         "dev_note": ("VARCHAR", "''"),
         "attachments": ("VARCHAR", "'[]'"),
         "manual_entry": ("INTEGER", "0"),
+        "record_role": ("VARCHAR", "'voucher'"),
+        "source_parent_id": ("INTEGER", "NULL"),
+        "recognition_history": ("VARCHAR", "'[]'"),
     }
     with _engine.connect() as conn:
         info = list(conn.exec_driver_sql("PRAGMA table_info(voucher_records)"))
@@ -37,7 +40,7 @@ def _migrate():
             if col not in cols:
                 conn.exec_driver_sql(
                     f"ALTER TABLE voucher_records ADD COLUMN {col} {sqltype} DEFAULT {default}")
-            elif sqltype == "INTEGER" and cols[col] != "INTEGER":
+            elif col == "manual_entry" and cols[col] != "INTEGER":
                 # 修正早期版本把布林欄位建成 VARCHAR 的資料（全部會讀成 True）
                 conn.exec_driver_sql(f"ALTER TABLE voucher_records DROP COLUMN {col}")
                 conn.exec_driver_sql(

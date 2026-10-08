@@ -30,6 +30,13 @@ logging.getLogger().addHandler(_fh)
 logger = logging.getLogger("pdf_scan")
 
 app = FastAPI(title="憑證辨識系統 API")
+
+
+@app.exception_handler(review.RecognitionProtected)
+async def recognition_protected_handler(request, exc):
+    return JSONResponse({"ok": False, "detail": str(exc)}, status_code=409)
+
+
 init_db()
 auth.ensure_seed_users()
 validation.init_validation()
@@ -330,9 +337,11 @@ async def api_analyze(file: UploadFile = File(...), company: str = Form("")):
         vouchers = pipeline.prepare_pages(str(path))
         if not vouchers:
             return JSONResponse({"ok": False, "detail": "無法讀取任何頁面"}, status_code=400)
-        ids = [review.save_voucher(v, company=company, status=ReviewStatus.prepared).id for v in vouchers]
+        records = review.save_prepared_vouchers(vouchers, company)
+        ids = [r.id for r in records if r.record_role != "source_page"] or [r.id for r in records]
         return {"ok": True, "id": ids[0], "ids": ids, "count": len(ids),
-                "prepared": True, "voucher": vouchers[0].model_dump()}
+                "prepared": True, "source_page_ids": [r.id for r in records if r.record_role == "source_page"],
+                "voucher": next(v.model_dump() for v,r in zip(vouchers,records) if r.id == ids[0])}
     except Exception as exc:  # noqa: BLE001
         logger.exception("分析失敗")
         return JSONResponse({"ok": False, "detail": f"分析失敗：{exc}"}, status_code=500)
@@ -367,8 +376,7 @@ def _run_batch(paths: list[str], company: str = ""):
             _job["current"] = Path(p).name
         try:
             vouchers = pipeline.prepare_pages(p)
-            for voucher in vouchers:
-                rec = review.save_voucher(voucher, company=company, status=ReviewStatus.prepared)
+            for voucher, rec in zip(vouchers, review.save_prepared_vouchers(vouchers, company)):
                 with _job_lock:
                     _job["results"].append({"id": rec.id, **voucher.model_dump()})
         except Exception as exc:  # noqa: BLE001
@@ -402,6 +410,7 @@ async def _save_upload(file: UploadFile) -> Path:
 def _rec_to_dict(rec: VoucherRecord, full: bool = False) -> dict:
     d = {
         "id": rec.id, "source_file": rec.source_file, "company": rec.company,
+        "record_role": rec.record_role, "source_parent_id": rec.source_parent_id,
         "period": rec.period, "status": rec.status, "confidence": rec.confidence,
         "structure_model": rec.structure_model, "ocr_provider": rec.ocr_provider,
         "clerk_note": rec.clerk_note, "accountant_note": rec.accountant_note,
@@ -423,6 +432,8 @@ def _rec_to_dict(rec: VoucherRecord, full: bool = False) -> dict:
         d["amountcheck"] = taxid.check_amounts(d["current"])
     else:
         cur = json.loads(rec.current_json)
+        d["origin"] = cur.get("origin", {})
+        d["quality"] = cur.get("quality", {})
         d["voucher_id"] = cur.get("voucher_id", "")
         d["date"] = cur.get("date", "")
         d["total_amount"] = cur.get("total_amount")
@@ -434,7 +445,7 @@ def _rec_to_dict(rec: VoucherRecord, full: bool = False) -> dict:
 @app.get("/api/vouchers")
 def api_list(status: str = "", company: str = "", period: str = ""):
     st = ReviewStatus(status) if status else None
-    recs = review.list_vouchers(status=st, company=company, period=period)
+    recs = review.list_vouchers(status=st, company=company, period=period, include_sources=True)
     return {"items": [_rec_to_dict(r) for r in recs]}
 
 
@@ -552,6 +563,8 @@ def api_split(rec_id: int, box: list = Body(..., embed=True)):
 def api_re_recognize(rec_id: int):
     try:
         rec = review.re_recognize(rec_id)
+    except review.RecognitionProtected as exc:
+        return JSONResponse({"ok": False, "detail": str(exc)}, status_code=409)
     except Exception as exc:  # noqa: BLE001
         logger.exception("重新辨識失敗")
         return JSONResponse({"ok": False, "detail": f"重新辨識失敗：{exc}"}, status_code=500)
@@ -579,6 +592,8 @@ def api_recognize(rec_id: int):
     """依確認的類型在準備好的影像上做內容辨識（queued/prepared → pending 待審）。"""
     try:
         rec = review.recognize_record(rec_id)
+    except review.RecognitionProtected as exc:
+        return JSONResponse({"ok": False, "detail": str(exc)}, status_code=409)
     except Exception as exc:  # noqa: BLE001
         logger.exception("內容辨識失敗")
         return JSONResponse({"ok": False, "detail": f"辨識失敗：{exc}"}, status_code=500)
@@ -666,6 +681,7 @@ def api_classify(rec_id: int):
     if not rec:
         return JSONResponse({"detail": "查無此紀錄"}, status_code=404)
     try:
+        review._check_model_write(rec)
         voucher = Voucher.model_validate(json.loads(rec.current_json))
         voucher = classify.classify(voucher, company=rec.company)
         review.update_current(rec_id, voucher.model_dump(), mark_manual=False)
@@ -674,6 +690,8 @@ def api_classify(rec_id: int):
                 "balance_check": voucher.balance_check, "classification_meta": voucher.classification_meta,
                 "warnings": voucher.classification_meta.get("warnings", []),
                 "validation_warnings": voucher.validation_warnings, "payment_state": voucher.payment_state}
+    except review.RecognitionProtected as exc:
+        return JSONResponse({"ok": False, "detail": str(exc)}, status_code=409)
     except Exception as exc:  # noqa: BLE001
         logger.exception("科目分類失敗")
         return JSONResponse({"ok": False, "detail": f"分類失敗：{exc}"}, status_code=500)

@@ -101,9 +101,16 @@ def init_validation() -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_results_run ON results(run_id, status);
         CREATE INDEX IF NOT EXISTS idx_pages_dataset ON pages(dataset_id);
+        CREATE TABLE IF NOT EXISTS document_results (
+          id TEXT PRIMARY KEY, parent_result_id TEXT NOT NULL, document_index INTEGER NOT NULL,
+          status TEXT NOT NULL, data_json TEXT NOT NULL DEFAULT '{}', error TEXT DEFAULT '',
+          UNIQUE(parent_result_id,document_index), FOREIGN KEY(parent_result_id) REFERENCES results(id)
+        );
         """)
         con.execute("UPDATE runs SET status='interrupted', current='' WHERE status='running'")
         con.execute("UPDATE results SET status='queued', started_at=NULL WHERE status='running'")
+        if "page_json" not in {row[1] for row in con.execute("PRAGMA table_info(results)")}:
+            con.execute("ALTER TABLE results ADD COLUMN page_json TEXT DEFAULT '{}'")
     if not _scheduler_thread or not _scheduler_thread.is_alive():
         _scheduler_thread = threading.Thread(target=_scheduler, name="validation-scheduler", daemon=True)
         _scheduler_thread.start()
@@ -376,7 +383,7 @@ def _percentile(values, p):
 
 
 def _statistics(con, run_id):
-    rows = con.execute("""SELECT combo_id,combo_name,mode,status,actual_path,timings_json,warmup
+    rows = con.execute("""SELECT id,page_id,voucher_json,combo_id,combo_name,mode,status,actual_path,timings_json,warmup
                         FROM results WHERE run_id=? ORDER BY rowid""", (run_id,)).fetchall()
     groups = {}
     for row in rows:
@@ -385,15 +392,43 @@ def _statistics(con, run_id):
                                     "actual_path": key[1], "samples": 0, "succeeded": 0,
                                     "failed": 0, "warmups": 0, "times": [], "wall_seconds": 0,
                                     "first_seconds": None})
+        for metric in ("document_count", "insufficient_count", "location_issue_count", "needs_review_count", "warning_document_count", "warning_page_count", "quality_unassessed_count", "skipped", "partial"):
+            g.setdefault(metric, 0)
+        g.setdefault("warning_pages", set())
+        g.setdefault("warning_documents", set())
         timing = json.loads(row["timings_json"] or "{}")
         if row["warmup"]:
             g["warmups"] += 1
             continue
-        if row["status"] not in ("succeeded", "failed", "timeout"):
+        if row["status"] not in ("succeeded", "partial", "skipped", "failed", "timeout"):
             continue
         g["samples"] += 1
         total = float(timing.get("complete_seconds") or 0)
         g["wall_seconds"] += total
+        docs = _documents(con, row["id"])
+        if not docs and row["status"] == "succeeded":
+            docs = [{"voucher": json.loads(row["voucher_json"] or "{}"), "status": "succeeded"}]
+        g["document_count"] += len(docs)
+        page_warning = False
+        for document_index, document in enumerate(docs):
+            voucher = document.get("voucher") or {}
+            quality = voucher.get("quality") or {}
+            issues = quality.get("issues") or []
+            state = quality.get("state", "unassessed")
+            g["insufficient_count"] += state == "insufficient"
+            g["needs_review_count"] += state == "needs_review"
+            g["quality_unassessed_count"] += state == "unassessed"
+            g["location_issue_count"] += bool(voucher.get("box_issues"))
+            warned = bool(voucher.get("validation_warnings") or issues or document.get("status") != "succeeded")
+            g["warning_document_count"] += warned
+            if warned:
+                g["warning_documents"].add((row["page_id"], document_index))
+            page_warning = page_warning or warned
+        g["warning_page_count"] += page_warning or row["status"] == "partial"
+        if page_warning or row["status"] == "partial":
+            g["warning_pages"].add(row["page_id"])
+        g["partial"] += row["status"] == "partial"
+        g["skipped"] += row["status"] == "skipped"
         if row["status"] == "succeeded":
             g["succeeded"] += 1
             g["times"].append(float(timing.get("recognition_seconds") or total))
@@ -404,7 +439,10 @@ def _statistics(con, run_id):
     output = []
     for g in groups.values():
         vals = g.pop("times")
+        g["warning_page_count"] = len(g.pop("warning_pages"))
+        g["warning_document_count"] = len(g.pop("warning_documents"))
         g.update({"success_rate": g["succeeded"] / g["samples"] if g["samples"] else None,
+                  "completed_rate": g["succeeded"] / (g["samples"] - g["skipped"]) if g["samples"] > g["skipped"] else None,
                   "average_seconds": statistics.fmean(vals) if vals else None,
                   "p50_seconds": _percentile(vals, .5), "p95_seconds": _percentile(vals, .95),
                   "throughput_per_minute": (g["succeeded"] * 60 / g["wall_seconds"]
@@ -444,6 +482,8 @@ def list_results(run_id: str, combo_id: str = "", status: str = "", source: str 
     items = []
     for row in rows:
         item = _row(row); item["timings"] = json.loads(item.pop("timings_json") or "{}")
+        with _connect() as document_con:
+            item["documents"] = _documents(document_con, item["id"])
         items.append(item)
     return {"items": items, "total": total, "page": page, "page_size": page_size}
 
@@ -461,7 +501,24 @@ def get_result(result_id: str):
     for key in ("voucher_json", "timings_json", "trace_json", "ocr_json", "boxes_json"):
         item[key.removesuffix("_json")] = json.loads(item.pop(key) or ("[]" if key in ("trace_json", "ocr_json") else "{}"))
     item["artifacts"] = [{**_row(x), "url": f"/api/validation/artifacts/{x['id']}"} for x in arts]
+    item.update(json.loads(item.pop("page_json", "{}") or "{}"))
+    with _connect() as con:
+        item["documents"] = _documents(con, result_id)
+    for document in item["documents"]:
+        prefix = f"document_{document['document_index']}_"
+        document["artifacts"] = [{**art, "kind": art["kind"][len(prefix):]} for art in item["artifacts"] if art["kind"].startswith(prefix)]
+    if not item["trace"]:
+        recovered = _recover_diagnostics({"run_id": item["run_id"], "id": result_id})
+        item["trace"], item["ocr"] = recovered["trace"], recovered["ocr"]
     return item
+
+
+def _documents(con, result_id):
+    if not con.execute("SELECT 1 FROM sqlite_master WHERE name='document_results'").fetchone():
+        return []
+    return [{**json.loads(row["data_json"]), "id": row["id"], "document_index": row["document_index"],
+             "status": row["status"], "error": row["error"]} for row in con.execute(
+                 "SELECT * FROM document_results WHERE parent_result_id=? ORDER BY document_index", (result_id,))]
 
 
 def _set_run_action(run_id, action):
@@ -501,12 +558,13 @@ def _set_run_action(run_id, action):
                 if _active_run_id == run_id and _active_process and _active_process.is_alive():
                     _active_process.terminate()
         elif action == "resume":
-            con.execute("UPDATE results SET status='queued',finished_at=NULL,error='' WHERE run_id=? AND status='cancelled'",
+            con.execute("UPDATE results SET status='queued',finished_at=NULL,error='' WHERE run_id=? AND status IN ('cancelled','partial')",
                         (run_id,))
             con.execute("UPDATE runs SET cancel_requested=0,status='queued',finished_at=NULL WHERE id=?", (run_id,))
         elif action == "retry":
             if run["status"] in ("queued", "running", "cancelling"):
                 return JSONResponse({"detail": "批次執行中，請完成或取消後再重跑失敗項目"}, status_code=409)
+            con.execute("UPDATE results SET status='queued',finished_at=NULL WHERE run_id=? AND status='partial'", (run_id,))
             failed = con.execute("SELECT * FROM results WHERE run_id=? AND status IN ('failed','timeout')", (run_id,)).fetchall()
             for old in failed:
                 con.execute("""INSERT INTO results
@@ -540,10 +598,151 @@ def _child_entry(conn, payload):
     try:
         conn.send({"ok": True, "data": _recognize(payload)})
     except BaseException as exc:  # child must return diagnostic details
-        conn.send({"ok": False, "error": f"{type(exc).__name__}: {exc}",
+        data = _recover_diagnostics(payload)
+        from app.core.invocation_trace import atomic_json
+        data["trace"].append({"kind":"child_failure","error":f"{type(exc).__name__}: {exc}","parameters":payload})
+        path = Path(data["result_dir"]) / "trace.json"
+        atomic_json(path, data["trace"])
+        data["artifacts"]["trace_json"] = {"path":str(path), "media_type":"application/json"}
+        conn.send({"ok": False, "data": data, "error": f"{type(exc).__name__}: {exc}",
                    "traceback": traceback.format_exc()})
     finally:
         conn.close()
+
+
+def _recover_diagnostics(payload):
+    directory = RUNS / payload["run_id"] / payload["id"]
+    data = {"result_dir": str(directory), "trace": [], "ocr": [], "artifacts": {}}
+    path = directory / "trace.json"
+    if path.is_file():
+        try:
+            data["trace"] = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pass
+        data["ocr"] = next((r.get("lines", []) for r in reversed(data["trace"]) if r.get("kind") in ("ocr", "ocr_result", "supplement_ocr")), [])
+        data["artifacts"]["trace_json"] = {"path": str(path), "media_type": "application/json"}
+    return data
+
+
+def _recognize_layout(payload):
+    from app.core import page_layout, invocation_trace, model_invocation, pipeline, settings_store, model_factory
+    directory = RUNS / payload["run_id"] / payload["id"]
+    directory.mkdir(parents=True, exist_ok=True)
+    source = payload["page_path"]
+    input_path = page_layout.crop(source, {"box": [0,0,1000,1000]}, directory / "layout_input.png", max_edge=payload["max_edge"])
+    combo = payload["combo"]
+    with invocation_trace.capture(directory / "trace.json") as trace:
+        snapshot = model_invocation.source_versions()
+        if payload.get("execution_version_sha256") and payload["execution_version_sha256"] != snapshot["execution_version_sha256"]:
+            raise ValueError("版面辨識版本已改變，請建立新批次")
+        invocation_trace.add({"kind": "snapshot", "versions": snapshot, "parameters": payload})
+        lines, text, rotation = [], "", 0
+        mode = "ocr_text" if combo["mode"] == "ocr_llm" else "image"
+        if mode == "ocr_text":
+            ocr = model_factory.get_ocr("paddle")
+            with pipeline.activity.stage("ocr", "版面 OCR"):
+                _, rotation = pipeline._auto_orient_ocr(input_path, ocr)
+                lines = ocr.recognize(input_path)
+                text = ocr.plain_text(lines)
+            invocation_trace.add({"kind": "ocr", "lines": lines, "text": text})
+        layout = page_layout.detect(input_path, mode=mode, ocr_lines=lines, ocr_text=text, model_setting=combo["classify_model"])
+        if rotation:
+            from app.core.geometry import rotate_box
+            for region in layout["regions"]:
+                region["box"] = rotate_box(region["box"], (-rotation) % 360)
+                region["rotate"] = rotation
+        layout["execution_version_sha256"] = snapshot["execution_version_sha256"]
+        invocation_trace.atomic_json(directory / "layout.json", layout)
+    return {"layout": layout, "trace": trace, "ocr": lines, "result_dir": str(directory),
+            "artifacts": {"trace_json": {"path": str(directory / "trace.json"), "media_type": "application/json"},
+                          "original": {"path": str(source), "media_type": "image/png"}}}
+
+
+def _recognize(payload):
+    if payload.get("phase") == "layout":
+        return _recognize_layout(payload)
+    if payload.get("phase") == "document":
+        return _recognize_document(payload)
+    # Direct/offline callers use the same page orchestration without spawning children.
+    return _run_page_child(payload, 600, runner=lambda p, timeout: {"ok": True, "data": _recognize(p)})["data"]
+
+
+def _run_page_child(payload, timeout, runner=None):
+    from app.core import page_layout, invocation_trace
+    persist = runner is None
+    runner = runner or _run_child
+    directory = RUNS / payload["run_id"] / payload["id"]
+    saved_layout = directory / "layout.json"
+    layout_response = None
+    if saved_layout.is_file():
+        saved = json.loads(saved_layout.read_text(encoding="utf-8"))
+        if saved.get("execution_version_sha256") == payload.get("execution_version_sha256"):
+            layout_response = {"ok": True, "data": {**_recover_diagnostics(payload), "layout": saved}}
+    if layout_response is None:
+        layout_response = runner({**payload, "phase": "layout"}, timeout)
+    if not layout_response.get("ok"):
+        return layout_response
+    base = layout_response["data"]
+    layout = base["layout"]
+    base.update(documents=[], voucher={}, actual_path=payload["combo"]["mode"],
+                origin=page_layout.origin(payload["page_path"], {"box":[0,0,1000,1000]}, payload["page_no"]))
+    base["timings"] = {"complete_seconds": float(layout_response.get("wall_seconds", 0)), "recognition_seconds": float(layout_response.get("wall_seconds", 0))}
+    if layout["content_kind"] == "blank" and layout["auto_split"]:
+        base.update(page_status="skipped", quality={"version":1,"state":"usable","content_kind":"blank","issues":[]})
+        return {"ok": True, "data": base}
+    if not layout["auto_split"]:
+        base.update(page_status="partial", quality={"version":1,"state":"needs_review","content_kind":layout["content_kind"],"issues":[{"code":"manual_split","message":"版面區域須人工確認"}]})
+        return {"ok": True, "data": base}
+    total_seconds = float(layout_response.get("wall_seconds", 0))
+    for index, region in enumerate(layout["regions"]):
+        if persist:
+            with _connect() as con:
+                run = con.execute("SELECT status,cancel_requested FROM runs WHERE id=?", (payload["run_id"],)).fetchone()
+            if run and (run["status"] != "running" or run["cancel_requested"]):
+                base["page_status"] = "partial"
+                return {"ok": True, "data": base}
+        previous = None
+        if persist:
+            with _connect() as con:
+                previous = next((d for d in _documents(con, payload["id"]) if d["document_index"] == index and d["status"] == "succeeded"), None)
+        if previous:
+            base["documents"].append(previous)
+            for kind, info in previous.get("artifacts", {}).items():
+                base.setdefault("artifacts", {})[f"document_{index}_{kind}"] = info
+            continue
+        document_id = uuid.uuid5(uuid.NAMESPACE_URL, payload["id"] + ":" + str(index)).hex
+        origin = {**page_layout.origin(payload["page_path"], region, payload["page_no"]), "parent_result_id": payload["id"]}
+        try:
+            native = page_layout.crop(payload["page_path"], region, directory / f"region_{index}.png")
+            response = runner({**payload, "id": document_id, "parent_result_id": payload["id"], "phase": "document", "type_key": region["type"], "page_path": native, "origin": origin}, timeout)
+        except Exception as exc:
+            diagnostic = [{"kind":"region_failure","region":region,"error":f"{type(exc).__name__}: {exc}"}]
+            diagnostic_path = RUNS / payload["run_id"] / document_id / "trace.json"
+            invocation_trace.atomic_json(diagnostic_path, diagnostic)
+            response = {"ok":False, "error":diagnostic[0]["error"], "data":{"trace":diagnostic,
+                        "artifacts":{"trace_json":{"path":str(diagnostic_path),"media_type":"application/json"}}}}
+        data = response.get("data") or {}
+        status = "succeeded" if response.get("ok") else "timeout" if response.get("timeout") else "failed"
+        document = {**data, "id": document_id, "origin": origin, "status": status, "document_index": index, "error": response.get("error", "")}
+        for kind, info in data.get("artifacts", {}).items():
+            base.setdefault("artifacts", {})[f"document_{index}_{kind}"] = info
+        total_seconds += float(response.get("wall_seconds", 0))
+        base["documents"].append(document)
+        # Persist each completed region independently before attempting the next.
+        if persist:
+            with _db_lock, _connect() as con:
+                con.execute("INSERT OR REPLACE INTO document_results(id,parent_result_id,document_index,status,data_json,error) VALUES(?,?,?,?,?,?)",
+                            (document_id, payload["id"], index, status, json.dumps(document, ensure_ascii=False), document["error"]))
+        invocation_trace.atomic_json(directory / "documents.json", base["documents"])
+    successful = [d for d in base["documents"] if d["status"] == "succeeded"]
+    states = [(d.get("voucher") or {}).get("quality", {}).get("state", "unassessed") for d in base["documents"]]
+    base["quality"] = {"version":1, "state":"insufficient" if "insufficient" in states else "needs_review" if "needs_review" in states or len(successful) != len(base["documents"]) else "usable", "content_kind":layout["content_kind"], "issues":[]}
+    base["page_status"] = "succeeded" if len(successful) == len(base["documents"]) else "partial"
+    if len(base["documents"]) == 1 and successful:
+        base.update({k: successful[0][k] for k in ("voucher", "boxes", "ocr", "trace", "timings", "actual_path") if k in successful[0]})
+        base.setdefault("artifacts", {}).update({k: info for k,info in successful[0].get("artifacts", {}).items() if k not in ("original", "trace_json")})
+    base["timings"] = {**(base.get("timings") or {}), "complete_seconds": total_seconds or sum(float(d.get("timings", {}).get("complete_seconds", 0)) for d in base["documents"]), "recognition_seconds": total_seconds or sum(float(d.get("timings", {}).get("recognition_seconds", 0)) for d in base["documents"])}
+    return {"ok": True, "data": base}
 
 
 def _run_child(payload, timeout):
@@ -575,6 +774,15 @@ def _run_child(payload, timeout):
     except (EOFError, OSError) as exc:
         response = {"ok": False, "error": f"辨識子行程中斷：{exc}"}
     response["wall_seconds"] = round(time.perf_counter() - wall_started, 6)
+    if not response.get("ok"):
+        data = response.setdefault("data", _recover_diagnostics(payload))
+        if not data.get("trace"):
+            data.update(_recover_diagnostics(payload))
+        from app.core.invocation_trace import atomic_json
+        data.setdefault("trace", []).append({"kind":"child_interruption" if response.get("timeout") else "child_error", "error":response.get("error", ""), "parameters":payload})
+        path = RUNS / payload["run_id"] / payload["id"] / "trace.json"
+        atomic_json(path, data["trace"])
+        data.setdefault("artifacts", {})["trace_json"] = {"path":str(path), "media_type":"application/json"}
     parent.close()
     with _active_lock:
         _active_process, _active_run_id = None, None
@@ -617,7 +825,15 @@ def _scheduler():
         combo = next(c for c in settings["combinations"] if c["id"] == task["combo_id"])
         payload = {**task, "combo": combo, "max_edge": settings["max_edge"], "run_id": task["run_id"],
                    "execution_version_sha256": settings["execution_version_sha256"]}
-        response = _run_child(payload, settings["timeout_seconds"])
+        try:
+            response = _run_page_child(payload, settings["timeout_seconds"])
+        except Exception as exc:
+            data = _recover_diagnostics(payload)
+            with _connect() as con:
+                data["documents"] = _documents(con, task["id"])
+            if data["documents"]:
+                data["page_status"] = "partial"
+            response = {"ok":bool(data["documents"]), "data":data, "error":f"排程處理失敗：{type(exc).__name__}: {exc}", "traceback":traceback.format_exc()}
         _save_response(task, response)
         _finalize_runs()
 
@@ -638,7 +854,7 @@ def _save_response(task, response):
         run = con.execute("SELECT status,cancel_requested FROM runs WHERE id=?", (task["run_id"],)).fetchone()
         if run["status"] == "terminated":
             return
-        status = ("cancelled" if run["cancel_requested"] else "succeeded" if response.get("ok")
+        status = ("cancelled" if run["cancel_requested"] else data.get("page_status", "succeeded") if response.get("ok")
                   else "timeout" if response.get("timeout") else "failed")
         con.execute("""UPDATE results SET status=?,finished_at=?,actual_path=?,voucher_json=?,
           timings_json=?,trace_json=?,ocr_json=?,boxes_json=?,error=?,result_dir=? WHERE id=?""",
@@ -647,6 +863,9 @@ def _save_response(task, response):
            json.dumps(data.get("ocr", []), ensure_ascii=False), json.dumps(data.get("boxes", {}), ensure_ascii=False),
            (response.get("error", "") + ("\n" + response["traceback"] if response.get("traceback") else "")),
            data.get("result_dir", ""), task["id"]))
+        con.execute("UPDATE results SET page_json=? WHERE id=?",
+                    (json.dumps({key: data[key] for key in ("layout", "origin", "quality") if key in data}, ensure_ascii=False), task["id"]))
+        con.execute("DELETE FROM artifacts WHERE result_id=?", (task["id"],))
         for kind, info in (data.get("artifacts") or {}).items():
             con.execute("INSERT INTO artifacts(id,result_id,kind,path,media_type) VALUES(?,?,?,?,?)",
                         (uuid.uuid4().hex, task["id"], kind, info["path"], info["media_type"]))
@@ -664,7 +883,7 @@ def _finalize_runs():
         for run in runs:
             counts = {row[0]: row[1] for row in con.execute(
                 "SELECT status,COUNT(*) FROM results WHERE run_id=? GROUP BY status", (run["id"],)).fetchall()}
-            done = sum(counts.get(x, 0) for x in ("succeeded", "failed", "timeout", "cancelled"))
+            done = sum(counts.get(x, 0) for x in ("succeeded", "partial", "skipped", "failed", "timeout", "cancelled"))
             if run["cancel_requested"]:
                 con.execute("UPDATE results SET status='cancelled',finished_at=? WHERE run_id=? AND status='queued'",
                             (_now(), run["id"]))
@@ -689,9 +908,9 @@ def _annotate(source: Path, boxes: dict, output: Path):
     valid = {}
     for idx, (key, raw) in enumerate((boxes or {}).items()):
         if not isinstance(raw, (list, tuple)) or len(raw) < 4: continue
-        try: vals = [max(0, min(1000, float(x))) for x in raw[:4]]
+        from app.core.geometry import validate_box
+        try: vals = validate_box(raw)
         except (TypeError, ValueError): continue
-        if vals[2] <= vals[0] or vals[3] <= vals[1]: continue
         coords = (vals[0] / 1000 * w, vals[1] / 1000 * h, vals[2] / 1000 * w, vals[3] / 1000 * h)
         color = colors[idx % len(colors)]
         draw.rectangle(coords, outline=color, width=max(2, int(max(w, h) / 500)))
@@ -716,7 +935,7 @@ def _text_extract(image_path, type_key, ocr_lines, ocr_text, model_setting):
     return voucher
 
 
-def _recognize(payload):
+def _recognize_document(payload):
     from app.core import activity, invocation_trace, model_factory, pipeline, settings_store
     from app.core.model_invocation import source_versions
     expected_version = payload.get("execution_version_sha256")
@@ -735,17 +954,18 @@ def _recognize(payload):
     combo, ocr_lines = payload["combo"], []
     ocr_fallback = ""
     recognition_started = time.perf_counter()
-    with invocation_trace.capture() as trace:
+    with invocation_trace.capture(result_dir / "trace.json") as trace:
+        invocation_trace.add({"kind": "snapshot", "versions": source_versions(), "parameters": payload})
         if combo["mode"] in ("vlm_direct", "ocr_vlm"):
             ocr_setting = "disabled/none" if combo["mode"] == "vlm_direct" else "paddle/pp-ocrv5"
             classify_settings = {"ocr": ocr_setting, "structure": combo["classify_model"],
                                  "classify": combo["classify_model"]}
             with settings_store.isolated_settings(classify_settings):
-                type_key = pipeline.prepare_image(str(input_path))
+                type_key = payload.get("type_key") or pipeline.prepare_image(str(input_path))
             extract_settings = {"ocr": ocr_setting, "structure": combo["structure_model"],
                                 "classify": combo["classify_model"]}
             with settings_store.isolated_settings(extract_settings):
-                voucher = pipeline.extract_for_type(str(input_path), type_key)
+                voucher = pipeline.extract_for_type(str(input_path), type_key, native_path=str(original))
             ocr_records = [x for x in trace if x.get("kind") == "ocr_result" and x.get("lines")]
             if ocr_records:
                 ocr_lines = ocr_records[-1]["lines"]
@@ -762,13 +982,14 @@ def _recognize(payload):
             ocr_text = ocr.plain_text(ocr_lines)
             if not ocr_text.strip():
                 raise RuntimeError("OCR＋純文字 LLM 模式未取得任何 OCR 文字")
-            type_key = _text_classify(ocr_text, combo["classify_model"])
+            type_key = payload.get("type_key") or _text_classify(ocr_text, combo["classify_model"])
             voucher = _text_extract(str(input_path), type_key, ocr_lines, ocr_text,
                                     combo["structure_model"])
             actual = "ocr_llm"
     recognition = time.perf_counter() - recognition_started
     voucher.source_file = f"{payload['relative_path']} p{payload['page_no']}"
     data = voucher.model_dump(mode="json")
+    data["origin"] = payload.get("origin", {})
     if expected_version:
         if expected_version != source_versions()["execution_version_sha256"]:
             raise ValueError("辨識期間版本已改變，結果未納入原批次，請建立新批次")
@@ -779,9 +1000,8 @@ def _recognize(payload):
     annotated = result_dir / "annotated.jpg"
     valid_boxes = _annotate(input_path, data.get("boxes") or {}, annotated)
     data["boxes"] = valid_boxes
-    (result_dir / "result.json").write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    (result_dir / "trace.json").write_text(json.dumps(trace, ensure_ascii=False, indent=2), encoding="utf-8")
-    (result_dir / "ocr.json").write_text(json.dumps(ocr_lines, ensure_ascii=False, indent=2), encoding="utf-8")
+    invocation_trace.atomic_json(result_dir / "result.json", data)
+    invocation_trace.atomic_json(result_dir / "ocr.json", ocr_lines)
     evidence = time.perf_counter() - evidence_started
     stages = {"ocr_seconds": 0.0, "classification_seconds": 0.0, "extraction_seconds": 0.0}
     for rec in trace:
@@ -853,6 +1073,9 @@ def _export_data(run_id):
         item = _row(row)
         for key in ("voucher_json", "timings_json", "trace_json", "ocr_json", "boxes_json"):
             item[key.removesuffix("_json")] = json.loads(item.pop(key) or ("[]" if key in ("trace_json", "ocr_json") else "{}"))
+        item.update(json.loads(item.pop("page_json", "{}") or "{}"))
+        with _connect() as document_con:
+            item["documents"] = _documents(document_con, item["id"])
         results.append(item)
     return {"exported_at": _now(), "run": _run_dict(run), "statistics": stats,
             "results": results, "artifacts": [_row(x) for x in artifacts],
@@ -862,14 +1085,33 @@ def _export_data(run_id):
 def _csv_files(data):
     files = {}
     specs = {
-      "vouchers.csv": ["result_id","source","page","combo","mode","actual_path","repeat","attempt","status","doc_type","voucher_id","date","total_amount","recognition_seconds","complete_seconds","error","field_evidence_json","validation_warnings_json","classification_meta_json","payment_state_json"],
+      "vouchers.csv": ["result_id","source","page","combo","mode","actual_path","repeat","attempt","status","doc_type","voucher_id","date","total_amount","recognition_seconds","complete_seconds","error","field_evidence_json","validation_warnings_json","classification_meta_json","payment_state_json","document_id","parent_result_id","source_region","origin_json","quality_json","box_issues_json","sha256"],
       "fields.csv": ["result_id","source","field","value","box","located"],
       "items.csv": ["result_id","source","index","description","quantity","unit_price","amount","hs_code","origin_country","fee_code"],
       "entries.csv": ["result_id","source","index","description","amount","debit_account","debit_account_name","credit_account","credit_account_name","evidence_paths_json","amount_source"]}
     buffers = {name: io.StringIO(newline="") for name in specs}
     writers = {name: csv.DictWriter(buffers[name], fieldnames=fields, extrasaction="ignore") for name, fields in specs.items()}
     for writer in writers.values(): writer.writeheader()
-    for result in data["results"]:
+    specs["pages.csv"] = ["result_id","source","page","status","image_sha256","complete_seconds","document_count"]
+    buffers["pages.csv"] = io.StringIO(newline="")
+    writers["pages.csv"] = csv.DictWriter(buffers["pages.csv"], fieldnames=specs["pages.csv"])
+    writers["pages.csv"].writeheader()
+    flattened = []
+    for page in data["results"]:
+        documents = page.get("documents") or []
+        image_sha = page.get("origin", {}).get("image_sha256") or next((d.get("origin", {}).get("image_sha256") for d in documents if d.get("origin", {}).get("image_sha256")), None)
+        if not image_sha:
+            source_art = next((a for a in data.get("artifacts", []) if a.get("result_id") == page["id"] and a.get("kind") == "original"), None)
+            if source_art and Path(source_art["path"]).is_file():
+                image_sha = _sha(Path(source_art["path"]))
+        writers["pages.csv"].writerow({"result_id": page["id"], "source": _csv_safe(page["relative_path"]), "page": page["page_no"],
+            "status": page["status"], "image_sha256": image_sha or "", "complete_seconds": page.get("timings", {}).get("complete_seconds"), "document_count": len(documents)})
+        if documents:
+            for document in documents:
+                flattened.append({**page, **document, "parent_result_id": page["id"], "document_id": document["id"]})
+        elif page["status"] not in ("partial", "skipped"):
+            flattened.append(page)
+    for result in flattened:
         voucher, source = result.get("voucher") or {}, result["relative_path"]
         writers["vouchers.csv"].writerow({"result_id": result["id"], "source": _csv_safe(source), "page": result["page_no"],
           "combo": _csv_safe(result["combo_name"]), "mode": result["mode"], "actual_path": result["actual_path"],
@@ -881,10 +1123,21 @@ def _csv_files(data):
           "field_evidence_json": json.dumps(voucher.get("field_evidence") or {}, ensure_ascii=False),
           "validation_warnings_json": json.dumps(voucher.get("validation_warnings") or [], ensure_ascii=False),
           "classification_meta_json": json.dumps(voucher.get("classification_meta") or {}, ensure_ascii=False),
-          "payment_state_json": json.dumps(voucher.get("payment_state") or {}, ensure_ascii=False)})
+          "payment_state_json": json.dumps(voucher.get("payment_state") or {}, ensure_ascii=False),
+          "document_id": result.get("document_id", ""), "parent_result_id": result.get("parent_result_id", ""),
+          "source_region": json.dumps((result.get("origin") or voucher.get("origin") or {}).get("region")),
+          "origin_json": json.dumps(result.get("origin") or voucher.get("origin") or {}, ensure_ascii=False),
+          "quality_json": json.dumps(voucher.get("quality") or {}, ensure_ascii=False),
+          "box_issues_json": json.dumps(voucher.get("box_issues") or [], ensure_ascii=False),
+          "sha256": (result.get("origin") or voucher.get("origin") or {}).get("image_sha256", "")})
         boxes = voucher.get("boxes") or {}
         fields = {"voucher_id": voucher.get("voucher_id"), "date": voucher.get("date"),
                   "doc_type": voucher.get("doc_type"), "subtotal": voucher.get("subtotal"),
+                  "doc_type_key": voucher.get("doc_type_key"),
+                  "seller_name": (voucher.get("seller") or {}).get("name"),
+                  "seller_tax_id": (voucher.get("seller") or {}).get("tax_id"),
+                  "buyer_name": (voucher.get("buyer") or {}).get("name"),
+                  "buyer_tax_id": (voucher.get("buyer") or {}).get("tax_id"),
                   "tax_amount": voucher.get("tax_amount"), "total_amount": voucher.get("total_amount"),
                   **(voucher.get("fields") or {})}
         for key, value in fields.items():

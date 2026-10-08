@@ -2,13 +2,22 @@
 from __future__ import annotations
 
 import time
+import json
+import os
+import re
+from pathlib import Path
 from contextlib import contextmanager
 from contextvars import ContextVar
 
 _collector: ContextVar[list | None] = ContextVar("model_invocation_trace", default=None)
+_sink: ContextVar[Path | None] = ContextVar("trace_sink", default=None)
 
 
 def _safe(value):
+    if isinstance(value, str) and value.startswith("data:image/"):
+        return f"<embedded image: {len(value)} chars>"
+    if isinstance(value, str):
+        return re.sub(r"data:image/[^;,\s\"']+;base64,[A-Za-z0-9+/=\r\n]+", "<embedded image>", value)
     if isinstance(value, list):
         return [_safe(x) for x in value]
     if isinstance(value, dict):
@@ -18,13 +27,42 @@ def _safe(value):
     return value
 
 
+def atomic_json(path, value):
+    """Same-directory replacement leaves the last complete journal readable after termination."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + f".{os.getpid()}.tmp")
+    with temporary.open("w", encoding="utf-8") as stream:
+        json.dump(_safe(value), stream, ensure_ascii=False, default=str)
+        stream.flush()
+        os.fsync(stream.fileno())
+    for attempt in range(8):
+        try:
+            os.replace(temporary, path)
+            break
+        except PermissionError:
+            # Windows scanners may briefly hold a newly replaced file open.
+            if attempt == 7:
+                raise
+            time.sleep(.025 * (attempt + 1))
+
+
 @contextmanager
-def capture():
+def capture(path=None):
     records = []
     token = _collector.set(records)
+    sink_token = _sink.set(Path(path) if path else None)
     try:
+        if path:
+            atomic_json(path, records)
         yield records
+    except BaseException as exc:
+        add({"kind": "failure", "error": f"{type(exc).__name__}: {exc}"})
+        raise
     finally:
+        if path:
+            atomic_json(path, records)
+        _sink.reset(sink_token)
         _collector.reset(token)
 
 
@@ -32,12 +70,16 @@ def add(record: dict) -> None:
     target = _collector.get()
     if target is not None:
         target.append(_safe(record))
+        if _sink.get():
+            atomic_json(_sink.get(), target)
 
 
 @contextmanager
-def timed_call(content, attempt: int):
+def timed_call(content, attempt: int, parameters=None):
     started = time.perf_counter()
     record = {"kind": "model_call", "attempt": attempt, "input": _safe(content)}
+    record["parameters"] = parameters or {}
+    add({**record, "kind": "model_call_start"})
     try:
         yield record
     except Exception as exc:

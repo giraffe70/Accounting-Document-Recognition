@@ -109,6 +109,29 @@ def validate_extraction(data: dict, type_key: str, mode: InputMode = "image", fi
     return result
 
 
+def extraction_schema(type_key, mode="image", fields=None):
+    schema = extraction_model(type_key, mode, fields).model_json_schema()
+    if "boxes" in schema["properties"]:
+        schema["properties"]["boxes"] = {"type": "object", "additionalProperties": False,
+            "properties": {s["key"]: {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 1000},
+                                       "minItems": 4, "maxItems": 4} for s in field_specs(type_key, fields)}}
+    return schema
+
+
+def validate_content_and_boxes(data, type_key, mode="image", fields=None):
+    """Keep the content contract strict, but reject localization independently."""
+    from app.core.geometry import validate_boxes
+    supports_boxes = mode == "image" and type_key not in doc_types.NO_VLM_BOX_TYPES
+    content = dict(data)
+    raw = content.pop("boxes", {}) if mode == "image" else {}
+    result = validate_extraction(content, type_key, mode, fields)
+    if supports_boxes:
+        result["boxes"], result["box_issues"] = validate_boxes(raw, {s["key"] for s in field_specs(type_key, fields)})
+    elif mode == "image" and raw:
+        _, result["box_issues"] = validate_boxes(raw, set())
+    return result
+
+
 def _constraints(schema: dict) -> str:
     """Compact types/enums rendered from the same model used to validate output."""
     choices = schema.get("anyOf", [schema])

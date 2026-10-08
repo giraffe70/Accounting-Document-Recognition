@@ -41,7 +41,7 @@ def classify(image_path: str = "", hint: str = "", *, mode="image", ocr_text="",
     try:
         with activity.stage("structure", setting + "（判類型）"):
             obj = model_invocation.invoke_structured(chat, content, lambda obj: validate_route(obj, mode),
-                                                       task="route", invoke=pipeline._invoke_text)
+                                                       task="route", invoke=pipeline._invoke_text, schema=prompts.RouteOutput.model_json_schema())
     except Exception as exc:
         logger.warning("Router 失敗，改用 other：%s", exc)
         obj = {"type": "other", "rotate": 0, "reason": "分類失敗：" + str(exc)[:120]}

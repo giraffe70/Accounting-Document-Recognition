@@ -63,7 +63,7 @@ class MetadataCsvTests(unittest.TestCase):
         vouchers_text = files["vouchers.csv"].removeprefix("\ufeff")
         items_text = files["items.csv"].removeprefix("\ufeff")
         entries_text = files["entries.csv"].removeprefix("\ufeff")
-        self.assertEqual(next(csv.reader(io.StringIO(vouchers_text)))[-1], "payment_state_json")
+        self.assertIn("payment_state_json", next(csv.reader(io.StringIO(vouchers_text))))
         self.assertEqual(next(csv.reader(io.StringIO(items_text)))[-1], "fee_code")
         self.assertEqual(next(csv.reader(io.StringIO(entries_text)))[-1], "amount_source")
         self.assertEqual(json.loads(read_csv("vouchers.csv")[0]["payment_state_json"]), voucher["payment_state"])

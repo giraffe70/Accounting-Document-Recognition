@@ -195,9 +195,13 @@
       const spec = DOC_TYPES[r.doc_type_key];
       const type = esc((spec && spec.label) || r.doc_type) || "（未判類型）";
       const manual = r.manual_entry ? ` <span class="att-badge" title="欄位已人工修正確認">✍ 人工修正</span>` : "";
+      const sourceRole = r.record_role === "source_page" || r.origin?.layout?.auto_split === true;
+      const sourceTag = sourceRole
+        ? ` <span class="att-badge" title="來源頁保留供追溯${r.origin?.page_no != null ? `；原始頁碼 ${esc(r.origin.page_no)}` : ""}">來源頁${r.origin?.page_no != null ? ` p${esc(r.origin.page_no)}` : ""}</span>`
+        : r.source_parent_id != null ? ` <span class="att-badge" title="此單據由來源憑證拆分">來源 #${esc(r.source_parent_id)}</span>` : "";
       return `
       <tr data-id="${r.id}" class="${r.id === currentId ? "sel" : ""}" title="${esc(r.source_file || "")}">
-        <td>${chk}${esc(r.voucher_id) || "—"}${att}<div class="row-sub">${type}${manual}</div></td>
+        <td>${chk}${esc(r.voucher_id) || "—"}${att}${sourceTag}<div class="row-sub">${type}${manual}</div></td>
         <td>${esc(r.company) || "—"}</td>
         <td>${esc(r.date) || "—"}</td>
         <td>${nf(r.total_amount)}</td>
@@ -233,6 +237,10 @@
     const v = rec.current || {};
     currentVoucher = v;
     currentIsImport = !!rec.is_import;
+    const autoSplitSource = v.origin?.layout?.auto_split === true;
+    const sourcePage = rec.record_role === "source_page" || autoSplitSource;
+    $("revForm").classList.toggle("source-only", autoSplitSource);
+    $("reviewBody").classList.toggle("hidden", autoSplitSource);
     $("importBadge").classList.toggle("hidden", !currentIsImport);
     $("revEmpty").classList.add("hidden"); $("revForm").classList.remove("hidden");
     setStatus(rec.status);
@@ -243,9 +251,13 @@
     $("btnResubmit").classList.toggle("hidden", rec.status !== "rejected");
     const isPreExtract = isPrepared || isQueued;   // 尚未萃取欄位：隱藏編輯器
     $("revForm").classList.toggle("prepared", isPreExtract);
-    $("prepHint").classList.toggle("hidden", !isPreExtract);
+    $("prepHint").classList.toggle("hidden", !isPreExtract && !autoSplitSource);
     $("btnConfirmRecognize").classList.toggle("hidden", !isPreExtract);
-    $("revConfWrap").classList.toggle("hidden", isPreExtract);
+    $("btnConfirmRecognize").disabled = sourcePage;
+    $("btnReRecognize").disabled = sourcePage;
+    $("btnClassify").disabled = sourcePage;
+    ["btnRotL", "btnRotR", "btnFineRot", "btnCrop", "btnSplit"].forEach((id) => { $(id).disabled = autoSplitSource; });
+    $("revConfWrap").classList.toggle("hidden", isPreExtract || autoSplitSource);
     if (isPrepared) {
       stageAction = "confirm";
       $("btnConfirmRecognize").textContent = "✅ 確認外觀（加入掃描清單）";
@@ -254,6 +266,11 @@
       stageAction = "recognize";
       $("btnConfirmRecognize").textContent = "🔍 辨識此張";
       $("prepHint").innerHTML = "<b>③ 掃描清單</b>：外觀已確認。按「🔍 辨識此張」提取內容欄位，或到清單頂端「⚡ 一鍵提取全部」批次處理。";
+    }
+    if (sourcePage && isPreExtract) {
+      $("prepHint").innerHTML = autoSplitSource
+        ? "<b>來源頁</b>：此頁已完成自動分割或確認為空白，保留原圖供追溯；請開啟拆分出的單據處理。"
+        : "<b>來源頁</b>：請用上方「裁切為新憑證」建立單據；來源頁保留供追溯，不會確認或送入辨識。";
     }
     $("revCompanySel").value = rec.company || "";
     const typeKey = v.doc_type_key || "other";
@@ -278,7 +295,7 @@
     renderWarnings();
     setupImage(id, rec.has_image, v.boxes || {});
     renderPages(id, rec.attachments || 0);
-    $("revSrc").textContent = `來源：${rec.source_file || "—"}　OCR：${rec.ocr_provider || "—"}　結構化：${rec.structure_model || "—"}`;
+    $("revSrc").textContent = `${sourcePage ? "來源頁（供追溯）　" : rec.source_parent_id != null ? `拆分自來源 #${rec.source_parent_id}　` : ""}來源：${rec.source_file || "—"}　OCR：${rec.ocr_provider || "—"}　結構化：${rec.structure_model || "—"}`;
     loadList();
   }
 
@@ -589,6 +606,18 @@
     }
     const meta = currentVoucher.classification_meta || {};
     const lines = [...(currentVoucher.validation_warnings || []), ...(meta.warnings || []), ...(meta.assumptions || [])];
+    const origin = currentVoucher.origin || {}, quality = currentVoucher.quality;
+    if (origin.page_no != null || origin.region) {
+      lines.unshift(`來源定位：第 ${origin.page_no ?? "—"} 頁${origin.region ? `，區域 ${JSON.stringify(origin.region)}` : ""}${origin.rotation != null ? `，旋轉 ${origin.rotation}°` : ""}`);
+    }
+    if (quality) {
+      const state = {usable:"可用",needs_review:"待覆核",insufficient:"資訊不足"}[quality.state] || quality.state || "未判定";
+      const kind = {supporting:"佐證文件",document:"單據",unknown:"未判定",blank:"空白頁"}[quality.content_kind] || quality.content_kind || "未判定";
+      lines.unshift(`文件品質：${state} · ${kind}`);
+      for (const issue of quality.issues || []) {
+        lines.push(`品質${issue.severity ? `（${issue.severity}）` : "提示"}：${issue.message || issue.code || "需檢查"}${issue.path ? ` [${issue.path}]` : ""}`);
+      }
+    }
     if (meta.status === "candidate") lines.unshift("候選分錄：請核對證據與假設後再審核。");
     if (meta.original_checks && meta.original_checks.single_sided) lines.unshift("保留原始單面傳票；借貸平衡與原印合計分開檢查。");
     if (meta.status === "skipped" && meta.reason === "supporting") lines.unshift("佐證附頁不單獨產生分錄。");

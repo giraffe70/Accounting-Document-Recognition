@@ -50,6 +50,8 @@ TABLE_META = {
             "accountant_approved_at": "會計師核定時間", "manual_entry": "人工輸入",
             "ocr_provider": "OCR 來源", "structure_model": "欄位萃取模型",
             "image_path": "掃描影像路徑", "attachments": "附頁清單",
+            "record_role": "紀錄角色", "source_parent_id": "來源憑證編號",
+            "recognition_history": "辨識歷程",
             "created_at": "建立時間", "updated_at": "更新時間",
         },
     },
@@ -94,6 +96,7 @@ TABLE_META = {
         "utc_columns": ("queued_at", "started_at", "finished_at"),
         "statuses": {
             "queued": "排隊中", "running": "執行中", "succeeded": "成功",
+            "partial": "部分完成／待分割", "skipped": "確認空白／略過",
             "failed": "失敗", "timeout": "逾時", "cancelled": "已取消",
             "terminated": "已終止",
         },
@@ -107,6 +110,15 @@ TABLE_META = {
             "timings_json": "耗時明細", "trace_json": "執行追蹤",
             "ocr_json": "OCR 文字", "boxes_json": "欄位座標",
             "error": "錯誤訊息", "result_dir": "結果目錄",
+            "page_json": "頁面版面、來源與品質",
+        },
+    },
+    ("validation", "document_results"): {
+        "label": "單據辨識結果", "description": "每頁辨識出的單據、來源結果及各單據辨識內容。",
+        "columns": {
+            "id": "單據結果編號", "parent_result_id": "來源頁結果編號",
+            "document_index": "頁內單據序號", "status": "單據狀態",
+            "data_json": "單據辨識內容", "error": "錯誤訊息",
         },
     },
     ("validation", "artifacts"): {

@@ -50,12 +50,12 @@
     <section id="resultsPanel" class="panel hidden">
       <div class="section-title">
         <div><h2>4. 結果查閱 <span id="runTitle" class="hint"></span></h2><p class="hint">尚未匯入標準答案，所有結果均標示為「待人工核對」。</p></div>
-        <div class="export-actions"><a id="exportJson" class="btn btn-sm">JSON</a><a id="exportCsv" class="btn btn-sm">CSV</a><a id="exportZip" class="btn btn-sm primary">完整 ZIP</a></div>
+        <div class="export-actions"><a id="exportJson" class="btn btn-sm">JSON</a><a id="exportCsv" class="btn btn-sm">CSV（含 pages.csv）</a><a id="exportZip" class="btn btn-sm primary">完整 ZIP</a></div>
       </div>
       <div id="stats" class="stats-grid"></div>
       <div class="result-layout">
         <div class="result-list-wrap">
-          <div class="filter-row"><select id="comboFilter" class="select"><option value="">所有模型</option></select><select id="statusFilter" class="select"><option value="">所有狀態</option><option value="succeeded">成功</option><option value="failed">失敗</option><option value="timeout">逾時</option></select><input id="sourceFilter" class="select" placeholder="搜尋來源"></div>
+          <div class="filter-row"><select id="comboFilter" class="select"><option value="">所有模型</option></select><select id="statusFilter" class="select"><option value="">所有狀態</option><option value="succeeded">成功</option><option value="partial">部分完成／待分割</option><option value="skipped">確認空白／略過</option><option value="failed">失敗</option><option value="timeout">逾時</option></select><input id="sourceFilter" class="select" placeholder="搜尋來源"></div>
           <div id="results" class="result-list"></div>
         </div>
         <div id="detail" class="detail-empty">選擇一筆結果查看辨識證據。</div>

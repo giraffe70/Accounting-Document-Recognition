@@ -153,6 +153,7 @@ table.list th:nth-child(4) { text-align: right; }
 
 /* 審核表單 */
 .rev-meta { font-size: 13px; color: var(--muted); margin: 8px 0 2px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.source-only .rev-meta { display: none; }
 .rev-meta b { color: var(--text); font-size: 14px; }
 .type-sel { padding: 4px 8px; font-size: 13px; font-weight: 600; color: var(--text);
   border: 1px solid var(--border); border-radius: 6px; background: #fff; }

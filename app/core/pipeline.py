@@ -29,7 +29,6 @@ def render_to_images(file_path: str) -> list[str]:
     out = []
     for i in range(len(pdf)):
         img = pdf[i].render(scale=200 / 72).to_pil()  # ~200dpi
-        img.thumbnail((1180, 1180))   # 控在 <1MP，避免 VLM 內部再縮放；且長邊>1000 便於判座標空間
         out_path = render_dir / f"{p.stem}_p{i}.png"
         img.save(out_path)
         out.append(str(out_path))
@@ -51,31 +50,38 @@ def analyze_pages(file_path: str) -> list[Voucher]:
 
 
 def prepare_pages(file_path: str) -> list[Voucher]:
-    """匯入用：逐頁只做 Router 判類型 + 自動轉正（不萃取欄位）。
-    產出最小 Voucher（含 doc_type_key + 影像路徑），供「外觀確認」階段先確認
-    類型／方向／裁切，之後再逐張做內容辨識。單頁失敗僅略過該頁。"""
+    """Route immutable native pages and prepare separate documents for appearance review."""
+    from app.core import page_layout, invocation_trace, model_invocation
+    from app import config
+    import uuid
     images = render_to_images(file_path)
-    n = len(images)
-    name = Path(file_path).name
     out = []
-    for i, img in enumerate(images):
-        try:
-            if _is_blank_page(img):
-                logger.info("第 %d/%d 頁近乎空白，略過匯入", i + 1, n)
+    for index, source in enumerate(images):
+        token = uuid.uuid4().hex
+        folder = config.UPLOAD_DIR / "_pages" / token
+        folder.mkdir(parents=True, exist_ok=True)
+        with invocation_trace.capture(folder / "trace.json"):
+            invocation_trace.add({"kind": "snapshot", "versions": model_invocation.source_versions(), "settings": settings_store.get_settings()})
+            input_path = page_layout.crop(source, {"box": [0,0,1000,1000]}, folder / "input.png", max_edge=1180)
+            layout = page_layout.detect(input_path)
+            source_origin = {**page_layout.origin(source, {"box": [0,0,1000,1000]}, index+1),
+                             "record_role": "source_page", "source_token": token, "layout": layout}
+            parent = Voucher.model_validate({"doc_type_key": layout["type"], "origin": source_origin,
+                "quality": {"version": 1, "state": "needs_review" if not layout["auto_split"] else "usable", "content_kind": layout["content_kind"], "issues": layout["issues"]}})
+            parent.source_file = f"{Path(file_path).name} p{index+1}"
+            parent.source_image = source
+            out.append(parent)
+            if not layout["auto_split"] or layout["content_kind"] == "blank":
                 continue
-            type_key = prepare_image(img)
-            v = Voucher.model_validate({
-                "doc_type_key": type_key,
-                "doc_type": doc_types.get(type_key)["label"],
-                "fields": {}, "boxes": {}, "items": [],
-            })
-            v.source_file = f"{name} p{i + 1}" if n > 1 else name
-            v.source_image = img
-            v.field_evidence["doc_type_key"] = [{"source": "model", "value": type_key,
-                                                "reason": doc_router.last_result().get("reason", ""), "selected": True}]
-            out.append(v)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("第 %d/%d 頁準備失敗，略過：%s", i + 1, n, exc)
+            for document_index, region in enumerate(layout["regions"]):
+                crop_path = page_layout.crop(source, region, folder / f"document_{document_index}.png")
+                child = Voucher.model_validate({"doc_type_key": region["type"], "doc_type": doc_types.get(region["type"])["label"],
+                    "origin": {**page_layout.origin(source, region, index+1), "source_token": token, "document_index": document_index},
+                    "quality": {"version": 1, "state": "unassessed", "content_kind": layout["content_kind"], "issues": []}})
+                child.source_file = parent.source_file
+                child.source_image = crop_path
+                child.field_evidence["doc_type_key"] = [{"source": "route", "value": region["type"], "reason": region["reason"], "selected": True}]
+                out.append(child)
     return out
 
 
@@ -117,7 +123,7 @@ def prepare_image(image_path: str, hint: str = "", auto_rotate: bool = True) -> 
     return type_key
 
 
-def extract_for_type(image_path: str, type_key: str, hint: str = "", company: str = "") -> Voucher:
+def extract_for_type(image_path: str, type_key: str, hint: str = "", company: str = "", *, confirmed_fields=None, native_path=None) -> Voucher:
     """依「已確認的類型」在「已準備好的影像」上萃取欄位＋精準框。
     不再判類型／不再自動轉正（外觀確認階段已完成）。"""
     settings = settings_store.get_settings()
@@ -143,7 +149,8 @@ def extract_for_type(image_path: str, type_key: str, hint: str = "", company: st
             ocr_lines = []
 
     chat = model_factory.get_chat_model(struct_provider, struct_model, temperature=0.0)
-    voucher = extract_evidence(image_path, type_key, chat, ocr_lines, ocr_text, hint=hint, company=company)
+    voucher = extract_evidence(image_path, type_key, chat, ocr_lines, ocr_text, hint=hint, company=company,
+                               confirmed_fields=confirmed_fields, native_path=native_path)
     voucher.ocr_provider = ocr_used
     voucher.structure_model = settings["structure"]
     voucher.source_image = image_path
@@ -196,30 +203,24 @@ def reread_fields(image_path: str, type_key: str, chat, fields: list[str], *, mo
     content = [{"type": "text", "text": prompts.build_extract_prompt(type_key, mode=mode, ocr_text=ocr_text,
                                        hint=hint, fields=fields, evidence=evidence)}]
     if mode == "image":
-        content.append({"type": "image_url", "image_url": {"url": _data_uri(image_path)}})
+        content.append({"type": "image_url", "image_url": {"url": _data_uri(image_path, max_edge=2400)}})
     with activity.stage("structure", "指定欄位補讀"):
         result = model_invocation.invoke_structured(chat, content,
-                    lambda obj: _validate_image_extraction(obj, type_key, mode, image_path, fields), task="supplement", invoke=_invoke_text)
+                    lambda obj: _validate_image_extraction(obj, type_key, mode, image_path, fields), task="supplement", invoke=_invoke_text,
+                    schema=prompts.extraction_schema(type_key, mode, fields))
     return result["fields"]
 
 
 def _validate_image_extraction(obj: dict, type_key: str, mode: str, image_path: str, fields=None) -> dict:
     from app.core import prompts
-    if mode == "image" and type_key not in doc_types.NO_VLM_BOX_TYPES and "boxes" in obj:
-        boxes = obj["boxes"]
-        if not isinstance(boxes, dict):
-            raise ValueError("boxes must be an object")
-        normalized = _normalize_boxes(boxes, image_path)
-        if set(normalized) != set(boxes):
-            raise ValueError("invalid box coordinates")
-        obj = {**obj, "boxes": normalized}
-    return prompts.validate_extraction(obj, type_key, mode, fields)
+    return prompts.validate_content_and_boxes(obj, type_key, mode, fields)
 
 
 def extract_evidence(image_path: str, type_key: str, chat, ocr_lines: list, ocr_text: str,
-                     *, mode="image", hint="", company="", confirmed_fields=None) -> Voucher:
+                     *, mode="image", hint="", company="", confirmed_fields=None, native_path=None) -> Voucher:
     from app.core import barcode, prompts, model_invocation
     context = _company_context(company)
+    model_invocation.invocation_trace.add({"kind": "ocr", "lines": ocr_lines, "text": ocr_text})
     candidates = barcode.parse_einvoice_qr_candidates(barcode.decode(image_path)) if mode == "image" and type_key == "invoice" else []
     if len(candidates) == 1:
         context["qr"] = candidates[0]
@@ -228,7 +229,8 @@ def extract_evidence(image_path: str, type_key: str, chat, ocr_lines: list, ocr_
         content.append({"type": "image_url", "image_url": {"url": _data_uri(image_path)}})
     with activity.stage("structure", "欄位萃取"):
         data = model_invocation.invoke_structured(chat, content,
-                lambda obj: _validate_image_extraction(obj, type_key, mode, image_path), task="extract", invoke=_invoke_text)
+                lambda obj: _validate_image_extraction(obj, type_key, mode, image_path), task="extract", invoke=_invoke_text,
+                schema=prompts.extraction_schema(type_key, mode))
     _record_evidence(data, "model", mode)
     data["validation_warnings"] = []
     if len(candidates) == 1:
@@ -241,21 +243,9 @@ def extract_evidence(image_path: str, type_key: str, chat, ocr_lines: list, ocr_
     if confirmed_fields:
         confirmed_fields = prompts.validate_extraction({"fields": confirmed_fields}, type_key, mode, list(confirmed_fields))["fields"]
         _merge_evidence_fields(data, confirmed_fields, "manual")
-    # Same trigger as before, but use each type's actual identity contract.
-    targets = {"invoice": ("seller_tax_id", "seller_name"), "receipt": ("tax_id", "vendor")}
-    if type_key in targets:
-        tax_key, name_key = targets[type_key]
-        if data["fields"].get(tax_key) in (None, "") and tax_key not in (confirmed_fields or {}):
-            missing = [key for key in (tax_key, name_key) if data["fields"].get(key) in (None, "") and key not in (confirmed_fields or {})]
-            try:
-                values = reread_fields(image_path, type_key, chat, missing, mode=mode, ocr_text=ocr_text,
-                                        hint="定位廠商印章內的名稱與統編", evidence=context)
-                if values.get(tax_key) and len(_clean_taxid(values[tax_key])) != 8:
-                    values[tax_key] = None
-                    data["validation_warnings"].append("補讀統編不是八位數，未採用")
-                _merge_evidence_fields(data, values, "model", preserve_existing=True)
-            except (ValueError, RuntimeError) as exc:
-                data["validation_warnings"].append("指定欄位補讀失敗：" + str(exc)[:120])
+    from app.core import supplement
+    supplement.apply(data, type_key, chat, image_path, mode=mode, ocr_text=ocr_text,
+                     context=context, confirmed_fields=confirmed_fields, native_path=native_path)
     if doc_types.get(type_key).get("has_entries") and ocr_lines:
         from copy import deepcopy
         before = deepcopy(data.get("entries") or [])
@@ -274,6 +264,8 @@ def extract_evidence(image_path: str, type_key: str, chat, ocr_lines: list, ocr_
     voucher = _build_voucher(data, type_key)
     if type_key == "other":
         voucher.validation_warnings.append("文件類型未知或無法分類，使用通用契約，請人工確認")
+    from app.core.quality import evaluate_quality
+    voucher.quality = evaluate_quality(voucher.model_dump())
     return voucher
 
 
@@ -621,6 +613,7 @@ def _build_voucher(data: dict, type_key: str, *, derive_entries: bool = True, no
         "doc_type_key": type_key, "doc_type": spec["label"], "fields": f,
         "note": to_traditional(data.get("note") or ""), "confidence": data.get("confidence"),
         "boxes": data.get("boxes") or {}, "items": data.get("items") or [],
+        "box_issues": data.get("box_issues") or [], "origin": data.get("origin") or {},
         "field_evidence": evidence, "validation_warnings": list(dict.fromkeys(warnings)),
         "classification_meta": data.get("classification_meta") or {},
         **(_entries_from_voucher_form(data, spec) if derive_entries else {}),
@@ -660,15 +653,18 @@ def _build_voucher(data: dict, type_key: str, *, derive_entries: bool = True, no
         if dr != cr and not original["single_sided"]:
             payload["validation_warnings"].append("原始傳票借貸不平衡，未補造分錄")
     payload["validation_warnings"] = list(dict.fromkeys(payload["validation_warnings"]))
+    from app.core.quality import evaluate_quality
+    payload["quality"] = evaluate_quality(payload)
     return Voucher.model_validate(payload)
 
 
 def canonicalize_voucher(data: dict) -> dict:
     """One mapping path for form saves; retain stored metadata/unknown attributes."""
     if not data.get("doc_type_key") or not data.get("fields"):
-        return data
+        from app.core.quality import evaluate_quality
+        return {**data, "quality": evaluate_quality(data)}
     normalized = _build_voucher(data, data["doc_type_key"], derive_entries=False, normalize_word_total=False).model_dump()
-    mapped = {key: normalized[key] for key in ("fields", "voucher_id", "date", "subtotal", "tax_amount", "total_amount", "currency", "seller", "buyer", "items", "validation_warnings", "field_evidence", "payment_state")}
+    mapped = {key: normalized[key] for key in ("fields", "voucher_id", "date", "subtotal", "tax_amount", "total_amount", "currency", "seller", "buyer", "items", "validation_warnings", "field_evidence", "payment_state", "quality")}
     return {**data, **mapped}
 
 
@@ -779,10 +775,11 @@ def _refine_boxes_with_ocr(fields: dict, vlm_boxes: dict, ocr_lines: list, image
             continue
         xs = [p[0] for p in box]
         ys = [p[1] for p in box]
-        refined[key] = [max(0, min(1000, round(min(xs) / w * 1000))),
-                        max(0, min(1000, round(min(ys) / h * 1000))),
-                        max(0, min(1000, round(max(xs) / w * 1000))),
-                        max(0, min(1000, round(max(ys) / h * 1000)))]
+        from app.core.geometry import convert_box
+        try:
+            refined[key] = convert_box([min(xs), min(ys), max(xs), max(ys)], unit="pixels", width=w, height=h)
+        except ValueError:
+            continue
     return refined
 
 
@@ -803,64 +800,35 @@ def _apply_rotation(image_path: str, degrees_cw: int) -> str:
     return image_path
 
 
-def _normalize_boxes(raw, image_path: str) -> dict:
-    """VLM 座標空間不一致（時而 0~1、時而 0~1000、時而絕對像素）。
-    自動偵測後統一輸出正規化 0~1000（[x1,y1,x2,y2]）。"""
-    if not isinstance(raw, dict) or not raw:
-        return {}
+def _normalize_boxes(raw, image_path: str, *, unit="normalized_1000") -> dict:
+    from app.core.geometry import convert_box
     from PIL import Image
-
-    with Image.open(image_path) as source:
-        w, h = source.size
-    if not w or not h:
+    if not isinstance(raw, dict):
         return {}
-
-    parsed = {}
-    allvals = []
-    import math
-    for k, b in raw.items():
-        if not isinstance(b, (list, tuple)) or len(b) != 4 or any(isinstance(v, bool) for v in b):
-            continue
+    width, height = 1, 1
+    if unit != "normalized_1000":
+        with Image.open(image_path) as image:
+            width, height = image.size
+    result = {}
+    for key, box in raw.items():
         try:
-            vals = [float(b[0]), float(b[1]), float(b[2]), float(b[3])]
-        except (TypeError, ValueError):
+            result[key] = convert_box(box, unit=unit, width=width, height=height)
+        except (ValueError, TypeError):
             continue
-        if not all(math.isfinite(v) for v in vals):
-            continue
-        parsed[k] = vals
-        allvals.extend(vals)
-    if not allvals:
-        return {}
-
-    mx = max(allvals)
-    if mx <= 1.5:
-        mode = "unit"        # 0~1
-    elif mx <= 1000:
-        mode = "norm"        # 已是 0~1000
-    else:
-        mode = "pixel"       # 絕對像素（依影像尺寸換算）
-
-    def conv(v, axis):
-        if mode == "unit":
-            return v * 1000
-        if mode == "norm":
-            return v
-        return v / (w if axis == "x" else h) * 1000
-
-    clamp = lambda v: max(0, min(1000, round(v)))
-    return {
-        k: [clamp(conv(vs[0], "x")), clamp(conv(vs[1], "y")),
-            clamp(conv(vs[2], "x")), clamp(conv(vs[3], "y"))]
-        for k, vs in parsed.items()
-    }
+    return result
 
 
-def _data_uri(image_path: str) -> str:
-    raw = Path(image_path).read_bytes()
+def _data_uri(image_path: str, *, max_edge=1180) -> str:
+    from PIL import Image
+    import io
+    with Image.open(image_path) as image:
+        image = image.convert("RGB")
+        image.thumbnail((max_edge, max_edge), Image.Resampling.LANCZOS)
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        raw = buffer.getvalue()
     b64 = base64.b64encode(raw).decode()
-    suffix = Path(image_path).suffix.lower().lstrip(".") or "png"
-    mime = "jpeg" if suffix in ("jpg", "jpeg") else suffix
-    return f"data:image/{mime};base64,{b64}"
+    return f"data:image/png;base64,{b64}"
 
 
 # Compatibility entry points for existing tools/tests.

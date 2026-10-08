@@ -115,8 +115,8 @@ class DatabaseViewTests(unittest.TestCase):
         for table in tables:
             columns = self.rows(table=table["name"]).json()["columns"]
             self.assertTrue(all(c["label"] for c in columns))
-        self.assertEqual(sum(len(meta["columns"]) for meta in database_view.TABLE_META.values()), 82)
-        self.assertEqual(len(database_view.TABLE_META), 7)
+        self.assertEqual(sum(len(meta["columns"]) for meta in database_view.TABLE_META.values()), 92)
+        self.assertEqual(len(database_view.TABLE_META), 8)
 
     def test_voucher_date_status_and_keyword_are_combined(self):
         self.login()

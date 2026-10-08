@@ -19,13 +19,15 @@ def _period_of(date_str: str) -> str:
 
 
 def save_voucher(voucher: Voucher, company: str = "",
-                 status: ReviewStatus = ReviewStatus.pending) -> VoucherRecord:
+                 status: ReviewStatus = ReviewStatus.pending, *, source_parent_id=None) -> VoucherRecord:
     """辨識完成後落地紀錄。ai_json 與 current_json 初始相同。
     status 預設 pending（已辨識待審）；匯入外觀確認階段傳 prepared（僅判類型/轉正）。"""
     payload = voucher.model_dump()
     blob = json.dumps(payload, ensure_ascii=False)
     rec = VoucherRecord(
         source_file=voucher.source_file,
+        record_role=voucher.origin.get("record_role", "voucher"),
+        source_parent_id=source_parent_id,
         company=company,
         period=_period_of(voucher.date),
         status=status,
@@ -56,9 +58,11 @@ def save_voucher(voucher: Voucher, company: str = "",
     return rec
 
 
-def list_vouchers(status: Optional[ReviewStatus] = None, company: str = "", period: str = ""):
+def list_vouchers(status: Optional[ReviewStatus] = None, company: str = "", period: str = "", *, include_sources=False):
     with get_session() as s:
         stmt = select(VoucherRecord)
+        if not include_sources:
+            stmt = stmt.where(VoucherRecord.record_role != "source_page")
         if status:
             stmt = stmt.where(VoucherRecord.status == status)
         if company:
@@ -73,16 +77,99 @@ def get_voucher(rec_id: int) -> Optional[VoucherRecord]:
         return s.get(VoucherRecord, rec_id)
 
 
+def save_prepared_vouchers(vouchers, company=""):
+    parents, records = {}, []
+    for voucher in vouchers:
+        token = voucher.origin.get("source_token")
+        rec = save_voucher(voucher, company, ReviewStatus.prepared, source_parent_id=parents.get(token))
+        if rec.record_role == "source_page":
+            parents[token] = rec.id
+        records.append(rec)
+    return records
+
+
+class RecognitionProtected(ValueError):
+    pass
+
+
+def _check_model_write(rec):
+    if rec.status == ReviewStatus.accountant_approved:
+        raise RecognitionProtected("已核定紀錄須先完成退回流程，才可重新辨識")
+    if rec.record_role == "source_page":
+        raise RecognitionProtected("來源頁只保存原圖，請辨識子單據或先人工分割")
+
+
+def _preserve_source_image(rec_id):
+    rec = get_voucher(rec_id)
+    if rec and rec.record_role == "source_page":
+        raise RecognitionProtected("來源頁原圖保留不變，請对子憑證旋轉或裁切")
+
+
+def _save_recognition(rec_id, voucher):
+    """Append model versions while keeping the first AI result and selected manual values."""
+    from copy import deepcopy
+    from app.core import pipeline, model_invocation, invocation_trace
+    with get_session() as session:
+        rec = session.get(VoucherRecord, rec_id)
+        _check_model_write(rec)
+        previous = json.loads(rec.current_json)
+        selected_manual_type = any(r.get("source") == "manual" and r.get("selected") for r in previous.get("field_evidence", {}).get("doc_type_key", []))
+        if selected_manual_type and previous.get("doc_type_key") != voucher.doc_type_key:
+            raise RecognitionProtected("單據類型已有人工確認，新模型結果類型不同，請重新載入")
+        data = voucher.model_dump()
+        evidence = deepcopy(previous.get("field_evidence") or {})
+        for path, records in evidence.items():
+            manual = next((r for r in reversed(records) if r.get("source") == "manual" and r.get("selected")), None)
+            if not manual:
+                continue
+            if path.startswith("fields."):
+                key = path[7:]
+                data.setdefault("fields", {})[key] = (previous.get("fields") or {}).get(key)
+            else:
+                # Manual row groups are preserved together so row indices cannot drift.
+                group = path.split("[", 1)[0]
+                if group in ("items", "entries"):
+                    data[group] = previous.get(group, [])
+                elif path in previous:
+                    data[path] = previous[path]
+            data.setdefault("field_evidence", {})[path] = records
+        if rec.manual_entry:
+            for key in ("fields", "items", "entries", "note", "doc_type_key", "doc_type"):
+                if key in previous:
+                    data[key] = previous[key]
+        data["origin"] = previous.get("origin", {})
+        data["source_file"] = rec.source_file
+        data = pipeline.canonicalize_voucher(data)
+        history = json.loads(rec.recognition_history or "[]")
+        history.append({"at": datetime.now().isoformat(), "versions": model_invocation.source_versions(), "model_result": voucher.model_dump()})
+        rec.recognition_history = json.dumps(history, ensure_ascii=False)
+        if rec.status in (ReviewStatus.prepared, ReviewStatus.queued) and not (json.loads(rec.ai_json).get("fields") or {}):
+            rec.ai_json = json.dumps(voucher.model_dump(), ensure_ascii=False)
+        rec.current_json = json.dumps(data, ensure_ascii=False)
+        rec.confidence, rec.structure_model, rec.ocr_provider = str(voucher.confidence or ""), voucher.structure_model, voucher.ocr_provider
+        rec.period = _period_of(data.get("date", "")) or rec.period
+        if rec.status in (ReviewStatus.prepared, ReviewStatus.queued):
+            rec.status = ReviewStatus.pending
+        rec.updated_at = datetime.now()
+        session.add(rec); session.commit(); session.refresh(rec)
+        return rec
+
+
 def update_current(rec_id: int, voucher_dict: dict, *, mark_manual: bool = True) -> Optional[VoucherRecord]:
     """人工修正欄位（不動 ai_json，只更新 current_json）。"""
     with get_session() as s:
         rec = s.get(VoucherRecord, rec_id)
         if not rec:
             return None
+        if getattr(rec, "record_role", "voucher") == "source_page":
+            raise RecognitionProtected("來源頁只保存原圖與版面診斷，請修改子憑證")
+        if not mark_manual:
+            _check_model_write(rec)
         from app.core import pipeline
         previous = json.loads(rec.current_json)
         old_fields = previous.get("fields") or {}
         voucher_dict = {**previous, **voucher_dict}
+        voucher_dict["origin"] = previous.get("origin", {})
         # Browser copies can lag behind earlier saves; audit history is server-owned.
         from copy import deepcopy
         voucher_dict["field_evidence"] = deepcopy(previous.get("field_evidence") or {})
@@ -116,6 +203,12 @@ def update_current(rec_id: int, voucher_dict: dict, *, mark_manual: bool = True)
                         for item in evidence.get(path, []):
                             item["selected"] = False
                         evidence.setdefault(path, []).append({"source": "manual", "value": value, "selected": True})
+            for key in ("entries", "note", "doc_type_key", "doc_type"):
+                if voucher_dict.get(key) != previous.get(key):
+                    changed = True
+                    for item in evidence.get(key, []):
+                        item["selected"] = False
+                    evidence.setdefault(key, []).append({"source": "manual", "value": voucher_dict.get(key), "selected": True})
             if (len(voucher_dict.get("items") or []) != len(previous.get("items") or [])
                     or voucher_dict.get("note") != previous.get("note")
                     or voucher_dict.get("doc_type_key") != previous.get("doc_type_key")):
@@ -211,6 +304,7 @@ def _image_path_of(rec):
 
 
 def rotate_image(rec_id: int, direction: str = "cw"):
+    _preserve_source_image(rec_id)
     """手動旋轉掃描影像 90 度（無損）並覆寫。"""
     p = _image_path_of(get_voucher(rec_id))
     if not p:
@@ -227,6 +321,7 @@ def rotate_image(rec_id: int, direction: str = "cw"):
 
 
 def rotate_fine(rec_id: int, angle: float):
+    _preserve_source_image(rec_id)
     """微調角度旋轉（去歪斜），正值＝順時針；空白處補白。"""
     p = _image_path_of(get_voucher(rec_id))
     if not p:
@@ -318,15 +413,20 @@ def split_voucher(rec_id: int, box):
     })
     v.source_image = str(tmp)                       # 讓 save_voucher 複製此裁切影像
     v.source_file = f"{rec.source_file}（分割）"
-    new_rec = save_voucher(v, company=rec.company, status=ReviewStatus.prepared)
+    if rec.record_role == "source_page":
+        from app.core import page_layout
+        v.origin = page_layout.origin(p, {"box": [round(x1*1000), round(y1*1000), round(x2*1000), round(y2*1000)], "rotate": 0}, json.loads(rec.current_json).get("origin", {}).get("page_no", 1))
+    new_rec = save_voucher(v, company=rec.company, status=ReviewStatus.prepared,
+                           source_parent_id=rec.id if rec.record_role == "source_page" else rec.source_parent_id)
     # 新憑證已建立，才把該區從原圖抹掉（先建後抹：中途失敗不會兩邊都沒有）
-    if new_rec and _mask_region(p, (L, T, R, B)):
+    if new_rec and rec.record_role != "source_page" and _mask_region(p, (L, T, R, B)):
         _clear_boxes(rec_id)
     return new_rec
 
 
 def crop_image(rec_id: int, box):
     """裁切影像。box 為 [x1,y1,x2,y2]，值域 0~1（相對影像比例）。"""
+    _preserve_source_image(rec_id)
     p = _image_path_of(get_voucher(rec_id))
     if not p or not isinstance(box, (list, tuple)) or len(box) < 4:
         return None
@@ -355,26 +455,65 @@ def re_recognize(rec_id: int) -> Optional[VoucherRecord]:
     rec = get_voucher(rec_id)
     if not rec or not rec.image_path:
         return None
+    _check_model_write(rec)
     hint = "；".join(n for n in (rec.dev_note, rec.clerk_note, rec.accountant_note) if n)
-    v = pipeline.recognize_image(str(config.UPLOAD_DIR / rec.image_path), hint=hint, company=rec.company)
-    with get_session() as s:
-        r = s.get(VoucherRecord, rec_id)
-        blob = json.dumps(v.model_dump(), ensure_ascii=False)
-        r.ai_json = blob
-        r.current_json = blob
-        r.confidence = str(v.confidence or "")
-        r.structure_model = v.structure_model
-        r.ocr_provider = v.ocr_provider
-        r.period = _period_of(v.date) or r.period
-        r.updated_at = datetime.now()
-        s.add(r)
-        s.commit()
-        s.refresh(r)
-        return r
+    from app.core import invocation_trace, model_invocation
+    import uuid
+    trace_path = config.DATA_DIR / "recognition" / str(rec_id) / (uuid.uuid4().hex + ".json")
+    with invocation_trace.capture(trace_path):
+        invocation_trace.add({"kind": "snapshot", "versions": model_invocation.source_versions(), "record_id": rec_id})
+        converted, type_key = _route_unconfirmed_page(rec)
+        if converted:
+            return converted
+        current = json.loads(rec.current_json)
+        manual = any(r.get("source") == "manual" and r.get("selected") for records in current.get("field_evidence", {}).values() for r in records)
+        if manual or rec.manual_entry or type_key:
+            confirmed = {p[7:]: current.get("fields", {}).get(p[7:]) for p, records in current.get("field_evidence", {}).items()
+                         if p.startswith("fields.") and any(r.get("source") == "manual" and r.get("selected") for r in records)}
+            v = pipeline.extract_for_type(str(config.UPLOAD_DIR / rec.image_path), current.get("doc_type_key", "other") if manual else type_key or current.get("doc_type_key", "other"), hint=hint, company=rec.company, confirmed_fields=confirmed)
+        else:
+            v = pipeline.recognize_image(str(config.UPLOAD_DIR / rec.image_path), hint=hint, company=rec.company)
+    return _save_recognition(rec_id, v)
+
+
+def _route_unconfirmed_page(rec):
+    """Convert an unconfirmed legacy page while leaving its source pixels intact."""
+    from app.core import page_layout, invocation_trace
+    current = json.loads(rec.current_json)
+    manual = any(r.get("source") == "manual" and r.get("selected") for records in current.get("field_evidence", {}).values() for r in records)
+    if rec.source_parent_id or rec.manual_entry or manual or rec.status in (ReviewStatus.clerk_reviewed, ReviewStatus.accountant_approved):
+        return None, None
+    source = config.UPLOAD_DIR / rec.image_path
+    layout = page_layout.detect(str(source))
+    if (layout["auto_split"] and len(layout["regions"]) == 1
+            and layout["regions"][0]["rotate"] == 0 and layout["regions"][0]["box"] == [0,0,1000,1000]):
+        return None, layout["regions"][0]["type"]
+    origin = {**page_layout.origin(source, {"box":[0,0,1000,1000]}, current.get("origin", {}).get("page_no", 1)), "record_role":"source_page", "layout": layout}
+    # Recheck human state in the transaction after the model call.
+    with get_session() as session:
+        parent = session.get(VoucherRecord, rec.id)
+        if parent.current_json != rec.current_json or parent.status != rec.status:
+            raise RecognitionProtected("辨識期間資料已被修改，請重新載入")
+        parent.record_role = "source_page"
+        parent.current_json = json.dumps({**current, "origin": origin, "quality":{"version":1,"state":"needs_review","content_kind":layout["content_kind"],"issues":[{"code":"manual_split","message":"來源頁保留，請確認子單據"}]}}, ensure_ascii=False)
+        session.add(parent); session.commit(); session.refresh(parent)
+    if layout["auto_split"] and layout["content_kind"] != "blank":
+        for index, region in enumerate(layout["regions"]):
+            target = config.UPLOAD_DIR / "_pages" / f"source_{rec.id}" / f"document_{index}.png"
+            native = page_layout.crop(source, region, target)
+            voucher = Voucher.model_validate({"doc_type_key": region["type"], "doc_type": page_layout.doc_types.get(region["type"])["label"],
+                "origin": {**page_layout.origin(source, region, origin["page_no"]), "document_index":index},
+                "quality":{"version":1,"state":"unassessed","content_kind":layout["content_kind"],"issues":[]}})
+            voucher.source_image, voucher.source_file = native, rec.source_file
+            save_voucher(voucher, rec.company, ReviewStatus.prepared, source_parent_id=rec.id)
+    return get_voucher(rec.id), None
 
 
 def confirm_appearance(rec_id: int) -> Optional[VoucherRecord]:
     """外觀確認完成：prepared → queued（加入掃描清單，待內容提取）。不萃取欄位。"""
+    rec = get_voucher(rec_id)
+    if rec and rec.record_role == "source_page":
+        raise RecognitionProtected("來源頁只保存原圖，請先人工分割")
     return _transition(rec_id, ReviewStatus.queued, note_field="clerk_note",
                        time_field=None, note="")
 
@@ -390,6 +529,8 @@ def merge_vouchers(primary_id: int, other_ids: list) -> Optional[VoucherRecord]:
     prim = get_voucher(primary_id)
     if not prim:
         return None
+    if prim.record_role == "source_page":
+        raise RecognitionProtected("來源頁不能合併為財務憑證，請合併子憑證")
     pages = config.UPLOAD_DIR / "pages"
     pages.mkdir(parents=True, exist_ok=True)
     with get_session() as s:
@@ -417,6 +558,8 @@ def merge_vouchers(primary_id: int, other_ids: list) -> Optional[VoucherRecord]:
             o = s.get(VoucherRecord, oid)
             if not o:
                 continue
+            if o.record_role == "source_page":
+                raise RecognitionProtected("來源頁須保留，不可刪除合併")
             if o.image_path:
                 _absorb(o.image_path)               # 該頁主影像 → 主頁附頁
             for a in json.loads(o.attachments or "[]"):
@@ -441,6 +584,10 @@ def set_type(rec_id: int, type_key: str) -> Optional[VoucherRecord]:
         cur = json.loads(rec.current_json)
         cur["doc_type_key"] = type_key
         cur["doc_type"] = doc_types.get(type_key)["label"]
+        evidence = cur.setdefault("field_evidence", {})
+        for item in evidence.get("doc_type_key", []):
+            item["selected"] = False
+        evidence.setdefault("doc_type_key", []).append({"source": "manual", "value": type_key, "selected": True})
         rec.current_json = json.dumps(cur, ensure_ascii=False)
         rec.updated_at = datetime.now()
         s.add(rec)
@@ -459,26 +606,19 @@ def recognize_record(rec_id: int) -> Optional[VoucherRecord]:
         return None
     cur = json.loads(rec.current_json)
     type_key = cur.get("doc_type_key") or "other"
+    _check_model_write(rec)
     hint = "；".join(n for n in (rec.dev_note, rec.clerk_note, rec.accountant_note) if n)
-    v = pipeline.extract_for_type(str(config.UPLOAD_DIR / rec.image_path), type_key, hint=hint, company=rec.company)
-    v.field_evidence["doc_type_key"] = cur.get("field_evidence", {}).get("doc_type_key") or [{"source": "manual", "value": type_key, "reason": "已確認單據類型", "selected": True}]
-    v.source_image = ""   # 影像已在原位
-    with get_session() as s:
-        r = s.get(VoucherRecord, rec_id)
-        blob = json.dumps(v.model_dump(), ensure_ascii=False)
-        r.ai_json = blob
-        r.current_json = blob
-        r.confidence = str(v.confidence or "")
-        r.structure_model = v.structure_model
-        r.ocr_provider = v.ocr_provider
-        r.period = _period_of(v.date) or r.period
-        if r.status in (ReviewStatus.prepared, ReviewStatus.queued):
-            r.status = ReviewStatus.pending
-        r.updated_at = datetime.now()
-        s.add(r)
-        s.commit()
-        s.refresh(r)
-        return r
+    confirmed = {path[7:]: cur.get("fields", {}).get(path[7:]) for path, records in cur.get("field_evidence", {}).items()
+                 if path.startswith("fields.") and any(r.get("source") == "manual" and r.get("selected") for r in records)}
+    from app.core import invocation_trace, model_invocation
+    import uuid
+    trace_path = config.DATA_DIR / "recognition" / str(rec_id) / (uuid.uuid4().hex + ".json")
+    with invocation_trace.capture(trace_path):
+        invocation_trace.add({"kind": "snapshot", "versions": model_invocation.source_versions(), "record_id": rec_id})
+        v = pipeline.extract_for_type(str(config.UPLOAD_DIR / rec.image_path), type_key, hint=hint, company=rec.company, confirmed_fields=confirmed)
+        v.field_evidence["doc_type_key"] = cur.get("field_evidence", {}).get("doc_type_key") or [{"source": "manual", "value": type_key, "reason": "已確認單據類型", "selected": True}]
+        v.source_image = ""   # 影像已在原位
+    return _save_recognition(rec_id, v)
 
 
 def set_dev_note(rec_id: int, note: str) -> Optional[VoucherRecord]:
@@ -529,6 +669,8 @@ def _transition(rec_id, status, note_field, time_field, note):
         rec = s.get(VoucherRecord, rec_id)
         if not rec:
             return None
+        if rec.record_role == "source_page":
+            raise RecognitionProtected("來源頁不参与憑證審核，請操作子憑證")
         rec.status = status
         if note:
             setattr(rec, note_field, note)
