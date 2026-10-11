@@ -1,9 +1,11 @@
 """Offline source evidence and candidate parsing regressions."""
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from PIL import Image, ImageChops, ImageDraw
 
@@ -42,9 +44,38 @@ class PageSourceEvidenceTests(unittest.TestCase):
 
             evidence = image_evidence.layout_evidence(source)
             self.assertEqual(len(evidence["frames"]), 3, evidence["frames"])
-            regions = [_region(box, "invoice" if index == 0 else "cheque")
-                       for index, box in enumerate(evidence["frames"])]
-            result = page_layout.validate_layout(_route(regions), evidence=evidence)
+            lines = []
+            ids = []
+            for left in (35, 435, 835):
+                start = len(lines)
+                lines.extend([
+                    {"text": "支票", "box": [[left+35, 220], [left+255, 220], [left+255, 244], [left+35, 244]]},
+                    {"text": f"支票號碼 {12345678 + len(ids)}", "box": [[left+35, 300], [left+255, 300], [left+255, 324], [left+35, 324]]},
+                    {"text": "日期 2026/10/11", "box": [[left+35, 380], [left+255, 380], [left+255, 404], [left+35, 404]]},
+                    {"text": "金額 1000", "box": [[left+35, 460], [left+255, 460], [left+255, 484], [left+35, 484]]},
+                ])
+                ids.append(list(range(start, start + 4)))
+            page = {"type": "cheque", "rotate": 0, "reason": "three separate cheques",
+                    "content_kind": "document", "layout_kind": "multiple", "confidence": "high"}
+            region_reply = {"regions": [_region(None, "cheque") | {"line_ids": group} for group in ids]}
+            replies = iter((page, region_reply))
+            requests = []
+
+            def invoke(_chat, request):
+                requests.append(request)
+                return json.dumps(next(replies), ensure_ascii=False)
+
+            with (patch("app.core.model_factory.get_chat_model", return_value=object()),
+                  patch("app.core.pipeline._invoke_text", side_effect=invoke),
+                  patch("app.core.barcode.decode_diagnostics", return_value={"detections": [], "source_size": [1200, 900]}),
+                  patch("app.core.model_coordinates.for_image", return_value={"verified": False}),
+                  patch("app.core.settings_store.get_settings", return_value={"structure": "fake/model", "ocr": "disabled/none"})):
+                result = page_layout.detect(str(source), mode="ocr_text", ocr_lines=lines,
+                                            ocr_text="支票 支票號碼 日期 金額", model_setting="fake/model",
+                                            native_path=str(source))
+            self.assertEqual(len(requests), 2)  # page-only route followed by regions-only routing
+            self.assertIn("禁止輸出regions", str(requests[0]))
+            self.assertIn("僅輸出regions", str(requests[1]))
             self.assertTrue(result["auto_split"])
             self.assertEqual(len(result["regions"]), 3)
 
@@ -87,14 +118,22 @@ class PageSourceEvidenceTests(unittest.TestCase):
                     self.assertEqual(evidence["frames"], [])
                     self.assertIsNone(image_evidence.single_document(evidence))
 
-    def test_sixteen_text_strips_fall_back_only_with_single_frame(self):
+    def test_sixteen_text_strips_are_rejected_while_complete_page_text_supports_only_whole_page(self):
         strips = [_region([0, i * 60, 1000, i * 60 + 30]) for i in range(16)]
-        evidence = {"frames": [[80, 40, 920, 960]], "anchors": []}
+        lines = [
+            {"text": "收據", "box": [[100, 30], [250, 30], [250, 54], [100, 54]]},
+            {"text": "日期 2026/10/11", "box": [[100, 65], [350, 65], [350, 89], [100, 89]]},
+            {"text": "總計 1000", "box": [[100, 100], [300, 100], [300, 124], [100, 124]]},
+        ]
+        evidence = image_evidence.layout_evidence(lines=lines, size=(1000, 1000))
+        evidence["frames"] = [[80, 200, 920, 960]]  # frame is a proposal, and contains none of the proof text
+        self.assertEqual(image_evidence.single_document(evidence), [0, 0, 1000, 1000])
+        self.assertFalse(image_evidence.complete_region({"box": evidence["frames"][0]}, evidence)["complete"])
         result = page_layout.validate_layout(_route(strips), evidence=evidence)
-        self.assertTrue(result["auto_split"])
-        self.assertEqual(result["fallback_reason"], "independent source evidence supports one complete document")
-        self.assertEqual(len(result["regions"]), 1)
-        self.assertEqual(result["regions"][0]["box"], evidence["frames"][0])
+        self.assertFalse(result["auto_split"])
+        self.assertIsNone(result["fallback_reason"])
+        self.assertTrue(result["issues"])
+        self.assertNotEqual([region["box"] for region in result["regions"]], [evidence["frames"][0]])
 
     def test_strips_without_frame_or_identity_amount_anchor_remain_partial(self):
         strips = [_region([0, i * 60, 1000, i * 60 + 30]) for i in range(16)]
@@ -123,9 +162,34 @@ class PageSourceEvidenceTests(unittest.TestCase):
         regions = [_region([0, 0, 300, 500]), _region([350, 0, 650, 500], "cheque"),
                    _region([700, 0, 1000, 500], "cheque")]
         frames = [[0, 0, 300, 500], [350, 0, 650, 500], [700, 0, 1000, 500]]
-        result = page_layout.validate_layout(_route(regions), evidence={"frames": frames, "anchors": []})
+        text_boxes, anchors = [], []
+        for index, left in enumerate((0, 350, 700)):
+            text_boxes.extend([
+                {"id": len(text_boxes), "text": "支票", "box": [left+30, 60, left+250, 84]},
+                {"id": len(text_boxes)+1, "text": f"支票號碼 {12345678+index}", "box": [left+30, 120, left+250, 144]},
+                {"id": len(text_boxes)+2, "text": "日期 2026/10/11", "box": [left+30, 200, left+250, 224]},
+                {"id": len(text_boxes)+3, "text": "金額 1000", "box": [left+30, 300, left+250, 324]},
+            ])
+            anchors.append({"ids": [f"{12345678+index}"], "amount": True,
+                            "center": [left+140, 132]})
+        evidence = {"frames": frames, "anchors": anchors, "text_boxes": text_boxes}
+        result = page_layout.validate_layout(_route(regions), evidence=evidence)
         self.assertTrue(result["auto_split"])
         self.assertEqual(len(result["regions"]), 3)
+
+    def test_multi_crop_must_include_its_header_and_detail_content_group(self):
+        lines = []
+        for index,left in enumerate((50,550)):
+            for y,text in ((40,"公司抬頭"),(150,"支票"),(250,f"支票號碼 {12345678+index}"),
+                           (350,"日期 2026/10/11"),(450,"金額 1000"),(550,"付款用途 辦公用品")):
+                lines.append({"text":text,"box":[[left,y],[left+250,y],[left+250,y+24],[left,y+24]]})
+        evidence = image_evidence.layout_evidence(lines=lines,size=(1000,1000))
+        cropped = [_region([40,140,320,480],"cheque"),_region([540,140,820,480],"cheque")]
+        self.assertTrue(all(image_evidence.complete_region(r,evidence)["complete"] for r in cropped))
+        issues = image_evidence.verify_regions(cropped,evidence)
+        self.assertTrue(any("complete OCR content group" in issue for issue in issues))
+        whole = [_region([40,30,320,590],"cheque"),_region([540,30,820,590],"cheque")]
+        self.assertEqual(image_evidence.verify_regions(whole,evidence),[])
 
 
 class NativeImageEvidenceTests(unittest.TestCase):

@@ -160,6 +160,9 @@ def evaluate_quality(voucher: dict) -> dict:
         issues.append(_issue("empty_content", "content", "review", "fields", "尚無可評估的單據內容"))
     if not known_type or is_other:
         issues.append(_issue("unknown_type", "classification", "review", "doc_type_key", "單據類型未知，請人工確認"))
+    classification = voucher.get("classification_evidence") or {}
+    if classification.get("conflict") and not classification.get("adopted"):
+        issues.append(_issue("classification_conflict", "classification", "review", "doc_type_key", "文件類型與獨立文字證據衝突，請人工確認"))
 
     # Box diagnostics are already normalized by their producer when possible.
     box_issues = voucher.get("box_issues") or []

@@ -108,6 +108,7 @@ class RefactorFlowTests(unittest.TestCase):
         data = prompts.extraction_example("invoice")
         data["fields"].update(total_amount=90, seller_tax_id="12345678")
         with patch("app.core.barcode.decode_diagnostics", return_value=barcode.summarize([qr()], [], [300,200])), patch("app.core.pipeline._data_uri", return_value="data:image/png;base64,test"), \
+             patch("app.core.model_coordinates.for_image", return_value={"verified":False}), \
              patch("app.core.pipeline._invoke_text", return_value=json.dumps(data)):
             v = pipeline.extract_evidence("fake.png", "invoice", object(), [], "", confirmed_fields={"total_amount": 99})
         self.assertEqual(v.total_amount, 99)
@@ -115,6 +116,7 @@ class RefactorFlowTests(unittest.TestCase):
         self.assertEqual([r["source"] for r in evidence], ["model", "qr", "manual"])
         self.assertEqual([r["selected"] for r in evidence], [False, False, True])
         with patch("app.core.barcode.decode_diagnostics", return_value=barcode.summarize([qr(), qr(total=106)], [], [300,200])), patch("app.core.pipeline._data_uri", return_value="data:image/png;base64,test"), \
+             patch("app.core.model_coordinates.for_image", return_value={"verified":False}), \
              patch("app.core.pipeline._invoke_text", return_value=json.dumps(data)):
             v = pipeline.extract_evidence("fake.png", "invoice", object(), [], "")
         self.assertEqual(v.total_amount, 90)

@@ -68,7 +68,7 @@ def party_evidence(key, value, text):
     return any(re.search(party, line) and value.replace(" ", "") in line.replace(" ", "") for line in text.splitlines())
 
 
-def normalize_candidates(data, type_key, ocr_text, qr=None, confirmed_fields=None):
+def normalize_candidates(data, type_key, ocr_text, qr=None, confirmed_fields=None, confirmed_paths=None):
     """Annotation parsing is a proposed change, independently checked before use."""
     from app.core import pipeline
     fields = data["fields"]
@@ -101,6 +101,8 @@ def normalize_candidates(data, type_key, ocr_text, qr=None, confirmed_fields=Non
         if quantity is not None and price is not None and abs(quantity*price-note["value"]) >= .01:
             verified = False
         path = f"items[{index}].amount"
+        if path in (confirmed_paths or []) or "items" in (confirmed_paths or []) or f"items[{index}]" in (confirmed_paths or []):
+            verified = False
         data.setdefault("field_evidence", {}).setdefault(path, []).append({"source": "normalization_candidate", **note, "selected": False, "independent_evidence": verified})
         if verified:
             for record in data["field_evidence"][path]:
@@ -138,12 +140,20 @@ def apply(data, type_key, chat, image_path, *, mode, ocr_text, context, confirme
         money.extend(a for k in LABELS for a in mapping.get(k, []) if a in fields and a not in protected)
         missing.extend(k for k in identity if k not in protected)
     requested = list(dict.fromkeys(missing + money))
-    if not requested:
+    groups = []
+    if spec.get("has_entries") and not any(numeric(r.get("debit")) is not None or numeric(r.get("credit")) is not None for r in data.get("entries") or []):
+        groups.append("entries")
+    if spec.get("has_items") and not data.get("items") and re.search(r"品名|明細|數量.*單價", ocr_text):
+        groups.append("items")
+    groups = [group for group in groups if not any(p.startswith(group + "[") or p == group for p in context.get("confirmed_paths", []))]
+    if not requested and not groups or context.get("supplement_done"):
         return
+    context["supplement_done"] = True
+    invocation_trace.add({"kind":"supplement_start", "fields":requested, "groups":groups, "task_limit":1})
     roi_path = image_path
     if mode == "image":
         source = native_path or image_path
-        region = {"box": [0, 0, 1000, 1000] if missing else [0, 400, 1000, 1000], "rotate": 0}
+        region = {"box": [0, 0, 1000, 1000] if missing or groups else [0, 400, 1000, 1000], "rotate": 0}
         try:
             roi_path = page_layout.crop(source, region, Path(image_path).with_name(Path(image_path).stem + "_supplement.png"), max_edge=2400)
         except (OSError, ValueError) as exc:
@@ -157,6 +167,7 @@ def apply(data, type_key, chat, image_path, *, mode, ocr_text, context, confirme
             ocr = pipeline.model_factory.get_ocr(provider)
             lines = ocr.recognize(roi_path)
             ocr_text = ocr.plain_text(lines)
+            context["supplement_ocr_lines"] = lines
             from app.core import image_evidence, barcode
             enhanced, info = image_evidence.enhancement(roi_path, lines, Path(roi_path).with_name(Path(roi_path).stem + "_enhanced.png"))
             invocation_trace.add({"kind":"image_enhancement", **info})
@@ -186,18 +197,43 @@ def apply(data, type_key, chat, image_path, *, mode, ocr_text, context, confirme
             ocr_text += "\n" + spatial_text(lines)
         except Exception as exc:
             invocation_trace.add({"kind": "supplement_ocr_error", "error": str(exc)})
+    from app.core import classification_evidence
+    corrected_type, classification = classification_evidence.resolve(type_key, ocr_text, protected=context.get("confirmed_type", False) or bool(confirmed_fields))
+    full = bool(groups or corrected_type != type_key)
     try:
-        values = pipeline.reread_fields(roi_path, type_key, chat, requested, mode=mode, ocr_text=ocr_text,
-            hint="金額只讀合計區，區分明細金額與未稅合計；識別欄位讀文件本身名稱及統編", evidence=context)
+        if full:
+            result = pipeline.reread_document(roi_path,corrected_type,chat,mode=mode,ocr_text=ocr_text,
+                    hint="依文件本身正確類型讀取完整欄位及表格，不推算缺值",evidence=context)
+            values = result["fields"]
+        else:
+            result = {}
+            values = pipeline.reread_fields(roi_path, type_key, chat, requested, mode=mode, ocr_text=ocr_text,
+                hint="金額只讀合計區，區分明細金額與未稅合計；識別欄位讀文件本身名稱及統編", evidence=context)
     except (ValueError, RuntimeError) as exc:
         data["validation_warnings"].append("指定欄位補讀失敗：" + str(exc)[:120])
         return
+    if corrected_type != type_key:
+        # Correct the contract before adopting fields; keep the previous AI data.
+        from copy import deepcopy
+        data["previous_contract_candidate"] = deepcopy(data)
+        for evidence in data.get("field_evidence", {}).values():
+            for record in evidence:
+                record["selected"] = False
+        data["fields"] = fields = {s["key"]:None for s in doc_types.get(corrected_type)["fields"]}
+        mapping = doc_types.get(corrected_type)["common_fields"]
+        context["effective_type"] = corrected_type
+        context["classification_evidence"] = classification
+        groups = [g for g,flag in (("items","has_items"),("entries","has_entries")) if doc_types.get(corrected_type).get(flag)]
+        data["items"], data["entries"] = [], []
+        data["doc_type"] = doc_types.get(corrected_type)["label"]
+        data["boxes"] = {}
+        invocation_trace.add({"kind":"supplement_classification",**classification})
     candidate = {**fields, **{k: v for k,v in values.items() if v not in (None, "")}}
     accepted = {}
-    currency = fields.get("currency") or ("TWD" if type_key == "invoice" else None)
+    currency = fields.get("currency") or ("TWD" if corrected_type == "invoice" else None)
     qr = context.get("qr")
     for key, value in values.items():
-        if key in protected or value in (None, ""):
+        if key in protected or value in (None, "") or not full and key not in requested:
             continue
         common_key = next((k for k in LABELS if key in mapping.get(k, [])), None)
         note = normalization.amount_annotation(value)
@@ -224,4 +260,55 @@ def apply(data, type_key, chat, image_path, *, mode, ocr_text, context, confirme
     if money and arithmetic({**fields, **accepted}, mapping) is False:
         accepted = {k: v for k,v in accepted.items() if k not in money}
     pipeline._merge_evidence_fields(data, accepted, "supplement_verified")
+    for group in groups:
+        candidates = result.get(group) or []
+        accepted_rows = []
+        for index, row in enumerate(candidates):
+            allow = row_evidence(row, group, ocr_text, context.get("supplement_ocr_lines") or context.get("ocr_lines") or [])
+            allow = allow and not context.get("ocr_copy_conflict") and not context.get("qr_copy_conflict")
+            data.setdefault("field_evidence", {}).setdefault(f"{group}[{index}]", []).append({"source":"supplement", "value":row, "selected":allow, "independent_evidence":allow})
+            if allow:
+                accepted_rows.append(row)
+        if candidates and len(accepted_rows)==len(candidates):
+            data[group] = accepted_rows
+        elif candidates:
+            data["validation_warnings"].append(f"{group} 補讀候選缺乏獨立欄位／位置證據，待人工確認")
     invocation_trace.add({"kind": "supplement_result", "requested": requested, "candidates": values, "adopted": accepted})
+
+
+def row_evidence(row, group, text, lines):
+    """One printed row must corroborate identifiers, numbers and debit/credit side."""
+    if not isinstance(row,dict):
+        return False
+    name = str(row.get("description") or row.get("account_name") or "").strip()
+    code = str(row.get("account_code") or "").strip()
+    identifier = code or name
+    if not identifier:
+        return False
+    rows = spatial_text(lines).splitlines() if lines else text.splitlines()
+    for printed in rows:
+        if identifier.replace(" ","") not in printed.replace(" ",""):
+            continue
+        numeric_keys = ("debit","credit") if group=="entries" else ("quantity","unit_price","amount")
+        values = [(k,numeric(row.get(k))) for k in numeric_keys if row.get(k) not in (None,"")]
+        if not values or any(v is None for _,v in values):
+            continue
+        numbers = [numeric(n) for n in re.findall(r"(?<!\w)-?\d[\d,]*(?:\.\d+)?", printed)]
+        if any(value not in numbers for _,value in values):
+            continue
+        if group=="items":
+            q,p,a=numeric(row.get("quantity")),numeric(row.get("unit_price")),numeric(row.get("amount"))
+            return q is None or p is None or a is None or abs(q*p-a)<.01
+        # An amount alone does not tell us which column it belongs to.
+        headers = {side:[r for r in lines if ("借方" if side=="debit" else "貸方") in r.get("text","")] for side in ("debit","credit")}
+        if not all(headers.values()):
+            return all(("借方" if side=="debit" else "貸方") in printed for side,_ in values)
+        xmid=lambda line:sum(p[0] for p in line["box"])/len(line["box"])
+        dx,cx=xmid(headers["debit"][0]),xmid(headers["credit"][0])
+        id_lines=[r for r in lines if identifier in r.get("text","")]
+        for side,value in values:
+            amounts=[r for r in lines if numeric(r.get("text"))==value and any(abs(sum(p[1] for p in r["box"])/len(r["box"])-sum(p[1] for p in ident["box"])/len(ident["box"])) <= max(p[1] for p in ident["box"])-min(p[1] for p in ident["box"]) for ident in id_lines)]
+            if not amounts or any((abs(xmid(r)-dx)<abs(xmid(r)-cx)) != (side=="debit") for r in amounts):
+                return False
+        return True
+    return False

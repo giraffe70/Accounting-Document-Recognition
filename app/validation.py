@@ -38,8 +38,8 @@ MAX_FILE = int(os.getenv("VALIDATION_MAX_FILE_MB", "100")) * 1024 * 1024
 MAX_TOTAL = int(os.getenv("VALIDATION_MAX_TOTAL_MB", "2048")) * 1024 * 1024
 MAX_FILES = int(os.getenv("VALIDATION_MAX_FILES", "5000"))
 SUPPORTED = config.ALLOWED_SUFFIXES
-WORKER_PROTOCOL = 2
-RESULT_CONTRACT = 2
+WORKER_PROTOCOL = 3
+RESULT_CONTRACT = 3
 SCHEMA_VERSION = 2
 from app.core import doc_types as _doc_types, model_invocation as _versioning
 LOADED_BUILD = _versioning.source_versions()["code_version_sha256"]
@@ -538,9 +538,11 @@ def _statistics(con, run_id, latest=False):
                                              if g["wall_seconds"] else None)})
         if latest and not g["integrity_ok"]:
             g["completed_rate"] = None
-        elif latest:
-            denominator = g.get("selected_samples", 0) - g["skipped"]
-            g["completed_rate"] = g["succeeded"] / denominator if denominator else None
+        g["processed_samples"] = g["samples"]
+        g["extraction_completed"] = g["succeeded"]
+        g["scheduled_samples"] = g.get("selected_samples", 0)
+        denominator = g.get("selected_samples", 0) - g["skipped"]
+        g["scheduled_completed_rate"] = g["succeeded"] / denominator if denominator and g["integrity_ok"] else None
         g["basis"] = "latest" if latest else "history"
         output.append(g)
     return output
@@ -550,11 +552,14 @@ def _latest_summary(con, run_id, stats=None):
     rows = _latest_rows([dict(r) for r in con.execute("SELECT rowid _rowid,* FROM results WHERE run_id=?", (run_id,))])
     summary = {k: sum(r["status"] == k for r in rows) for k in ("succeeded", "failed", "partial", "skipped", "queued", "running", "timeout", "cancelled", "terminated")}
     summary["failed"] += summary["timeout"]
-    summary.update(total=len(rows), done=sum(r["status"] not in ("queued", "running") for r in rows))
+    summary.update(total=len(rows), done=sum(r["status"] in ("succeeded", "failed", "partial", "skipped", "timeout") for r in rows))
     stats = stats if stats is not None else _statistics(con, run_id, latest=True)
     for key in ("document_count", "insufficient_count", "needs_review_count", "location_issue_count", "quality_unassessed_count"):
         summary[key] = sum(g.get(key, 0) for g in stats)
     summary["integrity_ok"] = all(g["integrity_ok"] for g in stats)
+    reasons = [json.loads(r.get("page_json") or "{}").get("processing_reason") for r in rows]
+    summary.update(manual_split_count=reasons.count("manual_split"), document_partial_failure_count=reasons.count("document_partial_failure"),
+                   insufficient_page_count=reasons.count("insufficient_data"), page_review_count=reasons.count("page_review"))
     return summary
 
 
@@ -838,25 +843,12 @@ def _recognize_layout(payload):
         if payload.get("execution_version_sha256") and payload["execution_version_sha256"] != snapshot["execution_version_sha256"]:
             raise ValueError("版面辨識版本已改變，請建立新批次")
         invocation_trace.add({"kind": "snapshot", "versions": snapshot, "parameters": payload})
-        lines, text, rotation = [], "", 0
+        lines, text = None, ""
         mode = "ocr_text" if combo["mode"] == "ocr_llm" else "image"
-        if mode == "ocr_text":
-            ocr = model_factory.get_ocr("paddle")
-            with pipeline.activity.stage("ocr", "版面 OCR"):
-                input_path = image_evidence.native_ocr(source, directory / "layout_ocr.png")
-                _, rotation = pipeline._auto_orient_ocr(input_path, ocr)
-                invocation_trace.add({"kind":"layout_orientation", "degrees_cw":rotation, "upright_input":input_path, "coordinate_unit":"pixels"})
-                lines = ocr.recognize(input_path)
-                text = ocr.plain_text(lines)
-            invocation_trace.add({"kind": "ocr", "lines": lines, "text": text})
-        layout = page_layout.detect(input_path, mode=mode, ocr_lines=lines, ocr_text=text, model_setting=combo["classify_model"], native_path=input_path if mode == "ocr_text" else source)
-        if rotation:
-            from app.core.geometry import rotate_box
-            for region in layout["regions"]:
-                region["box"] = rotate_box(region["box"], (-rotation) % 360)
-                region["rotate"] = rotation
-            layout["source_evidence"]["upright_rotation"] = rotation
-            layout["source_evidence"]["evidence_frame"] = "upright_ocr_input"
+        ocr_setting = "disabled/none" if combo["mode"] == "vlm_direct" else "paddle/pp-ocrv5"
+        with settings_store.isolated_settings({"ocr":ocr_setting,"structure":combo["structure_model"],"classify":combo["classify_model"]}):
+            layout = page_layout.detect(input_path, mode=mode, ocr_lines=lines, ocr_text=text, model_setting=combo["classify_model"], native_path=source)
+        lines = next((r.get("lines",[]) for r in reversed(trace) if r.get("kind")=="page_ocr"),[])
         layout["execution_version_sha256"] = snapshot["execution_version_sha256"]
         invocation_trace.atomic_json(directory / "layout.json", layout)
     return {"layout": layout, "trace": trace, "ocr": lines, "result_dir": str(directory),
@@ -896,12 +888,14 @@ def _run_page_child(payload, timeout, runner=None):
     layout = base["layout"]
     base.update(documents=[], voucher={}, actual_path=payload["combo"]["mode"],
                 origin=page_layout.origin(payload["page_path"], {"box":[0,0,1000,1000]}, payload["page_no"]))
+    base.update({k:layout.get(k) for k in ("coordinate_context","image_transforms","classification_evidence")})
     base["timings"] = {"complete_seconds": float(layout_response.get("wall_seconds", 0)), "recognition_seconds": float(layout_response.get("wall_seconds", 0))}
     if layout["content_kind"] in ("blank", "supporting", "non_voucher") and layout["auto_split"]:
-        base.update(page_status="skipped", skip_reason=layout["content_kind"], quality={"version":1,"state":"usable","content_kind":layout["content_kind"],"issues":[]})
+        base.update(page_status="skipped", processing_reason="skipped", skip_reason=layout["content_kind"], quality={"version":1,"state":"usable","content_kind":layout["content_kind"],"issues":[]})
         return {"ok": True, "data": base}
     if not layout["auto_split"]:
-        base.update(page_status="partial", quality={"version":1,"state":"needs_review","content_kind":layout["content_kind"],"issues":[{"code":"manual_split","message":"版面區域須人工確認"}]})
+        reason = "page_review" if layout.get("layout_kind")=="single" or layout["content_kind"]!="document" else "manual_split"
+        base.update(page_status="partial", processing_reason=reason, quality={"version":1,"state":"needs_review","content_kind":layout["content_kind"],"issues":[{"code":reason,"message":"頁面角色／單張判斷須覆核" if reason=="page_review" else "版面區域須人工確認"}]})
         return {"ok": True, "data": base}
     total_seconds = float(layout_response.get("wall_seconds", 0))
     for index, region in enumerate(layout["regions"]):
@@ -910,6 +904,7 @@ def _run_page_child(payload, timeout, runner=None):
                 run = con.execute("SELECT status,cancel_requested FROM runs WHERE id=?", (payload["run_id"],)).fetchone()
             if run and (run["status"] != "running" or run["cancel_requested"]):
                 base["page_status"] = "partial"
+                base["processing_reason"] = "document_partial_failure"
                 base["quality"] = {"version":1, "state":"needs_review", "content_kind":layout["content_kind"],
                                    "issues":[{"code":"interrupted", "message":"尚有區域未完成"}]}
                 return {"ok": True, "data": base}
@@ -923,7 +918,7 @@ def _run_page_child(payload, timeout, runner=None):
                 base.setdefault("artifacts", {})[f"document_{index}_{kind}"] = info
             continue
         document_id = uuid.uuid5(uuid.NAMESPACE_URL, payload["id"] + ":" + str(index)).hex
-        origin = {**page_layout.origin(payload["page_path"], region, payload["page_no"]), "parent_result_id": payload["id"]}
+        origin = {**page_layout.origin(payload["page_path"], region, payload["page_no"]), "parent_result_id": payload["id"], "layout_fallback":layout.get("fallback_reason")}
         try:
             native = page_layout.crop(payload["page_path"], region, directory / f"region_{index}.png")
             response = runner({**payload, "id": document_id, "parent_result_id": payload["id"], "phase": "document", "type_key": region["type"], "page_path": native, "origin": origin}, timeout)
@@ -965,6 +960,7 @@ def _run_page_child(payload, timeout, runner=None):
     states = [d["voucher"]["quality"]["state"] if _document_contract(d) else "unassessed" for d in base["documents"]]
     base["quality"] = {"version":1, "state":"insufficient" if "insufficient" in states else "needs_review" if "needs_review" in states or len(successful) != len(base["documents"]) else "usable", "content_kind":layout["content_kind"], "issues":[]}
     base["page_status"] = "succeeded" if base["documents"] and len(successful) == len(base["documents"]) else "partial"
+    base["processing_reason"] = "document_partial_failure" if base["page_status"]=="partial" else "insufficient_data" if "insufficient" in states else "completed"
     if len(base["documents"]) == 1 and successful:
         base.update({k: successful[0][k] for k in ("voucher", "boxes", "ocr", "trace", "timings", "actual_path") if k in successful[0]})
         base.setdefault("artifacts", {}).update({k: info for k,info in successful[0].get("artifacts", {}).items() if k not in ("original", "trace_json")})
@@ -1085,6 +1081,8 @@ def _scheduler():
 def _save_response(task, response):
     persistence_started = time.perf_counter()
     data = response.get("data") or {}
+    if not response.get("ok"):
+        data["processing_reason"] = "execution_failure"
     if task.get("worker_protocol") == WORKER_PROTOCOL:
         if response.get("ok") and (data.get("page_status") not in ("succeeded", "partial", "skipped") or
             not isinstance(data.get("layout"), dict) or not isinstance(data.get("quality"), dict) or
@@ -1102,6 +1100,8 @@ def _save_response(task, response):
             from app.core.invocation_trace import atomic_json
             data.setdefault("trace", []).append({"kind":"persistence_version_error", "error":response["error"]})
             atomic_json(RUNS/task["run_id"]/task["id"]/"trace.json", data["trace"])
+    if not response.get("ok"):
+        data["processing_reason"] = "execution_failure"
     if not data.get("timings"):
         data["timings"] = {"complete_seconds": response.get("wall_seconds", 0),
                            "recognition_seconds": response.get("wall_seconds", 0)}
@@ -1127,7 +1127,7 @@ def _save_response(task, response):
            (response.get("error", "") + ("\n" + response["traceback"] if response.get("traceback") else "")),
            data.get("result_dir", ""), task["id"]))
         con.execute("UPDATE results SET page_json=? WHERE id=?",
-                    (json.dumps({key: data[key] for key in ("layout", "origin", "quality", "result_contract_version", "skip_reason", "integrity_errors") if key in data}, ensure_ascii=False), task["id"]))
+                    (json.dumps({key: data[key] for key in ("layout", "origin", "quality", "result_contract_version", "skip_reason", "integrity_errors", "processing_reason", "coordinate_context", "image_transforms", "classification_evidence") if key in data}, ensure_ascii=False), task["id"]))
         con.execute("DELETE FROM artifacts WHERE result_id=?", (task["id"],))
         for kind, info in (data.get("artifacts") or {}).items():
             con.execute("INSERT INTO artifacts(id,result_id,kind,path,media_type) VALUES(?,?,?,?,?)",
@@ -1289,6 +1289,9 @@ def _recognize_document(payload):
         "trace_json": {"path": str(result_dir / "trace.json"), "media_type": "application/json"},
         "ocr_json": {"path": str(result_dir / "ocr.json"), "media_type": "application/json"},
     }
+    sent_path = (data.get("coordinate_context") or {}).get("input_path")
+    if sent_path and Path(sent_path).is_file() and Path(sent_path).resolve().is_relative_to(result_dir.resolve()):
+        artifacts["input"] = {"path":sent_path, "media_type":"image/png"}
     box_sources = {}
     for key in valid_boxes:
         if combo["mode"] == "vlm_direct":
@@ -1301,6 +1304,7 @@ def _recognize_document(payload):
                                 pipeline._match_ocr_line(str(value), ocr_lines) else "vlm")
     box_metadata = {"coordinates": valid_boxes, "sources": box_sources, "image": "input"}
     return {"actual_path": actual, "voucher": data, "boxes": box_metadata, "trace": trace,
+            "coordinate_context":data.get("coordinate_context"), "classification_evidence":data.get("classification_evidence"),
             "ocr": ocr_lines, "timings": timings, "result_dir": str(result_dir), "artifacts": artifacts}
 
 
@@ -1361,10 +1365,11 @@ def _csv_files(data):
       "fields.csv": ["result_id","source","field","value","box","located"],
       "items.csv": ["result_id","source","index","description","quantity","unit_price","amount","hs_code","origin_country","fee_code"],
       "entries.csv": ["result_id","source","index","description","amount","debit_account","debit_account_name","credit_account","credit_account_name","evidence_paths_json","amount_source"]}
+    specs["vouchers.csv"] += ["processing_reason","coordinate_contract_version","coordinate_context_json","classification_evidence_json"]
     buffers = {name: io.StringIO(newline="") for name in specs}
     writers = {name: csv.DictWriter(buffers[name], fieldnames=fields, extrasaction="ignore") for name, fields in specs.items()}
     for writer in writers.values(): writer.writeheader()
-    specs["pages.csv"] = ["result_id","source","page","status","image_sha256","complete_seconds","document_count","combo","repeat","attempt","is_latest","result_contract_version","integrity_ok","integrity_reason","skip_reason"]
+    specs["pages.csv"] = ["result_id","source","page","status","image_sha256","complete_seconds","document_count","combo","repeat","attempt","is_latest","result_contract_version","integrity_ok","integrity_reason","skip_reason","processing_reason","coordinate_contract_version","coordinate_context_json","classification_evidence_json"]
     buffers["pages.csv"] = io.StringIO(newline="")
     writers["pages.csv"] = csv.DictWriter(buffers["pages.csv"], fieldnames=specs["pages.csv"])
     writers["pages.csv"].writeheader()
@@ -1380,7 +1385,9 @@ def _csv_files(data):
             "status": page["status"], "image_sha256": image_sha or "", "complete_seconds": page.get("timings", {}).get("complete_seconds"), "document_count": len(documents),
             "combo":_csv_safe(page["combo_name"]), "repeat":page["repeat_no"], "attempt":page["attempt"], "is_latest":page.get("is_latest", False),
             "result_contract_version":page.get("result_contract_version"), "integrity_ok":page.get("integrity", {}).get("ok", False),
-            "integrity_reason":_csv_safe(page.get("integrity", {}).get("reason", "")), "skip_reason":page.get("skip_reason", "")})
+            "integrity_reason":_csv_safe(page.get("integrity", {}).get("reason", "")), "skip_reason":page.get("skip_reason", ""),
+            "processing_reason":page.get("processing_reason",""), "coordinate_contract_version":(page.get("coordinate_context") or {}).get("contract_version"),
+            "coordinate_context_json":json.dumps(page.get("coordinate_context") or {},ensure_ascii=False), "classification_evidence_json":json.dumps(page.get("classification_evidence") or {},ensure_ascii=False)})
         if documents:
             for document in documents:
                 flattened.append({**page, **document, "timings":document.get("timings") or {}, "parent_result_id": page["id"], "document_id": document["id"]})
@@ -1406,7 +1413,10 @@ def _csv_files(data):
           "box_issues_json": json.dumps(voucher.get("box_issues") or [], ensure_ascii=False),
           "sha256": (result.get("origin") or voucher.get("origin") or {}).get("image_sha256", ""),
           "is_latest":result.get("is_latest", False), "result_contract_version":result.get("result_contract_version"),
-          "integrity_ok":result.get("integrity", {}).get("ok", False), "integrity_reason":_csv_safe(result.get("integrity", {}).get("reason", ""))})
+          "integrity_ok":result.get("integrity", {}).get("ok", False), "integrity_reason":_csv_safe(result.get("integrity", {}).get("reason", "")),
+          "processing_reason":result.get("processing_reason",""), "coordinate_contract_version":(voucher.get("coordinate_context") or result.get("coordinate_context") or {}).get("contract_version"),
+          "coordinate_context_json":json.dumps(voucher.get("coordinate_context") or result.get("coordinate_context") or {},ensure_ascii=False),
+          "classification_evidence_json":json.dumps(voucher.get("classification_evidence") or result.get("classification_evidence") or {},ensure_ascii=False)})
         boxes = voucher.get("boxes") or {}
         fields = {"voucher_id": voucher.get("voucher_id"), "date": voucher.get("date"),
                   "doc_type": voucher.get("doc_type"), "subtotal": voucher.get("subtotal"),

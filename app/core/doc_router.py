@@ -45,5 +45,9 @@ def classify(image_path: str = "", hint: str = "", *, mode="image", ocr_text="",
     except Exception as exc:
         logger.warning("Router 失敗，改用 other：%s", exc)
         obj = {"type": "other", "rotate": 0, "reason": "分類失敗：" + str(exc)[:120]}
+    from app.core import classification_evidence
+    obj["type"], evidence = classification_evidence.resolve(obj["type"], ocr_text)
+    obj["classification_evidence"] = evidence
+    model_invocation.invocation_trace.add({"kind":"classification_evidence",**evidence})
     _last_result.set(obj)
     return obj["type"], obj["rotate"]

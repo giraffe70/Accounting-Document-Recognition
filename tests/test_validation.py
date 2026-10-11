@@ -27,7 +27,7 @@ class _Chat:
                 text_parts.extend(part.get("text", "") for part in content if part.get("type") == "text")
         text = "\n".join(text_parts)
         if prompts.ROUTE_TEMPLATE in text:
-            return _Response('{"type":"receipt","rotate":0,"reason":"synthetic single receipt","content_kind":"document","layout_kind":"single","regions":[]}')
+            return _Response('{"type":"receipt","rotate":0,"reason":"synthetic single receipt","content_kind":"document","layout_kind":"single","confidence":"high"}')
         mode = "ocr_text" if "沒有圖片" in text else "image"
         data = prompts.extraction_example("receipt", mode)
         data["fields"].update(date="2026-09-22", vendor="測試商店", tax_id="12345678", total_amount=100)

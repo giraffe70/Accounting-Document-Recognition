@@ -106,11 +106,27 @@ def prepare_image(image_path: str, hint: str = "", auto_rotate: bool = True) -> 
     不做欄位萃取——留待使用者確認外觀後再 extract_for_type。"""
     settings = settings_store.get_settings()
     ocr_provider, _ = settings_store.parse_setting(settings["ocr"], ("paddle", "pp-ocrv5"))
-    type_key, rotate_hint = doc_router.classify(image_path, hint=hint)
+    ocr_text, ocr_rotation = "", 0
+    if ocr_provider not in ("disabled", "none"):
+        try:
+            from app.core import page_ocr
+            from PIL import Image
+            with Image.open(image_path) as image:
+                size = image.size
+            with activity.stage("ocr", "原頁分類 OCR"):
+                _, ocr_text, ocr_rotation, _ = page_ocr.read(image_path,size,folder=Path(image_path).parent / (Path(image_path).stem + "_page_ocr"),setting=settings["ocr"])
+        except Exception as exc:
+            logger.warning("分類 OCR 不可用：%s", exc)
+    type_key, rotate_hint = doc_router.classify(image_path, hint=hint, ocr_text=ocr_text)
     if auto_rotate:
+        if ocr_text:
+            if ocr_rotation:
+                _apply_rotation(image_path, ocr_rotation)
+            return type_key
         ocr = None
         try:
-            ocr = model_factory.get_ocr(ocr_provider)
+            if ocr_provider not in ("disabled", "none"):
+                ocr = model_factory.get_ocr(ocr_provider)
         except Exception as exc:  # noqa: BLE001
             logger.warning("OCR 不可用，改用 VLM 方向提示：%s", exc)
         if ocr is not None:
@@ -123,7 +139,7 @@ def prepare_image(image_path: str, hint: str = "", auto_rotate: bool = True) -> 
     return type_key
 
 
-def extract_for_type(image_path: str, type_key: str, hint: str = "", company: str = "", *, confirmed_fields=None, native_path=None) -> Voucher:
+def extract_for_type(image_path: str, type_key: str, hint: str = "", company: str = "", *, confirmed_fields=None, native_path=None, confirmed_type=False, confirmed_paths=None) -> Voucher:
     """依「已確認的類型」在「已準備好的影像」上萃取欄位＋精準框。
     不再判類型／不再自動轉正（外觀確認階段已完成）。"""
     settings = settings_store.get_settings()
@@ -133,7 +149,8 @@ def extract_for_type(image_path: str, type_key: str, hint: str = "", company: st
     ocr = None
     ocr_used = "（無，VLM 直讀）"
     try:
-        ocr = model_factory.get_ocr(ocr_provider)
+        if ocr_provider not in ("disabled", "none"):
+            ocr = model_factory.get_ocr(ocr_provider)
     except Exception as exc:  # noqa: BLE001
         logger.warning("OCR 不可用，改用 VLM 直讀：%s", exc)
 
@@ -158,7 +175,8 @@ def extract_for_type(image_path: str, type_key: str, hint: str = "", company: st
 
     chat = model_factory.get_chat_model(struct_provider, struct_model, temperature=0.0)
     voucher = extract_evidence(image_path, type_key, chat, ocr_lines, ocr_text, hint=hint, company=company,
-                               confirmed_fields=confirmed_fields, native_path=native_path, image_conditions=image_conditions)
+                               confirmed_fields=confirmed_fields, native_path=native_path, image_conditions=image_conditions,
+                               confirmed_type=confirmed_type, confirmed_paths=confirmed_paths)
     voucher.ocr_provider = ocr_used
     voucher.structure_model = settings["structure"]
     voucher.source_image = image_path
@@ -208,46 +226,70 @@ def reread_fields(image_path: str, type_key: str, chat, fields: list[str], *, mo
                   ocr_text="", hint="", evidence=None) -> dict:
     """A subset of the same extraction task, without side effects on other fields."""
     from app.core import prompts, model_invocation
+    from app.core import model_coordinates
+    coordinates = model_coordinates.for_image(image_path, settings_store.get_settings()["structure"], max_edge=2400) if mode == "image" else None
     content = [{"type": "text", "text": prompts.build_extract_prompt(type_key, mode=mode, ocr_text=ocr_text,
-                                       hint=hint, fields=fields, evidence=evidence)}]
+                                       hint=hint, fields=fields, evidence=evidence, coordinate_context=coordinates)}]
     if mode == "image":
         content.append({"type": "image_url", "image_url": {"url": _data_uri(image_path, max_edge=2400)}})
     with activity.stage("structure", "指定欄位補讀"):
         result = model_invocation.invoke_structured(chat, content,
-                    lambda obj: _validate_image_extraction(obj, type_key, mode, image_path, fields), task="supplement", invoke=_invoke_text,
-                    schema=prompts.extraction_schema(type_key, mode, fields))
+                    lambda obj: _validate_image_extraction(obj, type_key, mode, image_path, fields, coordinate_context=coordinates), task="supplement", invoke=_invoke_text,
+                    schema=prompts.extraction_schema(type_key, mode, fields, coordinate_context=coordinates))
     return result["fields"]
 
 
-def _validate_image_extraction(obj: dict, type_key: str, mode: str, image_path: str, fields=None) -> dict:
+def reread_document(image_path, type_key, chat, *, mode="image", ocr_text="", hint="", evidence=None):
+    """Full contract reread; deliberately does not invoke extraction/supplement again."""
+    from app.core import prompts, model_invocation, model_coordinates
+    coordinates = model_coordinates.for_image(image_path, settings_store.get_settings()["structure"], max_edge=2400) if mode == "image" else None
+    content = [{"type":"text", "text":prompts.build_extract_prompt(type_key,mode=mode,ocr_text=ocr_text,hint=hint,evidence=evidence,coordinate_context=coordinates)}]
+    if mode == "image":
+        content.append({"type":"image_url","image_url":{"url":_data_uri(image_path,max_edge=2400)}})
+    with activity.stage("structure","欄位與表格補讀"):
+        return model_invocation.invoke_structured(chat,content,lambda obj:_validate_image_extraction(obj,type_key,mode,image_path,coordinate_context=coordinates),
+                    task="supplement",invoke=_invoke_text,schema=prompts.extraction_schema(type_key,mode,coordinate_context=coordinates))
+
+
+def _validate_image_extraction(obj: dict, type_key: str, mode: str, image_path: str, fields=None, *, coordinate_context=None) -> dict:
     from app.core import prompts
-    return prompts.validate_content_and_boxes(obj, type_key, mode, fields)
+    return prompts.validate_content_and_boxes(obj, type_key, mode, fields, coordinate_context=coordinate_context)
 
 
 def extract_evidence(image_path: str, type_key: str, chat, ocr_lines: list, ocr_text: str,
-                     *, mode="image", hint="", company="", confirmed_fields=None, native_path=None, image_conditions=None) -> Voucher:
-    from app.core import barcode, prompts, model_invocation
+                     *, mode="image", hint="", company="", confirmed_fields=None, native_path=None, image_conditions=None, confirmed_type=False, confirmed_paths=None) -> Voucher:
+    from app.core import barcode, prompts, model_invocation, model_coordinates, classification_evidence
+    from copy import deepcopy
+    type_key, classification = classification_evidence.resolve(type_key,ocr_text,protected=confirmed_type or bool(confirmed_fields) or bool(confirmed_paths))
+    model_invocation.invocation_trace.add({"kind":"classification_evidence",**classification})
+    coordinates = model_coordinates.for_image(image_path,settings_store.get_settings()["structure"]) if mode == "image" else None
     context = _company_context(company)
     model_invocation.invocation_trace.add({"kind": "ocr", "lines": ocr_lines, "text": ocr_text})
     context["ocr_enabled"] = settings_store.parse_setting(settings_store.get_settings()["ocr"])[0] not in ("disabled", "none")
     context["image_conditions"] = image_conditions or {}
+    context["confirmed_type"] = confirmed_type or bool(confirmed_fields) or bool(confirmed_paths)
+    context["confirmed_paths"] = list(confirmed_paths or [])
+    context["ocr_lines"] = ocr_lines
     qr_info = barcode.decode_diagnostics(native_path or image_path) if mode == "image" and type_key == "invoice" else None
     candidates = qr_info["candidates"] if qr_info else []
     if qr_info:
         model_invocation.invocation_trace.add({"kind": "qr_diagnostic", **qr_info})
     if len(candidates) == 1:
         context["qr"] = candidates[0]
-    content = [{"type": "text", "text": prompts.build_extract_prompt(type_key, mode=mode, ocr_text=ocr_text, hint=hint, evidence=context)}]
+    content = [{"type": "text", "text": prompts.build_extract_prompt(type_key, mode=mode, ocr_text=ocr_text, hint=hint, evidence=context,coordinate_context=coordinates)}]
     if mode == "image":
         content.append({"type": "image_url", "image_url": {"url": _data_uri(image_path)}})
     with activity.stage("structure", "欄位萃取"):
         data = model_invocation.invoke_structured(chat, content,
-                lambda obj: _validate_image_extraction(obj, type_key, mode, image_path), task="extract", invoke=_invoke_text,
-                schema=prompts.extraction_schema(type_key, mode))
+                lambda obj: _validate_image_extraction(obj, type_key, mode, image_path,coordinate_context=coordinates), task="extract", invoke=_invoke_text,
+                schema=prompts.extraction_schema(type_key, mode,coordinate_context=coordinates))
+    initial_ai = deepcopy(data)
     _record_evidence(data, "model", mode)
     data["validation_warnings"] = []
     if (image_conditions or {}).get("blur_warning"):
         data["validation_warnings"].append("文字區域可能模糊，請覆核原圖；未進行生成式修復")
+    if classification["conflict"] and classification["protected"]:
+        data["validation_warnings"].append("人工確認類型與文件證據衝突，保留人工類型待覆核")
     if len(candidates) == 1:
         _merge_evidence_fields(data, candidates[0], "qr")
     elif len(candidates) > 1:
@@ -261,10 +303,14 @@ def extract_evidence(image_path: str, type_key: str, chat, ocr_lines: list, ocr_
     from app.core import supplement
     evidence_text = ocr_text + "\n" + supplement.spatial_text(ocr_lines)
     model_invocation.invocation_trace.add({"kind":"ocr_semantic_rows", "text":evidence_text})
-    supplement.normalize_candidates(data, type_key, evidence_text, context.get("qr"), confirmed_fields)
+    supplement.normalize_candidates(data, type_key, evidence_text, context.get("qr"), confirmed_fields, confirmed_paths)
+    normalized = _build_voucher(deepcopy(data), type_key, normalize_word_total=False)
+    data["fields"] = normalized.fields
+    data["validation_warnings"] = list(dict.fromkeys(data["validation_warnings"] + normalized.validation_warnings))
     supplement.apply(data, type_key, chat, image_path, mode=mode, ocr_text=evidence_text,
                      context=context, confirmed_fields=confirmed_fields, native_path=native_path)
-    if doc_types.get(type_key).get("has_entries") and ocr_lines:
+    type_key = context.get("effective_type", type_key)
+    if doc_types.get(type_key).get("has_entries") and ocr_lines and not any(p == "entries" or p.startswith("entries[") for p in (confirmed_paths or [])):
         from copy import deepcopy
         before = deepcopy(data.get("entries") or [])
         _fix_entry_sides_with_ocr(data, ocr_lines)
@@ -280,6 +326,11 @@ def extract_evidence(image_path: str, type_key: str, chat, ocr_lines: list, ocr_
     data["boxes"] = _refine_boxes_with_ocr(data["fields"], vlm_boxes, ocr_lines, image_path,
                         keep_unmatched=mode == "image" and not dense) if ocr_lines else ({} if dense else vlm_boxes)
     voucher = _build_voucher(data, type_key)
+    voucher.initial_ai = initial_ai
+    if data.get("previous_contract_candidate"):
+        voucher.previous_contract_candidate = data["previous_contract_candidate"]
+    voucher.coordinate_context = coordinates
+    voucher.classification_evidence = context.get("classification_evidence", classification)
     if type_key == "other":
         voucher.validation_warnings.append("文件類型未知或無法分類，使用通用契約，請人工確認")
     from app.core.quality import evaluate_quality
@@ -305,7 +356,7 @@ def _structure_image(image_path: str, source_file: str, page_idx: int, page_coun
     """單張全流程：準備（判類型+轉正）＋內容萃取。供批次與重新辨識沿用。"""
     type_key = prepare_image(image_path, hint=hint, auto_rotate=auto_rotate)
     voucher = extract_for_type(image_path, type_key, hint=hint, company=company)
-    voucher.field_evidence["doc_type_key"] = [{"source": "route", "value": type_key,
+    voucher.field_evidence["doc_type_key"] = [{"source": "route", "value": voucher.doc_type_key,
                 "reason": doc_router.last_result().get("reason", ""), "selected": True}]
     name = Path(source_file).name
     voucher.source_file = f"{name} p{page_idx + 1}" if page_count > 1 else name

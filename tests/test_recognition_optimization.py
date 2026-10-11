@@ -58,10 +58,8 @@ class BoxAndLayoutTests(unittest.TestCase):
         self.assertFalse(uncertain["auto_split"])
         self.assertTrue(uncertain["issues"])
 
-        too_many = page_layout.validate_layout({"type": "other", "rotate": 0, "reason": "too many",
-            "regions": [regions[0]] * 17})
-        self.assertFalse(too_many["auto_split"])
-        self.assertEqual(too_many["regions"], [])
+        with self.assertRaisesRegex(ValueError, "region count"):
+            page_layout.validate_layout({"type": "other", "rotate": 0, "reason": "too many", "regions": [regions[0]] * 17})
 
     def test_crop_preserves_source_and_obeys_native_edge_limit(self):
         with _temporary_directory() as temp:

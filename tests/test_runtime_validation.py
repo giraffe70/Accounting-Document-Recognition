@@ -34,7 +34,7 @@ class RuntimeValidationTests(unittest.TestCase):
         return {"id":"a", "run_id":"run", "worker_protocol":validation.WORKER_PROTOCOL,
                 "parent_build":validation.LOADED_BUILD, "execution_version_sha256":self.versions["execution_version_sha256"]}
 
-    def result(self, identifier, attempt, status, *, repeat=1, warmup=0, contract=2, path=""):
+    def result(self, identifier, attempt, status, *, repeat=1, warmup=0, contract=validation.RESULT_CONTRACT, path=""):
         page = {"result_contract_version":contract, "layout":{"type":"receipt"}, "quality":{"state":"usable"}}
         with validation._connect() as con:
             con.execute("INSERT INTO results(id,run_id,page_id,combo_id,combo_name,mode,repeat_no,attempt,warmup,status,queued_at,actual_path,page_json,timings_json) VALUES(?, 'run','page','combo','test','ocr_vlm',?,?,?,?, 'now',?,?,?)",
@@ -126,7 +126,7 @@ class RuntimeValidationTests(unittest.TestCase):
             con.execute("UPDATE results SET result_dir=? WHERE id='old'", (str(self.root.parent),))
         self.assertEqual(validation.get_diagnostics("old").status_code,409)
 
-    def test_empty_success_rejected_and_pending_page_stays_in_denominator(self):
+    def test_empty_success_rejected_and_processed_and_scheduled_denominators_separate(self):
         self.result("empty",1,"running")
         task = {**self.payload(),"id":"empty", "queued_at":None,"started_at":None}
         validation._save_response(task,{"ok":True,"data":{"page_status":"succeeded","documents":[]}})
@@ -140,7 +140,17 @@ class RuntimeValidationTests(unittest.TestCase):
         self.result("pending",1,"queued",repeat=2)
         stat = validation.get_run("run")["latest_statistics"][0]
         self.assertEqual(stat["selected_samples"],2)
-        self.assertEqual(stat["completed_rate"],.5)
+        self.assertEqual(stat["processed_samples"],1)
+        self.assertEqual(stat["completed_rate"],1)
+        self.assertEqual(stat["scheduled_completed_rate"],.5)
+
+    def test_cancelled_unprocessed_page_is_not_counted_as_processed(self):
+        self.result("good",1,"succeeded")
+        self.result("not-run",1,"cancelled",repeat=2)
+        summary = validation.get_run("run")["latest_summary"]
+        self.assertEqual(summary["total"],2)
+        self.assertEqual(summary["done"],1)
+        self.assertEqual(summary["cancelled"],1)
 
     def test_malformed_child_preserves_diagnostic_and_other_document(self):
         from PIL import Image

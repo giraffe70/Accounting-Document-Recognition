@@ -15,6 +15,7 @@ ROUTE_TEMPLATE = """任務：判斷文件類型及正立方向，只輸出指定
 以文件本身標題及版面判斷，不因引用發票號碼就分類為發票。未知類型填 other 並說明原因。
 對帳單用 statement；會計傳票用 journal_voucher；純費用附頁用 bill_detail。
 utility 僅限水電、瓦斯等公用事業或電信的帳單／繳費通知；勞健保繳款用 social_insurance。
+郵資收據及交通車票使用 receipt；轉帳傳票加借方／貸方欄支持 journal_voucher，不因有金額判為發票。
 國稅／地方稅繳款用 tax_bill；海關稅費證明用 customs_tax；報關行收費用 broker_note。
 進口、出口報單分開；含獨立付款金額的通知依收費用途分類，純佐證明細才用 bill_detail。"""
 EXTRACT_TEMPLATE = """任務：從文件證據擷取指定欄位，只依契約輸出 JSON。
@@ -109,16 +110,22 @@ def validate_extraction(data: dict, type_key: str, mode: InputMode = "image", fi
     return result
 
 
-def extraction_schema(type_key, mode="image", fields=None):
+def extraction_schema(type_key, mode="image", fields=None, *, coordinate_context=None):
     schema = extraction_model(type_key, mode, fields).model_json_schema()
     if "boxes" in schema["properties"]:
         schema["properties"]["boxes"] = {"type": "object", "additionalProperties": False,
             "properties": {s["key"]: {"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 1000},
                                        "minItems": 4, "maxItems": 4} for s in field_specs(type_key, fields)}}
+        if coordinate_context is not None:
+            from app.core import model_coordinates
+            if coordinate_context.get("verified"):
+                schema["properties"]["boxes"]["properties"] = {s["key"]: model_coordinates.box_schema(coordinate_context) for s in field_specs(type_key, fields)}
+            else:
+                schema["properties"]["boxes"] = model_coordinates.box_schema(coordinate_context)
     return schema
 
 
-def validate_content_and_boxes(data, type_key, mode="image", fields=None):
+def validate_content_and_boxes(data, type_key, mode="image", fields=None, *, coordinate_context=None):
     """Keep the content contract strict, but reject localization independently."""
     from app.core.geometry import validate_boxes
     supports_boxes = mode == "image" and type_key not in doc_types.NO_VLM_BOX_TYPES
@@ -126,7 +133,12 @@ def validate_content_and_boxes(data, type_key, mode="image", fields=None):
     raw = content.pop("boxes", {}) if mode == "image" else {}
     result = validate_extraction(content, type_key, mode, fields)
     if supports_boxes:
-        result["boxes"], result["box_issues"] = validate_boxes(raw, {s["key"] for s in field_specs(type_key, fields)})
+        allowed = {s["key"] for s in field_specs(type_key, fields)}
+        if coordinate_context is not None:
+            from app.core import model_coordinates
+            result["boxes"], result["box_issues"] = model_coordinates.convert_fields(raw, allowed, coordinate_context)
+        else:
+            result["boxes"], result["box_issues"] = validate_boxes(raw, allowed)
     elif mode == "image" and raw:
         _, result["box_issues"] = validate_boxes(raw, set())
     return result
@@ -139,7 +151,7 @@ def _constraints(schema: dict) -> str:
 
 
 def build_extract_prompt(type_key: str, mode: InputMode = "image", ocr_text: str = "", hint: str = "",
-                         fields: list[str] | None = None, evidence: dict | None = None) -> str:
+                         fields: list[str] | None = None, evidence: dict | None = None, *, coordinate_context=None) -> str:
     spec = doc_types.get(type_key)
     def describe(specs):
         return "；".join(f"{s['key']}={s['label']}({'數/原文' if s['kind']=='number' else '原文'}|null)" for s in specs)
@@ -157,7 +169,11 @@ def build_extract_prompt(type_key: str, mode: InputMode = "image", ocr_text: str
         parts.append("共同契約：" + "；".join(f"{key}:{_constraints(properties[key])}" for key in ("doc_type", "note", "confidence")))
         parts += spec["type_hints"]
     if mode == "image" and type_key not in doc_types.NO_VLM_BOX_TYPES:
-        parts.append("boxes 僅框可定位的指定欄位；[x1,y1,x2,y2] 為0至1000整數，未知省略。")
+        if coordinate_context is not None:
+            from app.core import model_coordinates
+            parts.append(model_coordinates.instructions(coordinate_context))
+        else:
+            parts.append("boxes 僅框可定位的指定欄位；[x1,y1,x2,y2] 為0至1000整數，未知省略。")
     return "\n".join(parts) + DATA_SEPARATOR + _json({"locator_hint": hint, "reference_data": evidence or {}, "ocr_text": ocr_text})
 
 

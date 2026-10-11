@@ -257,7 +257,7 @@ def source_versions() -> dict:
     names = {p.relative_to(root).as_posix() for p in (root / "core").glob("*.py")}
     names.update({"models/schemas.py", "services/accounting_policy.py", "services/classify.py",
                   "services/importdecl.py", "services/accounts.py", "services/taxid.py", "services/review.py",
-                  "db/models.py", "db/session.py", "config.py", "validation.py", "main.py", "static/js/validation.js"})
+                  "db/models.py", "db/session.py", "config.py", "validation.py", "main.py", "static/js/validation.js", "static/validation.html", "static/css/validation.css"})
     sources = {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in sorted(names)}
     runtime = {name: hashlib.sha256((config.DATA_DIR / name).read_bytes()).hexdigest()
                if (config.DATA_DIR / name).exists() else None
@@ -273,8 +273,10 @@ def source_versions() -> dict:
         return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
     prompt_sources = {key: sources[key] for key in ("core/prompts.py", "core/doc_types.py", "core/doc_router.py")}
     parameters = {"ollama_num_ctx": config.OLLAMA_NUM_CTX, "output_limits": OUTPUT_LIMITS, "repair_char_limit": REPAIR_CHAR_LIMIT}
-    return {"hash_version": 2, "source_sha256": sources, "runtime_sha256": runtime, "dependencies": dependencies,
-            "recognition_contract": {"version": 2, "coordinates": "normalized_1000", "max_regions": 16, "split_iou_max": .1, "supplement_tasks": 1, "supplement_max_edge": 2400, "output_limits": OUTPUT_LIMITS, "repair_char_limit": REPAIR_CHAR_LIMIT},
+    from app.core import model_coordinates
+    parameters.update(coordinate_profiles_sha256=model_coordinates.registry_digest(), layout_version=3, page_ocr_version=1)
+    return {"hash_version": 3, "source_sha256": sources, "runtime_sha256": runtime, "dependencies": dependencies,
+            "recognition_contract": {"version": 3, "coordinates": "normalized_1000", "model_coordinates":"explicit_calibrated_profile", "router_stages":["page","regions_if_multiple"], "max_regions": 16, "split_iou_max": .1, "supplement_tasks": 1, "supplement_max_edge": 2400, "output_limits": OUTPUT_LIMITS, "repair_char_limit": REPAIR_CHAR_LIMIT},
             "prompt_version_sha256": digest(prompt_sources), "code_version_sha256": digest(sources),
             "policy_version_sha256": digest({"source": sources["services/accounting_policy.py"], "runtime": runtime}),
             "execution_version_sha256": digest({"sources": sources, "runtime": runtime, "dependencies": dependencies, "parameters":parameters}),
@@ -282,4 +284,4 @@ def source_versions() -> dict:
 
 
 def same_execution_version(saved: dict) -> bool:
-    return saved.get("hash_version") == 2 and saved.get("execution_version_sha256") == source_versions()["execution_version_sha256"]
+    return saved.get("hash_version") == 3 and saved.get("execution_version_sha256") == source_versions()["execution_version_sha256"]

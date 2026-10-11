@@ -102,14 +102,104 @@ def layout_evidence(source=None, lines=None, size=None, qr=None):
     if source:
         with Image.open(source) as image:
             source_size = image.size
-    return {"frames": borders, "anchors": identified, "coordinate_unit":"normalized_1000",
+    text_boxes = []
+    if size:
+        from app.core.geometry import convert_box
+        for index, line in enumerate(lines or []):
+            points = line.get("box") or []
+            try:
+                box = convert_box([min(p[0] for p in points), min(p[1] for p in points), max(p[0] for p in points), max(p[1] for p in points)], unit="pixels", width=size[0], height=size[1])
+                text_boxes.append({"id": index, "text": line.get("text", ""), "box": box})
+            except (ValueError, TypeError):
+                continue
+    return {"frames": borders, "anchors": identified, "text_boxes": text_boxes, "coordinate_unit":"normalized_1000",
             "source_size":source_size, "ocr_source_size":size}
+
+
+def _contains(outer, inner):
+    return outer[0] <= inner[0] and outer[1] <= inner[1] and outer[2] >= inner[2] and outer[3] >= inner[3]
+
+
+def safe_margin(box, evidence, *, selected_ids=None):
+    """Include selected text and a safe margin, rejecting any cut-through text."""
+    from app.core.geometry import validate_box
+    box = validate_box(box)
+    if selected_ids is not None:
+        own = [r["box"] for r in evidence.get("text_boxes", []) if r["id"] in selected_ids]
+        if own:
+            box = [min(b[0] for b in own), min(b[1] for b in own), max(b[2] for b in own), max(b[3] for b in own)]
+    margin = max(8, round(max(box[2]-box[0], box[3]-box[1]) * .02))
+    expanded = [max(0, box[0]-margin), max(0, box[1]-margin), min(1000, box[2]+margin), min(1000, box[3]+margin)]
+    for row in evidence.get("text_boxes", []):
+        text = row["box"]
+        intersects = max(expanded[0], text[0]) < min(expanded[2], text[2]) and max(expanded[1], text[1]) < min(expanded[3], text[3])
+        if intersects and not _contains(expanded, text):
+            raise ValueError("crop boundary cuts through OCR text")
+    return expanded
+
+
+def complete_region(region, evidence):
+    """Borders/table cells alone cannot establish an independent voucher."""
+    box = region["box"]
+    rows = [r for r in evidence.get("text_boxes", []) if _contains(box, r["box"])]
+    text = "\n".join(r["text"] for r in rows)
+    compact = re.sub(r"\s+", "", text)
+    title = bool(re.search(r"發票|收據|傳票|支票|車票|高鐵|郵資|繳費|繳款|報單|對帳單", compact))
+    identifiers = {v for a in evidence.get("anchors", []) if box[0] <= a["center"][0] <= box[2] and box[1] <= a["center"][1] <= box[3] for v in a["ids"]}
+    money = bool(re.search(r"(?:總計|總額|合計|金額|票價|郵資|實收|應繳|新[臺台]幣|大寫).*(?:\d|[壹貳參肆伍陸柒捌玖])", compact))
+    transaction = bool(re.search(r"日期|民國|\d{2,4}[/年.-]\d{1,2}[/月.-]\d{1,2}|銀行|付款|收款|起站|到站|出發|到達|借方|貸方", compact))
+    return {"complete": bool(title and money and (identifiers or transaction)), "title": title,
+            "money": money, "transaction": transaction, "identifiers": sorted(identifiers), "text_ids": [r["id"] for r in rows]}
+
+
+def independent_groups(evidence):
+    """Whitespace separates only groups that each contain a complete transaction."""
+    rows = evidence.get("text_boxes", [])
+    def bounds(group):
+        return [min(r["box"][0] for r in group), min(r["box"][1] for r in group), max(r["box"][2] for r in group), max(r["box"][3] for r in group)]
+    def split(group, depth=0):
+        if not group or depth >= 4:
+            return [group] if group else []
+        cuts = []
+        for axis in (0, 1):
+            intervals = sorted((r["box"][axis], r["box"][axis+2]) for r in group)
+            end = intervals[0][1]
+            for start, stop in intervals[1:]:
+                if start-end >= 35:
+                    cuts.append((start-end, axis, (start+end)/2))
+                end = max(end, stop)
+        for _, axis, cut in sorted(cuts, reverse=True):
+            first = [r for r in group if r["box"][axis+2] <= cut]
+            second = [r for r in group if r["box"][axis] >= cut]
+            if not first or not second or len(first)+len(second)!=len(group):
+                continue
+            if all(complete_region({"box":bounds(g)}, evidence)["complete"] for g in (first, second)):
+                return split(first, depth+1)+split(second, depth+1)
+        return [group]
+    groups = []
+    seen = set()
+    for group in split(rows):
+        box = bounds(group)
+        proof = complete_region({"box":box}, evidence)
+        if not proof["complete"]:
+            continue
+        ids = tuple(proof["identifiers"])
+        if ids and ids in seen:
+            continue  # multi-part copies of the same identity
+        if ids:
+            seen.add(ids)
+        groups.append(box)
+    return groups
 
 
 def verify_regions(regions, evidence):
     issues, used_ids, used_frames = [], set(), set()
-    if len(regions) == 1 and len(evidence["frames"]) > 1:
-        issues.append("single region conflicts with multiple independent document boundaries")
+    groups = independent_groups(evidence) if len(regions) > 1 else []
+    covered_groups = set()
+    # Rectangle contours are only proposals; they may be table columns.
+    complete_frames = [b for b in evidence.get("frames", []) if complete_region({"box":b}, evidence)["complete"]]
+    if len(regions) == 1 and len(complete_frames) > 1:
+        issues.append("single region conflicts with multiple complete document groups")
     for index, region in enumerate(regions):
         x0, y0, x1, y1 = region["box"]
         if min(x1-x0, y1-y0) < 120 or max((x1-x0)/(y1-y0), (y1-y0)/(x1-x0)) > 8:
@@ -128,20 +218,34 @@ def verify_regions(regions, evidence):
             issues.append(f"region {index}: shared document boundary")
         if frame_index is not None:
             used_frames.add(frame_index)
-        if len(regions) > 1 and not borders and not (len(ids) == 1 and any(a["amount"] for a in own)):
-            issues.append(f"region {index}: no independent complete-document evidence")
+        if len(regions) > 1:
+            own_groups = [i for i, box in enumerate(groups) if _contains(region["box"], box)]
+            if groups and len(own_groups) != 1:
+                issues.append(f"region {index}: does not contain one complete OCR content group")
+            if covered_groups.intersection(own_groups):
+                issues.append(f"region {index}: shared complete OCR content group")
+            covered_groups.update(own_groups)
+            proof = complete_region(region, evidence)
+            if not proof["complete"]:
+                issues.append(f"region {index}: no independent complete-document evidence")
+            try:
+                safe_margin(region["box"], evidence)
+            except ValueError as exc:
+                issues.append(f"region {index}: {exc}")
+    if groups and len(covered_groups) != len(groups):
+        issues.append("document regions omit complete OCR content groups")
     return issues
 
 
 def single_document(evidence):
+    if len(independent_groups(evidence)) > 1:
+        return None
     ocr_ids = {v for a in evidence["anchors"] if a.get("source") != "qr" for v in a["ids"]}
     identities = [v for a in evidence["anchors"] for v in a["ids"] if a.get("source") != "qr" or v not in ocr_ids]
-    if len(identities) != len(set(identities)) or len(set(identities)) > 1:
+    if len(set(identities)) > 1:
         return None
-    if len(evidence["frames"]) == 1:
-        return evidence["frames"][0]
-    ids = {v for a in evidence["anchors"] for v in a["ids"]}
-    if not evidence["frames"] and len(ids) == 1 and any(a["amount"] for a in evidence["anchors"]):
+    # Single evidence preserves the entire page, including headers outside tables.
+    if complete_region({"box":[0,0,1000,1000]}, evidence)["complete"]:
         return [0, 0, 1000, 1000]
     return None
 

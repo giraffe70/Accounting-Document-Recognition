@@ -26,6 +26,7 @@ sqlmodel                    # SQLite + ORM（憑證/分錄/審核/回饋）
 # ── 其他 ──
 requests
 tenacity                    # 重試
+tokenizers==0.22.2           # 固定 tokenizer 資產解析版本
 opencc-python-reimplemented # 簡→繁（VLM 偶爾吐簡體字；純 Python、離線可用）
 
 # ── OCR 精修層另裝 ──
