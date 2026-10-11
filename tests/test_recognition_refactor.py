@@ -107,14 +107,14 @@ class RefactorFlowTests(unittest.TestCase):
         self.assertEqual(barcode.parse_einvoice_qr([qr(roc="1150230")]), {})
         data = prompts.extraction_example("invoice")
         data["fields"].update(total_amount=90, seller_tax_id="12345678")
-        with patch("app.core.barcode.decode", return_value=[qr()]), patch("app.core.pipeline._data_uri", return_value="data:image/png;base64,test"), \
+        with patch("app.core.barcode.decode_diagnostics", return_value=barcode.summarize([qr()], [], [300,200])), patch("app.core.pipeline._data_uri", return_value="data:image/png;base64,test"), \
              patch("app.core.pipeline._invoke_text", return_value=json.dumps(data)):
             v = pipeline.extract_evidence("fake.png", "invoice", object(), [], "", confirmed_fields={"total_amount": 99})
         self.assertEqual(v.total_amount, 99)
         evidence = v.field_evidence["fields.total_amount"]
         self.assertEqual([r["source"] for r in evidence], ["model", "qr", "manual"])
         self.assertEqual([r["selected"] for r in evidence], [False, False, True])
-        with patch("app.core.barcode.decode", return_value=[qr(), qr(total=106)]), patch("app.core.pipeline._data_uri", return_value="data:image/png;base64,test"), \
+        with patch("app.core.barcode.decode_diagnostics", return_value=barcode.summarize([qr(), qr(total=106)], [], [300,200])), patch("app.core.pipeline._data_uri", return_value="data:image/png;base64,test"), \
              patch("app.core.pipeline._invoke_text", return_value=json.dumps(data)):
             v = pipeline.extract_evidence("fake.png", "invoice", object(), [], "")
         self.assertEqual(v.total_amount, 90)
@@ -129,12 +129,12 @@ class RefactorFlowTests(unittest.TestCase):
         requests = []
         def invoke(chat, content):
             requests.append(content)
-            return json.dumps(initial if len(requests) == 1 else {"fields": {"tax_id": "12345678"}})
-        with patch("app.core.pipeline._invoke_text", side_effect=invoke), patch("app.core.barcode.decode") as decoder:
-            v = pipeline.extract_evidence("fake.png", "receipt", object(), [], "原始OCR 12345678", mode="ocr_text")
+            return json.dumps(initial if len(requests) == 1 else {"fields": {"tax_id": "12345676"}})
+        with patch("app.core.pipeline._invoke_text", side_effect=invoke), patch("app.core.barcode.decode_diagnostics") as decoder:
+            v = pipeline.extract_evidence("fake.png", "receipt", object(), [], "賣方統一編號 12345676", mode="ocr_text")
         self.assertEqual(len(requests), 2)
         self.assertEqual(v.seller.name, "原廠商")
-        self.assertEqual(v.seller.tax_id, "12345678")
+        self.assertEqual(v.seller.tax_id, "12345676")
         self.assertIn('"tax_id":null', requests[1][0]["content"])
         self.assertNotIn('"vendor":null', requests[1][0]["content"])
         decoder.assert_not_called()

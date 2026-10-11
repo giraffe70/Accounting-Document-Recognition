@@ -156,7 +156,8 @@ class ValidationVersionGateTests(unittest.TestCase):
                 return_value={"execution_version_sha256": "current-execution-version"},
             )
             with patch.object(validation, "_connect", side_effect=connect), \
-                 patch.object(validation, "_wake", wake), version_patch:
+                 patch.object(validation, "_wake", wake), version_patch, \
+                 patch.object(validation, "runtime_status", return_value={"ready":True}):
                 response = getattr(validation, action)("run-1")
 
             self.assertEqual(response.status_code, 409)

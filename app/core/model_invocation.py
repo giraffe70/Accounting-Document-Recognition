@@ -5,6 +5,56 @@ import logging
 from copy import deepcopy
 from app.core import invocation_trace, prompts
 logger = logging.getLogger("pdf_scan.model_invocation")
+OUTPUT_LIMITS = {"layout": 2048, "route": 2048, "extract": 4096, "supplement": 2048}
+REPAIR_CHAR_LIMIT = 1024
+
+
+def _input_estimate(messages, schema):
+    import re
+    values = []
+    images = 0
+    for message in messages:
+        content = message.get("content", "")
+        if isinstance(content, list):
+            values.extend(p.get("text", "") for p in content if p.get("type") == "text")
+            images += sum(p.get("type") == "image_url" for p in content)
+        else:
+            values.append(str(content))
+    values.append(json.dumps(schema or {}, ensure_ascii=False))
+    text = "\n".join(values)
+    non_ascii = len(re.findall(r"[^\x00-\x7f]", text))
+    # Approximation, not a tokenizer claim; reserve headroom for messages/vision.
+    return int((len(text)-non_ascii)/3 + non_ascii*1.6 + 128 + images*1024)
+
+
+def _permanent_error(exc):
+    return isinstance(exc, (ValueError, TypeError, AttributeError)) or getattr(exc, "status_code", None) in (400, 401, 403, 404, 422) or any(
+        s in str(exc).lower() for s in ("exceeds the available context", "exceed_context_size", "context length exceeded"))
+
+
+def _output_bound(chat, limit):
+    if not hasattr(chat, "bind"):
+        return chat
+    underlying = getattr(chat, "bound", chat)
+    module = type(underlying).__module__.lower()
+    if "ollama" in module:
+        # num_predict is a ChatOllama model option, not a Client.chat keyword.
+        # bind(num_predict=...) leaks it into the SDK's top-level arguments in
+        # langchain-ollama 1.1.0. Copy the model so the adapter puts it in options,
+        # preserving defaults and avoiding shared-model mutation between stages.
+        bounded = underlying.model_copy(update={"num_predict": limit})
+        if underlying is chat:
+            return bounded
+        kwargs = dict(chat.kwargs)
+        if kwargs.get("options") is not None:
+            options = kwargs["options"]
+            if hasattr(options, "model_dump"):
+                options = options.model_dump(exclude_none=True)
+            kwargs["options"] = {**options, "num_predict": limit}
+        return chat.model_copy(update={"bound": bounded, "kwargs": kwargs})
+    if any(s in module for s in ("openai", "anthropic", "google")):
+        return chat.bind(max_tokens=limit)
+    return chat
 def _invoke_text(chat, content, tries: int = 3) -> str:
     """呼叫 VLM 並取回文字；空回應或例外時重試。
 
@@ -29,11 +79,13 @@ def _invoke_text(chat, content, tries: int = 3) -> str:
                 elif isinstance(text, list):
                     text = "\n".join(part.get("text", "") for part in text if isinstance(part, dict) and part.get("type") == "text")
                 traced["response"] = str(text)
+                traced["response_metadata"] = getattr(resp, "response_metadata", {}) or {}
+                traced["usage_metadata"] = getattr(resp, "usage_metadata", {}) or {}
             if str(text).strip():
                 return text
             last = "空回應"
         except Exception as exc:  # noqa: BLE001
-            if _format_rejected(exc):
+            if _format_rejected(exc) or _permanent_error(exc):
                 raise
             last = f"{type(exc).__name__}: {exc}"
         if i < tries - 1:
@@ -144,11 +196,31 @@ def invoke_structured(chat, content, validator, task="extract", invoke=None, sch
                 request[0]["content"] += "\n" + instruction
             else:
                 request.insert(0, {"role": "system", "content": instruction})
-            request.append({"role": "user", "content": json.dumps({"contract_errors": errors, "previous_output_raw": previous_raw}, ensure_ascii=False)})
+            request.append({"role": "user", "content": json.dumps({"contract_errors": errors[:512], "previous_output_raw": previous_raw[:REPAIR_CHAR_LIMIT], "previous_output_truncated": len(previous_raw) > REPAIR_CHAR_LIMIT}, ensure_ascii=False)})
+        output_limit = OUTPUT_LIMITS.get(task, 4096)
+        context_limit = getattr(getattr(chat, "bound", chat), "num_ctx", None)
+        estimate = _input_estimate(request, schema)
+        if context_limit and round_no == 2 and estimate > context_limit - 512:
+            repair = json.loads(request[-1]["content"])
+            repair.update(previous_output_raw="", previous_output_truncated=True)
+            request[-1]["content"] = json.dumps(repair, ensure_ascii=False)
+            estimate = _input_estimate(request, schema)
+        if context_limit and estimate > context_limit - 256:
+            invocation_trace.add({"kind":"context_budget_rejected", "task":task, "round":round_no,
+                                  "estimated_input_tokens":estimate, "context_limit":context_limit})
+            raise ValueError("estimated request exceeds context budget; reduce original evidence")
+        text_bytes = sum(len(json.dumps(m.get("content", ""), ensure_ascii=False).encode("utf-8")) for m in request if not isinstance(m.get("content"), list))
+        # Image payloads are not text tokens; report separate conservative text/visual estimates.
+        for message in request:
+            if isinstance(message.get("content"), list):
+                text_bytes += sum(len(p.get("text", "").encode("utf-8")) for p in message["content"] if p.get("type") == "text")
+        invocation_trace.add({"kind": "request_budget", "task": task, "round": round_no, "text_token_upper_bound": text_bytes,
+                              "estimated_input_tokens":estimate, "context_limit":context_limit, "output_limit": output_limit, "visual_tokens": "backend-dependent"})
         invocation_trace.add({"kind": "structured_round", "task": task, "round": round_no, "errors": errors})
         while True:
             selected_format = formats[format_index]
             bound = chat.bind(format=selected_format) if selected_format is not None else chat
+            bound = _output_bound(bound, output_limit)
             invocation_trace.add({"kind": "output_mode", "task": task, "mode": "schema" if isinstance(selected_format, dict) else "json" if selected_format else "text"})
             try:
                 raw = caller(bound, request)
@@ -185,14 +257,14 @@ def source_versions() -> dict:
     names = {p.relative_to(root).as_posix() for p in (root / "core").glob("*.py")}
     names.update({"models/schemas.py", "services/accounting_policy.py", "services/classify.py",
                   "services/importdecl.py", "services/accounts.py", "services/taxid.py", "services/review.py",
-                  "db/models.py", "db/session.py", "config.py", "validation.py"})
+                  "db/models.py", "db/session.py", "config.py", "validation.py", "main.py", "static/js/validation.js"})
     sources = {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in sorted(names)}
     runtime = {name: hashlib.sha256((config.DATA_DIR / name).read_bytes()).hexdigest()
                if (config.DATA_DIR / name).exists() else None
                for name in ("accounting_policies.json", "accounts.json", "companies.json", "entry_examples.json")}
     from importlib.metadata import version, PackageNotFoundError
     dependencies = {}
-    for package in ("langchain-ollama", "ollama", "pydantic", "Pillow"):
+    for package in ("langchain-ollama", "ollama", "langchain-openai", "openai", "pydantic", "Pillow", "numpy", "opencv-python", "paddleocr", "paddlepaddle", "paddlepaddle-gpu"):
         try:
             dependencies[package] = version(package)
         except PackageNotFoundError:
@@ -200,11 +272,13 @@ def source_versions() -> dict:
     def digest(value):
         return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
     prompt_sources = {key: sources[key] for key in ("core/prompts.py", "core/doc_types.py", "core/doc_router.py")}
+    parameters = {"ollama_num_ctx": config.OLLAMA_NUM_CTX, "output_limits": OUTPUT_LIMITS, "repair_char_limit": REPAIR_CHAR_LIMIT}
     return {"hash_version": 2, "source_sha256": sources, "runtime_sha256": runtime, "dependencies": dependencies,
-            "recognition_contract": {"version": 1, "coordinates": "normalized_1000", "max_regions": 16, "split_iou_max": .1, "supplement_tasks": 1, "supplement_max_edge": 2400},
+            "recognition_contract": {"version": 2, "coordinates": "normalized_1000", "max_regions": 16, "split_iou_max": .1, "supplement_tasks": 1, "supplement_max_edge": 2400, "output_limits": OUTPUT_LIMITS, "repair_char_limit": REPAIR_CHAR_LIMIT},
             "prompt_version_sha256": digest(prompt_sources), "code_version_sha256": digest(sources),
             "policy_version_sha256": digest({"source": sources["services/accounting_policy.py"], "runtime": runtime}),
-            "execution_version_sha256": digest({"sources": sources, "runtime": runtime, "dependencies": dependencies})}
+            "execution_version_sha256": digest({"sources": sources, "runtime": runtime, "dependencies": dependencies, "parameters":parameters}),
+            "model_runtime": parameters}
 
 
 def same_execution_version(saved: dict) -> bool:

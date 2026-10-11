@@ -60,6 +60,10 @@ def _warning_issue(warning: Any) -> dict | None:
         return _issue("date_parse", "date", "review", "date", text)
     if "補讀候選缺乏獨立證據" in text or "多個有效 QR" in text:
         return _issue("evidence_conflict", "evidence", "review", "", text)
+    if "欄位語意" in text or "OCR 原圖與增強" in text or "QR 原圖與增強" in text or "幣別證據衝突" in text:
+        return _issue("evidence_conflict", "evidence", "review", "", text)
+    if "文字區域可能模糊" in text:
+        return _issue("image_blur", "image", "review", "", text)
     if "超過 5 年" in text or "原始傳票借貸不平衡" in text:
         return _issue("source_anomaly", "source", "advisory", "", text)
     if "舊收據稅額" in text:
@@ -150,6 +154,8 @@ def evaluate_quality(voucher: dict) -> dict:
                    or any(_has_content(row) for row in entries))
     content_kind = "unknown" if not known_type or is_other else "supporting" if is_supporting else "document"
     issues: list[dict] = []
+    if (voucher.get("origin") or {}).get("layout_fallback"):
+        issues.append(_issue("layout_fallback", "layout", "review", "origin", "單張回退擷取，請人工核對完整單據範圍"))
     if not has_content:
         issues.append(_issue("empty_content", "content", "review", "fields", "尚無可評估的單據內容"))
     if not known_type or is_other:

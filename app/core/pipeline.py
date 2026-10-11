@@ -63,7 +63,7 @@ def prepare_pages(file_path: str) -> list[Voucher]:
         with invocation_trace.capture(folder / "trace.json"):
             invocation_trace.add({"kind": "snapshot", "versions": model_invocation.source_versions(), "settings": settings_store.get_settings()})
             input_path = page_layout.crop(source, {"box": [0,0,1000,1000]}, folder / "input.png", max_edge=1180)
-            layout = page_layout.detect(input_path)
+            layout = page_layout.detect(input_path, native_path=source)
             source_origin = {**page_layout.origin(source, {"box": [0,0,1000,1000]}, index+1),
                              "record_role": "source_page", "source_token": token, "layout": layout}
             parent = Voucher.model_validate({"doc_type_key": layout["type"], "origin": source_origin,
@@ -71,12 +71,12 @@ def prepare_pages(file_path: str) -> list[Voucher]:
             parent.source_file = f"{Path(file_path).name} p{index+1}"
             parent.source_image = source
             out.append(parent)
-            if not layout["auto_split"] or layout["content_kind"] == "blank":
+            if not layout["auto_split"] or layout["content_kind"] != "document":
                 continue
             for document_index, region in enumerate(layout["regions"]):
                 crop_path = page_layout.crop(source, region, folder / f"document_{document_index}.png")
                 child = Voucher.model_validate({"doc_type_key": region["type"], "doc_type": doc_types.get(region["type"])["label"],
-                    "origin": {**page_layout.origin(source, region, index+1), "source_token": token, "document_index": document_index},
+                    "origin": {**page_layout.origin(source, region, index+1), "source_token": token, "document_index": document_index, "layout_fallback":layout.get("fallback_reason")},
                     "quality": {"version": 1, "state": "unassessed", "content_kind": layout["content_kind"], "issues": []}})
                 child.source_file = parent.source_file
                 child.source_image = crop_path
@@ -137,11 +137,19 @@ def extract_for_type(image_path: str, type_key: str, hint: str = "", company: st
     except Exception as exc:  # noqa: BLE001
         logger.warning("OCR 不可用，改用 VLM 直讀：%s", exc)
 
-    ocr_lines, ocr_text = [], ""
+    ocr_lines, ocr_text, image_conditions = [], "", None
     if ocr is not None:
         try:
             with activity.stage("ocr", settings["ocr"]):
-                ocr_lines = ocr.recognize(image_path)
+                from app.core import image_evidence
+                from PIL import Image
+                ocr_input = image_evidence.native_ocr(native_path or image_path, Path(image_path).with_name(Path(image_path).stem + "_ocr.png"))
+                native_lines = ocr.recognize(ocr_input)
+                _, image_conditions = image_evidence.enhancement(ocr_input, native_lines, None)
+                from app.core import invocation_trace
+                invocation_trace.add({"kind":"image_assessment", **image_conditions})
+                with Image.open(ocr_input) as original, Image.open(image_path) as target:
+                    ocr_lines = image_evidence.map_lines(native_lines, original.size, target.size)
             ocr_text = ocr.plain_text(ocr_lines)
             ocr_used = settings["ocr"]
         except Exception as exc:  # noqa: BLE001
@@ -150,7 +158,7 @@ def extract_for_type(image_path: str, type_key: str, hint: str = "", company: st
 
     chat = model_factory.get_chat_model(struct_provider, struct_model, temperature=0.0)
     voucher = extract_evidence(image_path, type_key, chat, ocr_lines, ocr_text, hint=hint, company=company,
-                               confirmed_fields=confirmed_fields, native_path=native_path)
+                               confirmed_fields=confirmed_fields, native_path=native_path, image_conditions=image_conditions)
     voucher.ocr_provider = ocr_used
     voucher.structure_model = settings["structure"]
     voucher.source_image = image_path
@@ -217,11 +225,16 @@ def _validate_image_extraction(obj: dict, type_key: str, mode: str, image_path: 
 
 
 def extract_evidence(image_path: str, type_key: str, chat, ocr_lines: list, ocr_text: str,
-                     *, mode="image", hint="", company="", confirmed_fields=None, native_path=None) -> Voucher:
+                     *, mode="image", hint="", company="", confirmed_fields=None, native_path=None, image_conditions=None) -> Voucher:
     from app.core import barcode, prompts, model_invocation
     context = _company_context(company)
     model_invocation.invocation_trace.add({"kind": "ocr", "lines": ocr_lines, "text": ocr_text})
-    candidates = barcode.parse_einvoice_qr_candidates(barcode.decode(image_path)) if mode == "image" and type_key == "invoice" else []
+    context["ocr_enabled"] = settings_store.parse_setting(settings_store.get_settings()["ocr"])[0] not in ("disabled", "none")
+    context["image_conditions"] = image_conditions or {}
+    qr_info = barcode.decode_diagnostics(native_path or image_path) if mode == "image" and type_key == "invoice" else None
+    candidates = qr_info["candidates"] if qr_info else []
+    if qr_info:
+        model_invocation.invocation_trace.add({"kind": "qr_diagnostic", **qr_info})
     if len(candidates) == 1:
         context["qr"] = candidates[0]
     content = [{"type": "text", "text": prompts.build_extract_prompt(type_key, mode=mode, ocr_text=ocr_text, hint=hint, evidence=context)}]
@@ -233,6 +246,8 @@ def extract_evidence(image_path: str, type_key: str, chat, ocr_lines: list, ocr_
                 schema=prompts.extraction_schema(type_key, mode))
     _record_evidence(data, "model", mode)
     data["validation_warnings"] = []
+    if (image_conditions or {}).get("blur_warning"):
+        data["validation_warnings"].append("文字區域可能模糊，請覆核原圖；未進行生成式修復")
     if len(candidates) == 1:
         _merge_evidence_fields(data, candidates[0], "qr")
     elif len(candidates) > 1:
@@ -244,7 +259,10 @@ def extract_evidence(image_path: str, type_key: str, chat, ocr_lines: list, ocr_
         confirmed_fields = prompts.validate_extraction({"fields": confirmed_fields}, type_key, mode, list(confirmed_fields))["fields"]
         _merge_evidence_fields(data, confirmed_fields, "manual")
     from app.core import supplement
-    supplement.apply(data, type_key, chat, image_path, mode=mode, ocr_text=ocr_text,
+    evidence_text = ocr_text + "\n" + supplement.spatial_text(ocr_lines)
+    model_invocation.invocation_trace.add({"kind":"ocr_semantic_rows", "text":evidence_text})
+    supplement.normalize_candidates(data, type_key, evidence_text, context.get("qr"), confirmed_fields)
+    supplement.apply(data, type_key, chat, image_path, mode=mode, ocr_text=evidence_text,
                      context=context, confirmed_fields=confirmed_fields, native_path=native_path)
     if doc_types.get(type_key).get("has_entries") and ocr_lines:
         from copy import deepcopy
@@ -540,6 +558,9 @@ def _build_voucher(data: dict, type_key: str, *, derive_entries: bool = True, no
                               "舊收據稅額語意未確認，請區分營業稅與扣繳稅額",
                               "中文大寫與數字金額衝突，保留數字欄與大寫原文供人工核對")]
     evidence = data.get("field_evidence") or {}
+    manual_fields = {key: raw_fields.get(key) for key in raw_fields if any(
+        record.get("source") == "manual" and record.get("selected") for record in evidence.get("fields." + key, []))}
+    f.update(manual_fields)
     if doc_types.receipt_tax_ambiguous(type_key, raw_fields, evidence):
         path = "fields.tax_amount"
         if not any(r.get("selected") and r.get("semantic_role") == "unconfirmed_tax" for r in evidence.get(path, [])):
@@ -558,6 +579,8 @@ def _build_voucher(data: dict, type_key: str, *, derive_entries: bool = True, no
 
     for field in spec["fields"]:
         key, kind = field["key"], field["kind"]
+        if key in manual_fields:
+            continue
         value = f.get(key)
         if value in (None, ""):
             f[key] = None
@@ -595,6 +618,8 @@ def _build_voucher(data: dict, type_key: str, *, derive_entries: bool = True, no
     for index, item in enumerate(data.get("items") or []):
         for field in spec["item_fields"]:
             key = field["key"]
+            if any(r.get("source") == "manual" and r.get("selected") for r in evidence.get(f"items[{index}].{key}", [])):
+                continue
             if field["kind"] == "number" and item.get(key) in (None, ""):
                 raw = selected_raw(f"items[{index}].{key}")
                 if raw not in (None, "") and invalid_number(raw):
@@ -607,6 +632,12 @@ def _build_voucher(data: dict, type_key: str, *, derive_entries: bool = True, no
                 else:
                     item[key] = number
     common = {key: first_present(f, aliases) for key, aliases in spec["common_fields"].items()}
+    if common.get("date"):
+        common["date"] = _norm_roc_date(common["date"])
+    for key in ("subtotal", "tax_amount", "total_amount"):
+        if key in common and common[key] not in (None, ""):
+            candidate = _norm_amount(common[key])
+            common[key] = None if invalid_number(candidate) else candidate
     if doc_types.receipt_tax_ambiguous(type_key, f, evidence):
         common["tax_amount"] = None
     payload = {

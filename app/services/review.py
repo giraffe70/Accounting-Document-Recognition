@@ -485,7 +485,7 @@ def _route_unconfirmed_page(rec):
         return None, None
     source = config.UPLOAD_DIR / rec.image_path
     layout = page_layout.detect(str(source))
-    if (layout["auto_split"] and len(layout["regions"]) == 1
+    if (layout["content_kind"] == "document" and layout["auto_split"] and len(layout["regions"]) == 1
             and layout["regions"][0]["rotate"] == 0 and layout["regions"][0]["box"] == [0,0,1000,1000]):
         return None, layout["regions"][0]["type"]
     origin = {**page_layout.origin(source, {"box":[0,0,1000,1000]}, current.get("origin", {}).get("page_no", 1)), "record_role":"source_page", "layout": layout}
@@ -497,12 +497,12 @@ def _route_unconfirmed_page(rec):
         parent.record_role = "source_page"
         parent.current_json = json.dumps({**current, "origin": origin, "quality":{"version":1,"state":"needs_review","content_kind":layout["content_kind"],"issues":[{"code":"manual_split","message":"來源頁保留，請確認子單據"}]}}, ensure_ascii=False)
         session.add(parent); session.commit(); session.refresh(parent)
-    if layout["auto_split"] and layout["content_kind"] != "blank":
+    if layout["auto_split"] and layout["content_kind"] == "document":
         for index, region in enumerate(layout["regions"]):
             target = config.UPLOAD_DIR / "_pages" / f"source_{rec.id}" / f"document_{index}.png"
             native = page_layout.crop(source, region, target)
             voucher = Voucher.model_validate({"doc_type_key": region["type"], "doc_type": page_layout.doc_types.get(region["type"])["label"],
-                "origin": {**page_layout.origin(source, region, origin["page_no"]), "document_index":index},
+                "origin": {**page_layout.origin(source, region, origin["page_no"]), "document_index":index, "layout_fallback":layout.get("fallback_reason")},
                 "quality":{"version":1,"state":"unassessed","content_kind":layout["content_kind"],"issues":[]}})
             voucher.source_image, voucher.source_file = native, rec.source_file
             save_voucher(voucher, rec.company, ReviewStatus.prepared, source_parent_id=rec.id)

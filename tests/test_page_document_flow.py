@@ -210,7 +210,8 @@ class PageDocumentValidationTests(unittest.TestCase):
 
             with patch.object(validation, "DB", db_path), patch.object(validation, "RUNS", root / "runs"), \
                  patch.object(validation, "_connect", side_effect=connect), \
-                 patch.object(validation, "_run_child", side_effect=child_runner):
+                 patch.object(validation, "_run_child", side_effect=child_runner), \
+                 patch.object(validation, "_handshake"), patch.object(validation, "runtime_status", return_value={"ready":True}):
                 result = validation._run_page_child(self._payload(image, "run-resume", "page-resume"), 30)["data"]
             self.assertEqual(calls, ["layout", "document"])
             self.assertEqual(result["documents"][0]["voucher"]["voucher_id"], "SAVED")

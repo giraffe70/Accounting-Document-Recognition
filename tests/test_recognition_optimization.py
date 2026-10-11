@@ -49,7 +49,7 @@ class BoxAndLayoutTests(unittest.TestCase):
         accepted = page_layout.validate_layout({"type": "other", "rotate": 0, "reason": "multiple",
                                                 "regions": regions})
         self.assertEqual(len(accepted["regions"]), 3)
-        self.assertTrue(accepted["auto_split"])
+        self.assertFalse(accepted["auto_split"])  # Geometry alone is insufficient independent evidence.
 
         uncertain = page_layout.validate_layout({"type": "other", "rotate": 0, "reason": "uncertain",
             "regions": [{**regions[0], "confidence": "low"},
@@ -110,44 +110,29 @@ class InvocationTests(unittest.TestCase):
         self.assertEqual(retry["previous_output_raw"], '{"ok": "wrong"}')
 
     def test_ollama_format_rejection_falls_back_but_generic_error_does_not(self):
-        class FakeOllama:
-            __module__ = "langchain_ollama.fake"
-
-            def __init__(self):
-                self.formats = []
-
-            def bind(self, **kwargs):
-                self.formats.append(kwargs["format"])
-                return self
-
-        chat = FakeOllama()
-        calls = []
-
-        def reject_schema_then_return_json(_chat, _request):
-            calls.append(_chat.formats[-1])
-            if isinstance(_chat.formats[-1], dict):
-                raise ValueError("unsupported format")
-            return '{"ok": true}'
-
+        from langchain_ollama import ChatOllama
+        from ollama import ChatResponse, Message, ResponseError
+        chat = ChatOllama(model="offline-test", base_url="http://127.0.0.1:1", temperature=0, seed=42)
+        response = ChatResponse(model="offline-test",message=Message(role="assistant",content='{"ok":true}'),
+                                done=True,done_reason="stop")
+        def reject_schema_then_return_json(**kwargs):
+            self.assertNotIn("num_predict",kwargs)
+            self.assertEqual(kwargs["options"]["num_predict"],4096)
+            self.assertEqual(kwargs["options"]["seed"],42)
+            if isinstance(kwargs["format"],dict):
+                raise ResponseError("unsupported format",status_code=400)
+            return iter([response])
         schema = {"type": "object", "properties": {"ok": {"type": "boolean"}}}
-        result = model_invocation.invoke_structured(chat, "synthetic", lambda raw: raw,
-                                                    invoke=reject_schema_then_return_json, schema=schema)
+        with patch.object(chat._client,"chat",autospec=True,side_effect=reject_schema_then_return_json) as client_chat:
+            result = model_invocation.invoke_structured(chat, "synthetic", lambda raw: raw, schema=schema)
         self.assertEqual(result, {"ok": True})
-        self.assertEqual(len(calls), 2)
-        self.assertEqual(calls[0], schema)
-        self.assertEqual(calls[1], "json")
-
-        generic = FakeOllama()
-        attempts = []
-
-        def fail_generically(_chat, _request):
-            attempts.append(_chat.formats[-1])
-            raise RuntimeError("connection failed")
-
-        with self.assertRaisesRegex(RuntimeError, "connection failed"):
-            model_invocation.invoke_structured(generic, "synthetic", lambda raw: raw,
-                                               invoke=fail_generically, schema=schema)
-        self.assertEqual(attempts, [schema])
+        self.assertEqual([call.kwargs["format"] for call in client_chat.call_args_list],[schema,"json"])
+        # Transport retries remain in schema mode; generic failures do not weaken it.
+        with patch.object(chat._client,"chat",autospec=True,side_effect=RuntimeError("connection failed")) as client_chat, \
+             patch("time.sleep"):
+            with self.assertRaisesRegex(RuntimeError, "connection failed"):
+                model_invocation.invoke_structured(chat,"synthetic",lambda raw:raw,schema=schema)
+        self.assertEqual([call.kwargs["format"] for call in client_chat.call_args_list],[schema]*3)
 
 
 class SupplementMoneyTests(unittest.TestCase):

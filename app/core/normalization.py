@@ -30,6 +30,19 @@ def _integer_words(s: str) -> int:
     return total + section + number
 
 
+def amount_annotation(value):
+    """Return a candidate for a single amount with a known printed annotation."""
+    if not isinstance(value, str):
+        return None
+    text = unicodedata.normalize("NFKC", value).strip()
+    match = re.fullmatch(r"(?:(NT\$|TWD|新臺幣|新台幣)\s*)?(-?\d+(?:,\d{3})*(?:\.\d+)?)\s*(?:元\s*)?(\((?:現金|信用卡|刷卡|轉帳|匯款)\)|TX|TZ|TE)", text, re.I)
+    if not match:
+        return None
+    number = Decimal(match[2].replace(",", ""))
+    return {"raw": value, "value": int(number) if number == number.to_integral() else float(number),
+            "annotation": match[3], "currency": "TWD" if match[1] or "元" in text else None}
+
+
 def norm_amount(value):
     if value is None or isinstance(value, (int, float)) and not isinstance(value, bool):
         return value

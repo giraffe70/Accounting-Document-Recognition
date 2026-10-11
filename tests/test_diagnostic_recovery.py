@@ -31,7 +31,7 @@ class DiagnosticRecoveryTests(unittest.TestCase):
         with _temporary_directory() as temp:
             root = Path(temp)
             runs = root / "runs"
-            payload = {"run_id": "run-error", "id": "result-error", "setting": "synthetic"}
+            payload = {"run_id": "run-error", "id": "result-error", "setting": "synthetic", "worker_protocol":validation.WORKER_PROTOCOL, "parent_build":validation.LOADED_BUILD, "execution_version_sha256":validation._versioning.source_versions()["execution_version_sha256"]}
             trace_path = runs / payload["run_id"] / payload["id"] / "trace.json"
 
             def fail_after_trace(_payload):
@@ -83,7 +83,7 @@ class DiagnosticRecoveryTests(unittest.TestCase):
             root = Path(temp)
             runs = root / "runs"
             database = root / "validation.db"
-            payload = {"run_id": "run-timeout", "id": "result-timeout", "settings": {"model": "fake"}}
+            payload = {"run_id": "run-timeout", "id": "result-timeout", "settings": {"model": "fake"}, "worker_protocol":validation.WORKER_PROTOCOL, "parent_build":validation.LOADED_BUILD, "execution_version_sha256":validation._versioning.source_versions()["execution_version_sha256"]}
             trace_path = runs / payload["run_id"] / payload["id"] / "trace.json"
             trace_path.parent.mkdir(parents=True, exist_ok=True)
             invocation_trace.atomic_json(trace_path, [
@@ -146,7 +146,8 @@ class DiagnosticRecoveryTests(unittest.TestCase):
 
             with patch.object(validation, "RUNS", runs), patch.object(validation, "DB", database), \
                  patch.object(validation, "_connect", side_effect=connect), \
-                 patch.object(validation.mp, "get_context", return_value=FakeContext()):
+                 patch.object(validation.mp, "get_context", return_value=FakeContext()), \
+                 patch.object(validation, "runtime_status", return_value={"ready":True}):
                 response = validation._run_child(payload, timeout=0.01)
 
             self.assertTrue(process.started)

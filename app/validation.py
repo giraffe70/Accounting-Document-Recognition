@@ -38,6 +38,74 @@ MAX_FILE = int(os.getenv("VALIDATION_MAX_FILE_MB", "100")) * 1024 * 1024
 MAX_TOTAL = int(os.getenv("VALIDATION_MAX_TOTAL_MB", "2048")) * 1024 * 1024
 MAX_FILES = int(os.getenv("VALIDATION_MAX_FILES", "5000"))
 SUPPORTED = config.ALLOWED_SUFFIXES
+WORKER_PROTOCOL = 2
+RESULT_CONTRACT = 2
+SCHEMA_VERSION = 2
+from app.core import doc_types as _doc_types, model_invocation as _versioning
+LOADED_BUILD = _versioning.source_versions()["code_version_sha256"]
+
+
+def _schema_ready(con):
+    return (con.execute("PRAGMA user_version").fetchone()[0] >= SCHEMA_VERSION
+            and bool(con.execute("SELECT 1 FROM sqlite_master WHERE name='document_results'").fetchone())
+            and {"id", "parent_result_id", "document_index", "status", "data_json", "error"} <= {r[1] for r in con.execute("PRAGMA table_info(document_results)")}
+            and "page_json" in {r[1] for r in con.execute("PRAGMA table_info(results)")})
+
+
+@router.get("/runtime")
+def runtime_status():
+    disk = _versioning.source_versions()["code_version_sha256"]
+    try:
+        with _connect() as con:
+            schema_ready = _schema_ready(con)
+    except sqlite3.Error:
+        schema_ready = False
+    return {"worker_protocol": WORKER_PROTOCOL, "loaded_version": LOADED_BUILD, "disk_version": disk,
+            "result_contract_version":RESULT_CONTRACT, "schema_version":SCHEMA_VERSION,
+            "restart_required": disk != LOADED_BUILD, "schema_ready": schema_ready,
+            "ready": schema_ready and disk == LOADED_BUILD}
+
+
+def _handshake(payload):
+    if payload.get("worker_protocol") != WORKER_PROTOCOL or payload.get("parent_build") != LOADED_BUILD:
+        raise ValueError("父子執行協定或載入版本不一致，請重啟服務並建立新批次")
+    if payload.get("execution_version_sha256") != _versioning.source_versions()["execution_version_sha256"]:
+        raise ValueError("批次版本不一致，請建立新批次")
+
+
+def _latest_rows(rows):
+    selected = {}
+    for row in rows:
+        if row["warmup"]:
+            continue
+        key = (row["page_id"], row["combo_id"], row["repeat_no"])
+        if key not in selected or (row["attempt"], row.get("_rowid", 0)) > (selected[key]["attempt"], selected[key].get("_rowid", 0)):
+            selected[key] = row
+    return list(selected.values())
+
+
+def _document_contract(document):
+    if not isinstance(document,dict) or not isinstance(document.get("voucher"),dict):
+        return False
+    voucher = document.get("voucher") or {}
+    quality = voucher.get("quality") or {}
+    return (isinstance(voucher, dict) and isinstance(voucher.get("fields"), dict)
+            and isinstance(voucher.get("items"), list) and isinstance(voucher.get("entries"), list)
+            and voucher.get("doc_type_key") in _doc_types.DOC_TYPES
+            and isinstance(quality,dict) and quality.get("version") == 1
+            and quality.get("state") in ("usable", "needs_review", "insufficient")
+            and isinstance(quality.get("issues"),list))
+
+
+def _integrity(row, documents):
+    page = json.loads(row.get("page_json") or "{}")
+    version = page.get("result_contract_version")
+    complete = row.get("status") != "succeeded" or bool(documents and all(d.get("status") == "succeeded" and _document_contract(d) for d in documents))
+    if row.get("status") in ("succeeded", "partial", "skipped"):
+        complete = complete and isinstance(page.get("layout"), dict) and isinstance(page.get("quality"), dict)
+    ok = version == RESULT_CONTRACT and complete and not page.get("integrity_errors")
+    return {"ok": ok, "result_contract_version": version,
+            "reason": "" if ok else "歷史或不完整結果契約，無法可靠評估"}
 
 _db_lock = threading.RLock()
 _wake = threading.Event()
@@ -51,8 +119,16 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+class _ClosingConnection(sqlite3.Connection):
+    def __exit__(self, *args):
+        try:
+            return super().__exit__(*args)
+        finally:
+            self.close()
+
+
 def _connect():
-    con = sqlite3.connect(DB, timeout=30)
+    con = sqlite3.connect(DB, timeout=30, factory=_ClosingConnection)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA foreign_keys=ON")
@@ -111,6 +187,7 @@ def init_validation() -> None:
         con.execute("UPDATE results SET status='queued', started_at=NULL WHERE status='running'")
         if "page_json" not in {row[1] for row in con.execute("PRAGMA table_info(results)")}:
             con.execute("ALTER TABLE results ADD COLUMN page_json TEXT DEFAULT '{}'")
+        con.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
     if not _scheduler_thread or not _scheduler_thread.is_alive():
         _scheduler_thread = threading.Thread(target=_scheduler, name="validation-scheduler", daemon=True)
         _scheduler_thread.start()
@@ -313,6 +390,8 @@ def _normalize_combos(payload: dict):
 
 @router.post("/runs")
 def create_run(payload: dict):
+    if not runtime_status()["ready"]:
+        return JSONResponse({"detail": "執行版本或資料庫未就緒，請重啟服務"}, status_code=409)
     try:
         combos = _normalize_combos(payload)
         repeats = max(1, min(10, int(payload.get("repeats", 1))))
@@ -330,10 +409,11 @@ def create_run(payload: dict):
         rid = uuid.uuid4().hex
         from app.core import model_invocation
         settings = {"combinations": combos, "repeats": repeats,
+                    "worker_protocol": WORKER_PROTOCOL, "parent_build": LOADED_BUILD, "result_contract_version": RESULT_CONTRACT,
                     "warmup": bool(payload.get("warmup", False)), "timeout_seconds": timeout,
                     "max_edge": max_edge, "concurrency": 1,
                     **model_invocation.source_versions(),
-                    "model_parameters": {"temperature": 0, "seed": 42},
+                    "model_parameters": {"temperature": 0, "seed": 42, "num_ctx":config.OLLAMA_NUM_CTX, "output_limits":model_invocation.OUTPUT_LIMITS},
                     "environment": {"python": platform.python_version(), "platform": platform.platform(),
                                     "processor": platform.processor()}}
         tasks = []
@@ -361,7 +441,8 @@ def list_runs():
     with _connect() as con:
         rows = con.execute("""SELECT r.*,d.name dataset_name FROM runs r
                             JOIN datasets d ON d.id=r.dataset_id ORDER BY r.created_at DESC""").fetchall()
-    return {"items": [_run_dict(x, include_settings=False) for x in rows]}
+        items = [{**_run_dict(x, include_settings=False), "latest_summary": _latest_summary(con, x["id"])} for x in rows]
+    return {"items": items}
 
 
 def _run_dict(row, include_settings=True):
@@ -382,37 +463,45 @@ def _percentile(values, p):
     return ordered[lo] if lo == hi else ordered[lo] * (hi - pos) + ordered[hi] * (pos - lo)
 
 
-def _statistics(con, run_id):
-    rows = con.execute("""SELECT id,page_id,voucher_json,combo_id,combo_name,mode,status,actual_path,timings_json,warmup
-                        FROM results WHERE run_id=? ORDER BY rowid""", (run_id,)).fetchall()
+def _statistics(con, run_id, latest=False):
+    rows = [dict(r) for r in con.execute("SELECT rowid _rowid,* FROM results WHERE run_id=? ORDER BY rowid", (run_id,))]
+    if latest:
+        rows = _latest_rows(rows)
     groups = {}
     for row in rows:
-        key = (row["combo_id"], row["actual_path"] or row["mode"])
+        key = (row["combo_id"], row["mode"] if latest else row["actual_path"] or row["mode"])
         g = groups.setdefault(key, {"combo_id": row["combo_id"], "combo_name": row["combo_name"],
                                     "actual_path": key[1], "samples": 0, "succeeded": 0,
                                     "failed": 0, "warmups": 0, "times": [], "wall_seconds": 0,
                                     "first_seconds": None})
         for metric in ("document_count", "insufficient_count", "location_issue_count", "needs_review_count", "warning_document_count", "warning_page_count", "quality_unassessed_count", "skipped", "partial"):
             g.setdefault(metric, 0)
+        g.setdefault("integrity_ok", True)
+        g.setdefault("path_counts", {})
+        path = row["actual_path"] or row["mode"]
+        g["path_counts"][path] = g["path_counts"].get(path, 0) + 1
         g.setdefault("warning_pages", set())
         g.setdefault("warning_documents", set())
         timing = json.loads(row["timings_json"] or "{}")
         if row["warmup"]:
             g["warmups"] += 1
             continue
+        g["selected_samples"] = g.get("selected_samples", 0) + 1
         if row["status"] not in ("succeeded", "partial", "skipped", "failed", "timeout"):
             continue
         g["samples"] += 1
         total = float(timing.get("complete_seconds") or 0)
         g["wall_seconds"] += total
         docs = _documents(con, row["id"])
-        if not docs and row["status"] == "succeeded":
+        if latest:
+            g["integrity_ok"] = g["integrity_ok"] and _integrity(row, docs)["ok"]
+        if not docs and row["status"] == "succeeded" and json.loads(row["voucher_json"] or "{}"):
             docs = [{"voucher": json.loads(row["voucher_json"] or "{}"), "status": "succeeded"}]
         g["document_count"] += len(docs)
         page_warning = False
         for document_index, document in enumerate(docs):
-            voucher = document.get("voucher") or {}
-            quality = voucher.get("quality") or {}
+            voucher = document.get("voucher") if isinstance(document.get("voucher"), dict) else {}
+            quality = voucher.get("quality") if isinstance(voucher.get("quality"), dict) else {}
             issues = quality.get("issues") or []
             state = quality.get("state", "unassessed")
             g["insufficient_count"] += state == "insufficient"
@@ -447,8 +536,26 @@ def _statistics(con, run_id):
                   "p50_seconds": _percentile(vals, .5), "p95_seconds": _percentile(vals, .95),
                   "throughput_per_minute": (g["succeeded"] * 60 / g["wall_seconds"]
                                              if g["wall_seconds"] else None)})
+        if latest and not g["integrity_ok"]:
+            g["completed_rate"] = None
+        elif latest:
+            denominator = g.get("selected_samples", 0) - g["skipped"]
+            g["completed_rate"] = g["succeeded"] / denominator if denominator else None
+        g["basis"] = "latest" if latest else "history"
         output.append(g)
     return output
+
+
+def _latest_summary(con, run_id, stats=None):
+    rows = _latest_rows([dict(r) for r in con.execute("SELECT rowid _rowid,* FROM results WHERE run_id=?", (run_id,))])
+    summary = {k: sum(r["status"] == k for r in rows) for k in ("succeeded", "failed", "partial", "skipped", "queued", "running", "timeout", "cancelled", "terminated")}
+    summary["failed"] += summary["timeout"]
+    summary.update(total=len(rows), done=sum(r["status"] not in ("queued", "running") for r in rows))
+    stats = stats if stats is not None else _statistics(con, run_id, latest=True)
+    for key in ("document_count", "insufficient_count", "needs_review_count", "location_issue_count", "quality_unassessed_count"):
+        summary[key] = sum(g.get(key, 0) for g in stats)
+    summary["integrity_ok"] = all(g["integrity_ok"] for g in stats)
+    return summary
 
 
 @router.get("/runs/{run_id}")
@@ -458,13 +565,17 @@ def get_run(run_id: str):
         if not run:
             return JSONResponse({"detail": "找不到驗證批次"}, status_code=404)
         stats = _statistics(con, run_id)
-    return {**_run_dict(run), "statistics": stats}
+        latest_stats = _statistics(con, run_id, latest=True)
+        summary = _latest_summary(con, run_id, latest_stats)
+    return {**_run_dict(run), "statistics": stats, "latest_statistics": latest_stats, "latest_summary": summary}
 
 
 @router.get("/runs/{run_id}/results")
 def list_results(run_id: str, combo_id: str = "", status: str = "", source: str = "",
-                 page: int = Query(1, ge=1), page_size: int = Query(100, ge=1, le=500)):
+                 page: int = Query(1, ge=1), page_size: int = Query(100, ge=1, le=500), view: str = Query("history", pattern="^(latest|history)$")):
     where, args = ["r.run_id=?"], [run_id]
+    if view == "latest":
+        where.append("r.warmup=0 AND NOT EXISTS (SELECT 1 FROM results newer WHERE newer.run_id=r.run_id AND newer.page_id=r.page_id AND newer.combo_id=r.combo_id AND newer.repeat_no=r.repeat_no AND newer.warmup=0 AND (newer.attempt>r.attempt OR (newer.attempt=r.attempt AND newer.rowid>r.rowid)))")
     if combo_id:
         where.append("r.combo_id=?"); args.append(combo_id)
     if status:
@@ -498,6 +609,9 @@ def get_result(result_id: str):
     if not result:
         return JSONResponse({"detail": "找不到結果"}, status_code=404)
     item = _row(result)
+    with _connect() as con:
+        item["integrity"] = _integrity(item, _documents(con, result_id))
+    item["diagnostics_available"] = bool(item.get("result_dir")) or (RUNS/item["run_id"]/result_id).is_dir()
     for key in ("voucher_json", "timings_json", "trace_json", "ocr_json", "boxes_json"):
         item[key.removesuffix("_json")] = json.loads(item.pop(key) or ("[]" if key in ("trace_json", "ocr_json") else "{}"))
     item["artifacts"] = [{**_row(x), "url": f"/api/validation/artifacts/{x['id']}"} for x in arts]
@@ -515,10 +629,90 @@ def get_result(result_id: str):
 
 def _documents(con, result_id):
     if not con.execute("SELECT 1 FROM sqlite_master WHERE name='document_results'").fetchone():
-        return []
+        raise RuntimeError("validation schema migration missing: document_results")
     return [{**json.loads(row["data_json"]), "id": row["id"], "document_index": row["document_index"],
              "status": row["status"], "error": row["error"]} for row in con.execute(
                  "SELECT * FROM document_results WHERE parent_result_id=? ORDER BY document_index", (result_id,))]
+
+
+def _diagnostic_paths(result_id):
+    with _connect() as con:
+        row = con.execute("SELECT r.*,p.page_path FROM results r JOIN pages p ON p.id=r.page_id WHERE r.id=?", (result_id,)).fetchone()
+    if not row:
+        return None
+    root = (RUNS / row["run_id"]).resolve()
+    directory = Path(row["result_dir"] or root / result_id).resolve()
+    if not directory.is_relative_to(root):
+        raise ValueError("診斷路徑不在批次目錄")
+    def read(name, default):
+        path = directory / name
+        if path.is_file() and path.resolve().is_relative_to(root):
+            return json.loads(path.read_text(encoding="utf-8"))
+        return default
+    data = {"trusted": False, "layout": read("layout.json", {}),
+        "documents": read("documents.json", []), "trace": read("trace.json", []), "artifacts": []}
+    if not isinstance(data["layout"], dict) or not isinstance(data["documents"], list) or not all(isinstance(d,dict) for d in data["documents"]):
+        raise ValueError("invalid saved diagnostic shape")
+    return row, root, directory, data
+
+
+@router.get("/results/{result_id}/diagnostics")
+def get_diagnostics(result_id: str):
+    try:
+        loaded = _diagnostic_paths(result_id)
+        if not loaded:
+            return JSONResponse({"detail": "找不到結果"}, status_code=404)
+        row, root, directory, data = loaded
+        prefix = f"/api/validation/results/{result_id}/diagnostics/file"
+        data["artifacts"] = [{"kind": "original", "url": prefix + "?kind=original"}]
+        for i, document in enumerate(data["documents"]):
+            arts = []
+            saved_artifacts = document.get("artifacts") or {}
+            if not isinstance(saved_artifacts, dict):
+                saved_artifacts = {}
+            for kind, item in saved_artifacts.items():
+                if not isinstance(item, dict) or not item.get("path"):
+                    continue
+                path = Path(item["path"]).resolve()
+                if path.is_relative_to(root) and path.is_file():
+                    arts.append({"kind": kind, "url": prefix + f"?kind={kind}&document_index={i}"})
+            if (directory / f"region_{i}.png").is_file():
+                arts.append({"kind": "input", "url": prefix + f"?kind=region&document_index={i}"})
+            document["document_index"] = i
+            document["artifacts"] = arts
+        from app.core.invocation_trace import _safe
+        return _safe(data)
+    except (OSError, ValueError, TypeError) as exc:
+        return JSONResponse({"detail": "診斷不可讀：" + str(exc)[:160]}, status_code=409)
+
+
+@router.get("/results/{result_id}/diagnostics/file")
+def diagnostic_file(result_id: str, kind: str, document_index: int = -1):
+    try:
+        loaded = _diagnostic_paths(result_id)
+        if not loaded:
+            raise ValueError("找不到結果")
+        row, root, directory, data = loaded
+        if kind == "original" and document_index == -1:
+            path = Path(row["page_path"]).resolve()
+            if not path.is_relative_to(DATASETS.resolve()):
+                raise ValueError("來源路徑不合法")
+        elif 0 <= document_index < len(data["documents"]):
+            if kind == "region":
+                path = directory / f"region_{document_index}.png"
+            else:
+                saved_artifacts = data["documents"][document_index].get("artifacts") or {}
+                art = saved_artifacts.get(kind, {}) if isinstance(saved_artifacts,dict) else {}
+                path = Path(art.get("path", "")).resolve()
+            if not path.resolve().is_relative_to(root):
+                raise ValueError("診斷路徑不合法")
+        else:
+            raise ValueError("診斷檔案不存在")
+        if not path.is_file():
+            raise ValueError("診斷檔案不存在")
+        return FileResponse(path)
+    except (OSError, ValueError, TypeError):
+        return JSONResponse({"detail": "診斷檔案不存在或路徑不合法"}, status_code=404)
 
 
 def _set_run_action(run_id, action):
@@ -530,9 +724,11 @@ def _set_run_action(run_id, action):
         if run["status"] == "terminated":
             return JSONResponse({"detail": "此批次已終止，無法續跑或重跑"}, status_code=409)
         if action in ("resume", "retry"):
+            if not runtime_status()["ready"]:
+                return JSONResponse({"detail": "服務版本或資料庫未就緒，請重啟服務"}, status_code=409)
             from app.core.model_invocation import same_execution_version
             saved = json.loads(run["settings_json"] or "{}")
-            if not same_execution_version(saved):
+            if not same_execution_version(saved) or saved.get("worker_protocol") != WORKER_PROTOCOL or saved.get("parent_build") != LOADED_BUILD:
                 return JSONResponse({"detail": "程式、契約或政策版本已改變（或屬舊版批次），請建立新驗證批次；歷史結果仍可查看匯出"}, status_code=409)
         if action == "terminate":
             if run["status"] not in ("queued", "running", "cancelling", "cancelled", "interrupted"):
@@ -564,8 +760,10 @@ def _set_run_action(run_id, action):
         elif action == "retry":
             if run["status"] in ("queued", "running", "cancelling"):
                 return JSONResponse({"detail": "批次執行中，請完成或取消後再重跑失敗項目"}, status_code=409)
-            con.execute("UPDATE results SET status='queued',finished_at=NULL WHERE run_id=? AND status='partial'", (run_id,))
-            failed = con.execute("SELECT * FROM results WHERE run_id=? AND status IN ('failed','timeout')", (run_id,)).fetchall()
+            latest = _latest_rows([dict(r) for r in con.execute("SELECT rowid _rowid,* FROM results WHERE run_id=?", (run_id,))])
+            for partial in (r for r in latest if r["status"] == "partial"):
+                con.execute("UPDATE results SET status='queued',finished_at=NULL WHERE id=?", (partial["id"],))
+            failed = [r for r in latest if r["status"] in ("failed", "timeout")]
             for old in failed:
                 con.execute("""INSERT INTO results
                   (id,run_id,page_id,combo_id,combo_name,mode,repeat_no,attempt,warmup,status,queued_at)
@@ -596,7 +794,11 @@ def retry_run(run_id: str): return _set_run_action(run_id, "retry")
 
 def _child_entry(conn, payload):
     try:
-        conn.send({"ok": True, "data": _recognize(payload)})
+        _handshake(payload)
+        data = _recognize(payload)
+        _handshake(payload)
+        conn.send({"ok": True, "worker_protocol": WORKER_PROTOCOL, "parent_build": LOADED_BUILD,
+                   "execution_version_sha256": payload["execution_version_sha256"], "data": data})
     except BaseException as exc:  # child must return diagnostic details
         data = _recover_diagnostics(payload)
         from app.core.invocation_trace import atomic_json
@@ -625,7 +827,7 @@ def _recover_diagnostics(payload):
 
 
 def _recognize_layout(payload):
-    from app.core import page_layout, invocation_trace, model_invocation, pipeline, settings_store, model_factory
+    from app.core import page_layout, invocation_trace, model_invocation, pipeline, settings_store, model_factory, image_evidence
     directory = RUNS / payload["run_id"] / payload["id"]
     directory.mkdir(parents=True, exist_ok=True)
     source = payload["page_path"]
@@ -641,16 +843,20 @@ def _recognize_layout(payload):
         if mode == "ocr_text":
             ocr = model_factory.get_ocr("paddle")
             with pipeline.activity.stage("ocr", "版面 OCR"):
+                input_path = image_evidence.native_ocr(source, directory / "layout_ocr.png")
                 _, rotation = pipeline._auto_orient_ocr(input_path, ocr)
+                invocation_trace.add({"kind":"layout_orientation", "degrees_cw":rotation, "upright_input":input_path, "coordinate_unit":"pixels"})
                 lines = ocr.recognize(input_path)
                 text = ocr.plain_text(lines)
             invocation_trace.add({"kind": "ocr", "lines": lines, "text": text})
-        layout = page_layout.detect(input_path, mode=mode, ocr_lines=lines, ocr_text=text, model_setting=combo["classify_model"])
+        layout = page_layout.detect(input_path, mode=mode, ocr_lines=lines, ocr_text=text, model_setting=combo["classify_model"], native_path=input_path if mode == "ocr_text" else source)
         if rotation:
             from app.core.geometry import rotate_box
             for region in layout["regions"]:
                 region["box"] = rotate_box(region["box"], (-rotation) % 360)
                 region["rotate"] = rotation
+            layout["source_evidence"]["upright_rotation"] = rotation
+            layout["source_evidence"]["evidence_frame"] = "upright_ocr_input"
         layout["execution_version_sha256"] = snapshot["execution_version_sha256"]
         invocation_trace.atomic_json(directory / "layout.json", layout)
     return {"layout": layout, "trace": trace, "ocr": lines, "result_dir": str(directory),
@@ -670,6 +876,10 @@ def _recognize(payload):
 def _run_page_child(payload, timeout, runner=None):
     from app.core import page_layout, invocation_trace
     persist = runner is None
+    if persist:
+        _handshake(payload)
+        if not runtime_status()["ready"]:
+            raise ValueError("驗證 schema 或執行版本未就緒")
     runner = runner or _run_child
     directory = RUNS / payload["run_id"] / payload["id"]
     saved_layout = directory / "layout.json"
@@ -687,8 +897,8 @@ def _run_page_child(payload, timeout, runner=None):
     base.update(documents=[], voucher={}, actual_path=payload["combo"]["mode"],
                 origin=page_layout.origin(payload["page_path"], {"box":[0,0,1000,1000]}, payload["page_no"]))
     base["timings"] = {"complete_seconds": float(layout_response.get("wall_seconds", 0)), "recognition_seconds": float(layout_response.get("wall_seconds", 0))}
-    if layout["content_kind"] == "blank" and layout["auto_split"]:
-        base.update(page_status="skipped", quality={"version":1,"state":"usable","content_kind":"blank","issues":[]})
+    if layout["content_kind"] in ("blank", "supporting", "non_voucher") and layout["auto_split"]:
+        base.update(page_status="skipped", skip_reason=layout["content_kind"], quality={"version":1,"state":"usable","content_kind":layout["content_kind"],"issues":[]})
         return {"ok": True, "data": base}
     if not layout["auto_split"]:
         base.update(page_status="partial", quality={"version":1,"state":"needs_review","content_kind":layout["content_kind"],"issues":[{"code":"manual_split","message":"版面區域須人工確認"}]})
@@ -700,6 +910,8 @@ def _run_page_child(payload, timeout, runner=None):
                 run = con.execute("SELECT status,cancel_requested FROM runs WHERE id=?", (payload["run_id"],)).fetchone()
             if run and (run["status"] != "running" or run["cancel_requested"]):
                 base["page_status"] = "partial"
+                base["quality"] = {"version":1, "state":"needs_review", "content_kind":layout["content_kind"],
+                                   "issues":[{"code":"interrupted", "message":"尚有區域未完成"}]}
                 return {"ok": True, "data": base}
         previous = None
         if persist:
@@ -722,6 +934,21 @@ def _run_page_child(payload, timeout, runner=None):
             response = {"ok":False, "error":diagnostic[0]["error"], "data":{"trace":diagnostic,
                         "artifacts":{"trace_json":{"path":str(diagnostic_path),"media_type":"application/json"}}}}
         data = response.get("data") or {}
+        valid_document = _document_contract(data)
+        if response.get("ok") and (not isinstance(data.get("voucher"), dict) or not data.get("voucher") or
+                                   payload.get("worker_protocol") == WORKER_PROTOCOL and not valid_document):
+            response.update(ok=False, error="子單據結果契約不完整")
+            diagnostic_path = RUNS / payload["run_id"] / document_id / "trace.json"
+            data.setdefault("trace", []).append({"kind":"document_contract_error", "error":response["error"], "received_voucher":data.get("voucher")})
+            invocation_trace.atomic_json(diagnostic_path, data["trace"])
+            data.setdefault("artifacts", {})["trace_json"] = {"path":str(diagnostic_path), "media_type":"application/json"}
+            data["unvalidated_voucher"] = data.get("voucher")
+            data["voucher"] = {}
+        if layout.get("fallback_reason") and valid_document:
+            quality = data["voucher"].setdefault("quality", {})
+            if quality.get("state") != "insufficient":
+                quality["state"] = "needs_review"
+            quality.setdefault("issues", []).append({"code":"layout_fallback", "category":"layout", "severity":"review", "message":layout["fallback_reason"]})
         status = "succeeded" if response.get("ok") else "timeout" if response.get("timeout") else "failed"
         document = {**data, "id": document_id, "origin": origin, "status": status, "document_index": index, "error": response.get("error", "")}
         for kind, info in data.get("artifacts", {}).items():
@@ -735,9 +962,9 @@ def _run_page_child(payload, timeout, runner=None):
                             (document_id, payload["id"], index, status, json.dumps(document, ensure_ascii=False), document["error"]))
         invocation_trace.atomic_json(directory / "documents.json", base["documents"])
     successful = [d for d in base["documents"] if d["status"] == "succeeded"]
-    states = [(d.get("voucher") or {}).get("quality", {}).get("state", "unassessed") for d in base["documents"]]
+    states = [d["voucher"]["quality"]["state"] if _document_contract(d) else "unassessed" for d in base["documents"]]
     base["quality"] = {"version":1, "state":"insufficient" if "insufficient" in states else "needs_review" if "needs_review" in states or len(successful) != len(base["documents"]) else "usable", "content_kind":layout["content_kind"], "issues":[]}
-    base["page_status"] = "succeeded" if len(successful) == len(base["documents"]) else "partial"
+    base["page_status"] = "succeeded" if base["documents"] and len(successful) == len(base["documents"]) else "partial"
     if len(base["documents"]) == 1 and successful:
         base.update({k: successful[0][k] for k in ("voucher", "boxes", "ocr", "trace", "timings", "actual_path") if k in successful[0]})
         base.setdefault("artifacts", {}).update({k: info for k,info in successful[0].get("artifacts", {}).items() if k not in ("original", "trace_json")})
@@ -746,6 +973,9 @@ def _run_page_child(payload, timeout, runner=None):
 
 
 def _run_child(payload, timeout):
+    _handshake(payload)
+    if not runtime_status()["ready"]:
+        raise ValueError("父服務載入版本或資料庫未就緒")
     global _active_process, _active_run_id
     ctx = mp.get_context("spawn")
     parent, child = ctx.Pipe(False)
@@ -773,6 +1003,9 @@ def _run_child(payload, timeout):
             response = {"ok": False, "timeout": True, "error": f"單張處理超過 {timeout} 秒"}
     except (EOFError, OSError) as exc:
         response = {"ok": False, "error": f"辨識子行程中斷：{exc}"}
+    if response.get("ok") and (response.get("worker_protocol") != WORKER_PROTOCOL or response.get("parent_build") != LOADED_BUILD or
+                               response.get("execution_version_sha256") != payload["execution_version_sha256"] or not runtime_status()["ready"]):
+        response.update(ok=False, error="子行程回傳協定不一致")
     response["wall_seconds"] = round(time.perf_counter() - wall_started, 6)
     if not response.get("ok"):
         data = response.setdefault("data", _recover_diagnostics(payload))
@@ -815,7 +1048,7 @@ def _scheduler():
             run = con.execute("SELECT settings_json FROM runs WHERE id=?", (task["run_id"],)).fetchone()
         settings = json.loads(run["settings_json"])
         from app.core.model_invocation import same_execution_version
-        if not same_execution_version(settings):
+        if not same_execution_version(settings) or settings.get("worker_protocol") != WORKER_PROTOCOL or settings.get("parent_build") != LOADED_BUILD or not runtime_status()["ready"]:
             with _db_lock, _connect() as con:
                 con.execute("UPDATE runs SET status='interrupted',cancel_requested=1,current=? WHERE id=?",
                             ("版本已改變，請建立新批次", task["run_id"]))
@@ -824,7 +1057,8 @@ def _scheduler():
             continue
         combo = next(c for c in settings["combinations"] if c["id"] == task["combo_id"])
         payload = {**task, "combo": combo, "max_edge": settings["max_edge"], "run_id": task["run_id"],
-                   "execution_version_sha256": settings["execution_version_sha256"]}
+                   "execution_version_sha256": settings["execution_version_sha256"], "worker_protocol": WORKER_PROTOCOL, "parent_build": LOADED_BUILD}
+        task["worker_protocol"] = WORKER_PROTOCOL
         try:
             response = _run_page_child(payload, settings["timeout_seconds"])
         except Exception as exc:
@@ -834,13 +1068,40 @@ def _scheduler():
             if data["documents"]:
                 data["page_status"] = "partial"
             response = {"ok":bool(data["documents"]), "data":data, "error":f"排程處理失敗：{type(exc).__name__}: {exc}", "traceback":traceback.format_exc()}
-        _save_response(task, response)
+        try:
+            _save_response(task, response)
+        except Exception as exc:
+            # Diagnostics survive even if an additive migration disappeared mid-run.
+            from app.core.invocation_trace import atomic_json
+            data = response.get("data") or _recover_diagnostics(payload)
+            data.setdefault("trace", []).append({"kind":"persistence_error", "error":str(exc), "parameters":payload})
+            atomic_json(RUNS/payload["run_id"]/payload["id"]/"trace.json", data["trace"])
+            logger.exception("Validation result persistence failed")
+            with _db_lock, _connect() as con:
+                con.execute("UPDATE runs SET status='interrupted',cancel_requested=1,current=? WHERE id=?", ("結果保存失敗，請檢查版本／schema",task["run_id"]))
         _finalize_runs()
 
 
 def _save_response(task, response):
     persistence_started = time.perf_counter()
     data = response.get("data") or {}
+    if task.get("worker_protocol") == WORKER_PROTOCOL:
+        if response.get("ok") and (data.get("page_status") not in ("succeeded", "partial", "skipped") or
+            not isinstance(data.get("layout"), dict) or not isinstance(data.get("quality"), dict) or
+            not isinstance(data.get("documents"), list) or
+            (data.get("page_status") == "succeeded" and (not data.get("documents") or not all(_document_contract(d) and d.get("status") == "succeeded" for d in data["documents"])) )):
+            response.update(ok=False, error="頁級結果契約不完整")
+            data["integrity_errors"] = [response["error"]]
+            from app.core.invocation_trace import atomic_json
+            data.setdefault("trace", []).append({"kind":"page_contract_error", "error":response["error"]})
+            atomic_json(RUNS/task["run_id"]/task["id"]/"trace.json", data["trace"])
+        data["result_contract_version"] = RESULT_CONTRACT
+        if not runtime_status()["ready"]:
+            response.update(ok=False, error="保存前執行版本或 schema 不一致")
+            data["integrity_errors"] = [response["error"]]
+            from app.core.invocation_trace import atomic_json
+            data.setdefault("trace", []).append({"kind":"persistence_version_error", "error":response["error"]})
+            atomic_json(RUNS/task["run_id"]/task["id"]/"trace.json", data["trace"])
     if not data.get("timings"):
         data["timings"] = {"complete_seconds": response.get("wall_seconds", 0),
                            "recognition_seconds": response.get("wall_seconds", 0)}
@@ -851,6 +1112,8 @@ def _save_response(task, response):
     except (TypeError, ValueError):
         data["timings"]["queue_seconds"] = None
     with _db_lock, _connect() as con:
+        if task.get("worker_protocol") == WORKER_PROTOCOL and not _schema_ready(con):
+            raise RuntimeError("validation schema not ready; refusing incomplete persistence")
         run = con.execute("SELECT status,cancel_requested FROM runs WHERE id=?", (task["run_id"],)).fetchone()
         if run["status"] == "terminated":
             return
@@ -864,7 +1127,7 @@ def _save_response(task, response):
            (response.get("error", "") + ("\n" + response["traceback"] if response.get("traceback") else "")),
            data.get("result_dir", ""), task["id"]))
         con.execute("UPDATE results SET page_json=? WHERE id=?",
-                    (json.dumps({key: data[key] for key in ("layout", "origin", "quality") if key in data}, ensure_ascii=False), task["id"]))
+                    (json.dumps({key: data[key] for key in ("layout", "origin", "quality", "result_contract_version", "skip_reason", "integrity_errors") if key in data}, ensure_ascii=False), task["id"]))
         con.execute("DELETE FROM artifacts WHERE result_id=?", (task["id"],))
         for kind, info in (data.get("artifacts") or {}).items():
             con.execute("INSERT INTO artifacts(id,result_id,kind,path,media_type) VALUES(?,?,?,?,?)",
@@ -975,10 +1238,13 @@ def _recognize_document(payload):
                 ocr_fallback = "OCR 不可用或辨識失敗，已依規格降級為 VLM 直讀"
         else:
             ocr = model_factory.get_ocr("paddle")
-            with activity.stage("ocr", "paddle/pp-ocrv5（自動轉正）"):
-                pipeline._auto_orient_ocr(str(input_path), ocr)
+            from app.core import image_evidence
+            ocr_input = image_evidence.native_ocr(original, result_dir / "ocr_input.png")
+            # Page routing has already rotated this native document.
             with activity.stage("ocr", "paddle/pp-ocrv5"):
-                ocr_lines = ocr.recognize(str(input_path))
+                native_lines = ocr.recognize(ocr_input)
+            with Image.open(ocr_input) as native_image, Image.open(input_path) as model_image:
+                ocr_lines = image_evidence.map_lines(native_lines, native_image.size, model_image.size)
             ocr_text = ocr.plain_text(ocr_lines)
             if not ocr_text.strip():
                 raise RuntimeError("OCR＋純文字 LLM 模式未取得任何 OCR 文字")
@@ -1057,17 +1323,21 @@ def _csv_safe(value):
     return "'" + text if text[:1] in ("=", "+", "-", "@") else text
 
 
-def _export_data(run_id):
+def _export_data(run_id, view="history"):
     with _connect() as con:
         run = con.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
         if not run: return None
-        rows = con.execute("""SELECT r.*,p.relative_path,p.page_no,p.voucher_key,p.sha256
+        rows = con.execute("""SELECT r.rowid _rowid,r.*,p.relative_path,p.page_no,p.voucher_key,p.sha256
           FROM results r JOIN pages p ON p.id=r.page_id WHERE r.run_id=? ORDER BY r.rowid""", (run_id,)).fetchall()
-        stats = _statistics(con, run_id)
+        stats = _statistics(con, run_id, latest=view == "latest")
         artifacts = con.execute("""SELECT a.*,r.id rid FROM artifacts a JOIN results r ON r.id=a.result_id
                                  WHERE r.run_id=?""", (run_id,)).fetchall()
         sources = con.execute("""SELECT DISTINCT p.original_path,p.relative_path FROM pages p
                                JOIN runs r ON r.dataset_id=p.dataset_id WHERE r.id=?""", (run_id,)).fetchall()
+    latest_ids = {r["id"] for r in _latest_rows([dict(r) for r in rows])}
+    if view == "latest":
+        rows = [r for r in rows if r["id"] in latest_ids]
+        artifacts = [a for a in artifacts if a["rid"] in latest_ids]
     results = []
     for row in rows:
         item = _row(row)
@@ -1076,8 +1346,10 @@ def _export_data(run_id):
         item.update(json.loads(item.pop("page_json", "{}") or "{}"))
         with _connect() as document_con:
             item["documents"] = _documents(document_con, item["id"])
+        item["is_latest"] = item["id"] in latest_ids
+        item["integrity"] = _integrity(dict(row), item["documents"])
         results.append(item)
-    return {"exported_at": _now(), "run": _run_dict(run), "statistics": stats,
+    return {"view": view, "exported_at": _now(), "run": _run_dict(run), "statistics": stats,
             "results": results, "artifacts": [_row(x) for x in artifacts],
             "sources": [_row(x) for x in sources]}
 
@@ -1085,14 +1357,14 @@ def _export_data(run_id):
 def _csv_files(data):
     files = {}
     specs = {
-      "vouchers.csv": ["result_id","source","page","combo","mode","actual_path","repeat","attempt","status","doc_type","voucher_id","date","total_amount","recognition_seconds","complete_seconds","error","field_evidence_json","validation_warnings_json","classification_meta_json","payment_state_json","document_id","parent_result_id","source_region","origin_json","quality_json","box_issues_json","sha256"],
+      "vouchers.csv": ["result_id","source","page","combo","mode","actual_path","repeat","attempt","status","doc_type","voucher_id","date","total_amount","recognition_seconds","complete_seconds","error","field_evidence_json","validation_warnings_json","classification_meta_json","payment_state_json","document_id","parent_result_id","source_region","origin_json","quality_json","box_issues_json","sha256","is_latest","result_contract_version","integrity_ok","integrity_reason"],
       "fields.csv": ["result_id","source","field","value","box","located"],
       "items.csv": ["result_id","source","index","description","quantity","unit_price","amount","hs_code","origin_country","fee_code"],
       "entries.csv": ["result_id","source","index","description","amount","debit_account","debit_account_name","credit_account","credit_account_name","evidence_paths_json","amount_source"]}
     buffers = {name: io.StringIO(newline="") for name in specs}
     writers = {name: csv.DictWriter(buffers[name], fieldnames=fields, extrasaction="ignore") for name, fields in specs.items()}
     for writer in writers.values(): writer.writeheader()
-    specs["pages.csv"] = ["result_id","source","page","status","image_sha256","complete_seconds","document_count"]
+    specs["pages.csv"] = ["result_id","source","page","status","image_sha256","complete_seconds","document_count","combo","repeat","attempt","is_latest","result_contract_version","integrity_ok","integrity_reason","skip_reason"]
     buffers["pages.csv"] = io.StringIO(newline="")
     writers["pages.csv"] = csv.DictWriter(buffers["pages.csv"], fieldnames=specs["pages.csv"])
     writers["pages.csv"].writeheader()
@@ -1105,10 +1377,13 @@ def _csv_files(data):
             if source_art and Path(source_art["path"]).is_file():
                 image_sha = _sha(Path(source_art["path"]))
         writers["pages.csv"].writerow({"result_id": page["id"], "source": _csv_safe(page["relative_path"]), "page": page["page_no"],
-            "status": page["status"], "image_sha256": image_sha or "", "complete_seconds": page.get("timings", {}).get("complete_seconds"), "document_count": len(documents)})
+            "status": page["status"], "image_sha256": image_sha or "", "complete_seconds": page.get("timings", {}).get("complete_seconds"), "document_count": len(documents),
+            "combo":_csv_safe(page["combo_name"]), "repeat":page["repeat_no"], "attempt":page["attempt"], "is_latest":page.get("is_latest", False),
+            "result_contract_version":page.get("result_contract_version"), "integrity_ok":page.get("integrity", {}).get("ok", False),
+            "integrity_reason":_csv_safe(page.get("integrity", {}).get("reason", "")), "skip_reason":page.get("skip_reason", "")})
         if documents:
             for document in documents:
-                flattened.append({**page, **document, "parent_result_id": page["id"], "document_id": document["id"]})
+                flattened.append({**page, **document, "timings":document.get("timings") or {}, "parent_result_id": page["id"], "document_id": document["id"]})
         elif page["status"] not in ("partial", "skipped"):
             flattened.append(page)
     for result in flattened:
@@ -1129,7 +1404,9 @@ def _csv_files(data):
           "origin_json": json.dumps(result.get("origin") or voucher.get("origin") or {}, ensure_ascii=False),
           "quality_json": json.dumps(voucher.get("quality") or {}, ensure_ascii=False),
           "box_issues_json": json.dumps(voucher.get("box_issues") or [], ensure_ascii=False),
-          "sha256": (result.get("origin") or voucher.get("origin") or {}).get("image_sha256", "")})
+          "sha256": (result.get("origin") or voucher.get("origin") or {}).get("image_sha256", ""),
+          "is_latest":result.get("is_latest", False), "result_contract_version":result.get("result_contract_version"),
+          "integrity_ok":result.get("integrity", {}).get("ok", False), "integrity_reason":_csv_safe(result.get("integrity", {}).get("reason", ""))})
         boxes = voucher.get("boxes") or {}
         fields = {"voucher_id": voucher.get("voucher_id"), "date": voucher.get("date"),
                   "doc_type": voucher.get("doc_type"), "subtotal": voucher.get("subtotal"),
@@ -1156,8 +1433,8 @@ def _csv_files(data):
 
 
 @router.get("/runs/{run_id}/export")
-def export_run(run_id: str, format: str = Query("zip", pattern="^(zip|json|csv)$")):
-    data = _export_data(run_id)
+def export_run(run_id: str, format: str = Query("zip", pattern="^(zip|json|csv)$"), view: str = Query("history", pattern="^(latest|history)$")):
+    data = _export_data(run_id, "latest" if view == "latest" else "history")
     if not data: return JSONResponse({"detail": "找不到驗證批次"}, status_code=404)
     if format == "json":
         return Response(json.dumps(data, ensure_ascii=False, indent=2), media_type="application/json",
@@ -1176,6 +1453,6 @@ def export_run(run_id: str, format: str = Query("zip", pattern="^(zip|json|csv)$
                 path = Path(source["original_path"])
                 if path.is_file():
                     zf.write(path, f"sources/{_safe_rel(source['relative_path'])}")
-    filename = f"validation-{run_id}-{'complete' if format == 'zip' else 'csv'}.zip"
+    filename = f"validation-{run_id}-{data['view']}-{'complete' if format == 'zip' else 'csv'}.zip"
     return Response(buffer.getvalue(), media_type="application/zip",
                     headers={"Content-Disposition": f'attachment; filename="{filename}"'})

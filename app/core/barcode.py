@@ -15,52 +15,55 @@ logger = logging.getLogger("pdf_scan.barcode")
 
 
 def decode(image_path: str) -> list[str]:
-    """回傳影像上偵測到的 QR／條碼內容字串（去重、非空）。失敗回空清單。"""
+    """Compatible code list; diagnostics distinguish detection and validation."""
+    return decode_diagnostics(image_path)["codes"]
+
+
+def summarize(codes, regions, size):
+    candidates = parse_einvoice_qr_candidates(codes)
+    status = ("conflict" if len(candidates) > 1 else "valid" if candidates else
+              "invalid" if codes else "detected_undecoded" if regions else "not_detected")
+    return {"status": status, "codes": codes, "candidates": candidates, "regions": regions,
+            "source_size": size, "coordinate_unit": "pixels",
+            "adoption_reason": "single valid candidate" if len(candidates) == 1 else "no unambiguous valid invoice"}
+
+
+def decode_diagnostics(image_path: str) -> dict:
+    """Detect native QR regions, decode each once; failure never blocks extraction."""
+    found, regions, size, errors, detections = [], [], [], [], []
     try:
         import cv2
-    except Exception:  # noqa: BLE001
-        return []
-    # cv2.imread 在 Windows 無法讀取含中文／非 ASCII 的路徑（回 None 且不報錯），
-    # 而本系統的頁圖檔名取自來源檔（多為中文），等於電子發票 QR 解碼會靜默失效。
-    # 改用 numpy 讀 bytes 再 imdecode 繞過。
-    try:
         import numpy as np
-
-        buf = np.fromfile(image_path, dtype=np.uint8)
-        img = cv2.imdecode(buf, cv2.IMREAD_COLOR) if buf.size else None
-    except Exception:  # noqa: BLE001
-        img = cv2.imread(image_path)
-    if img is None:
-        return []
-    found: list[str] = []
-
-    # QR（原圖 + 放大重試，提高低解析度命中率）
-    try:
+        img = cv2.imdecode(np.fromfile(image_path, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if img is None:
+            raise ValueError("unreadable QR source")
+        h, w = img.shape[:2]
+        size = [w, h]
         qr = cv2.QRCodeDetector()
-        for scale in (1, 2):
-            src = img if scale == 1 else cv2.resize(img, None, fx=scale, fy=scale,
-                                                    interpolation=cv2.INTER_CUBIC)
-            ok, infos, _pts, _ = qr.detectAndDecodeMulti(src)
-            if ok:
-                for s in (infos or []):
-                    if s and s not in found:
-                        found.append(s)
-            if found:
-                break
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("QR 解碼略過：%s", exc)
-
-    # 1D 條碼（best-effort；多數掃描報單條碼讀不出屬正常）
-    try:
-        bd = cv2.barcode.BarcodeDetector()
-        res = bd.detectAndDecode(img)
-        for s in (res[0] or []) if isinstance(res[0], (list, tuple)) else ([res[0]] if res[0] else []):
-            if s and s not in found:
-                found.append(s)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("條碼解碼略過：%s", exc)
-
-    return found
+        ok, points = qr.detectMulti(img)
+        if not ok:
+            ok, points = qr.detect(img)
+        for polygon in (np.asarray(points).reshape(-1,4,2) if ok and points is not None else []):
+            x0,y0 = np.floor(polygon.min(axis=0)).astype(int)
+            x1,y1 = np.ceil(polygon.max(axis=0)).astype(int)
+            margin = max(4, round(max(x1-x0,y1-y0)*.1))
+            box = [max(0,x0-margin), max(0,y0-margin), min(w,x1+margin), min(h,y1+margin)]
+            regions.append([int(v) for v in box])
+            raw, _, _ = qr.detectAndDecode(img[box[1]:box[3],box[0]:box[2]])
+            detections.append({"box":regions[-1], "raw":raw, "candidates":parse_einvoice_qr_candidates([raw]) if raw else []})
+            if raw and raw not in found:
+                found.append(raw)
+        try:
+            result = cv2.barcode.BarcodeDetector().detectAndDecode(img)
+            values = result[0] if isinstance(result[0], (list,tuple)) else [result[0]]
+            found.extend(v for v in values if v and v not in found)
+        except Exception as exc:
+            errors.append("barcode: " + str(exc)[:120])
+    except Exception as exc:
+        errors.append(str(exc)[:160])
+    result = summarize(found, regions, size)
+    result.update(path=image_path, errors=errors, detections=detections)
+    return result
 
 
 def parse_einvoice_qr_candidates(codes: list[str]) -> list[dict]:

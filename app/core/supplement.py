@@ -1,16 +1,31 @@
 """One bounded reread; independent evidence gates every adopted candidate."""
 from __future__ import annotations
 import re
+import math
 from pathlib import Path
 from app.core import doc_types, normalization, invocation_trace
 
-LABELS = {"subtotal": r"未稅(?:合計|金額)?|銷售額|小計|subtotal",
-          "tax_amount": r"稅額|營業稅|tax", "total_amount": r"含稅(?:合計|總額)?|總計|總額|應付(?:金額)?|total"}
+LABELS = {"subtotal": r"未稅(?:銷售額|合計|金額)?|銷售額(?:[（(]未稅[）)])?|小計|\bsubtotal\b",
+          "tax_amount": r"稅額(?:[（(]營業稅[）)])?|營業稅(?:額)?|\btax\b", "total_amount": r"含稅(?:合計|總額)?|總計(?:[（(]含稅[）)])?|總額|應付(?:金額)?|\btotal\b"}
+
+
+def spatial_text(lines):
+    """Join only OCR boxes on the same baseline, within this native document."""
+    rows = []
+    for line in sorted(lines or [], key=lambda r: sum(p[1] for p in r["box"])/len(r["box"])):
+        box = line["box"]
+        center = sum(p[1] for p in box)/len(box)
+        height = max(p[1] for p in box)-min(p[1] for p in box)
+        if rows and abs(center-rows[-1][0]) <= max(2,min(height, rows[-1][1])*.4):
+            rows[-1][2].append(line)
+        else:
+            rows.append((center,height,[line]))
+    return "\n".join(" ".join(r.get("text", "") for r in sorted(group,key=lambda r:min(p[0] for p in r["box"]))) for _,_,group in rows)
 
 
 def numeric(value):
     parsed = normalization.norm_amount(value)
-    return parsed if isinstance(parsed, (int, float)) and not isinstance(parsed, bool) else None
+    return parsed if isinstance(parsed, (int, float)) and not isinstance(parsed, bool) and math.isfinite(parsed) else None
 
 
 def arithmetic(fields, mapping):
@@ -30,11 +45,68 @@ def independent_money(key, value, ocr_text, qr):
     if not label:
         return False
     for line in ocr_text.splitlines():
-        if re.search(label, line, re.I):
-            numbers = re.findall(r"(?<!\w)-?\d[\d,]*(?:\.\d+)?", line)
-            if any(numeric(n) == expected for n in numbers):
+        match = re.search(label, line, re.I)
+        if match:
+            segment = line[match.end():]
+            next_label = re.search("|".join(LABELS.values()), segment, re.I)
+            if next_label:
+                segment = segment[:next_label.start()]
+            numbers = re.findall(r"(?<!\w)-?\d[\d,]*(?:\.\d+)?", segment)
+            if len(numbers) == 1 and numeric(numbers[0]) == expected:
                 return True
     return False
+
+
+def party_evidence(key, value, text):
+    from app.services.taxid import validate_tax_id
+    value = str(value).strip()
+    if "tax_id" in key and not validate_tax_id(value):
+        return False
+    if (key.endswith("name") or key == "vendor") and re.fullmatch(r"\d{8}", value):
+        return False
+    party = r"買方|買受人|客戶" if key.startswith("buyer") else r"賣方|銷售人|營業人|店家|廠商"
+    return any(re.search(party, line) and value.replace(" ", "") in line.replace(" ", "") for line in text.splitlines())
+
+
+def normalize_candidates(data, type_key, ocr_text, qr=None, confirmed_fields=None):
+    """Annotation parsing is a proposed change, independently checked before use."""
+    from app.core import pipeline
+    fields = data["fields"]
+    mapping = doc_types.get(type_key)["common_fields"]
+    protected = set(confirmed_fields or {})
+    currency = normalization.normalize_currency(fields.get("currency")) or ("TWD" if type_key == "invoice" else None)
+    proposed = {}
+    records = []
+    for key, raw in fields.items():
+        note = normalization.amount_annotation(raw)
+        common = next((k for k in LABELS if key in mapping.get(k, [])), None)
+        if note and common:
+            allowed = key not in protected and bool(currency) and (not note["currency"] or note["currency"] == currency) and independent_money(common, note["value"], ocr_text, qr)
+            record = {"source": "normalization_candidate", **note, "selected": False, "independent_evidence": allowed}
+            data.setdefault("field_evidence", {}).setdefault("fields."+key, []).append(record)
+            records.append((key, record))
+            if allowed:
+                proposed[key] = note["value"]
+    if arithmetic({**fields, **proposed}, mapping) is False or (currency == "TWD" and re.search(r"USD|美[元金]|EUR|歐元|CNY|人民幣|JPY|日[元圓]", ocr_text, re.I)):
+        proposed = {}
+    pipeline._merge_evidence_fields(data, proposed, "normalization_verified")
+    for index, item in enumerate(data.get("items") or []):
+        note = normalization.amount_annotation(item.get("amount"))
+        if not note:
+            continue
+        description = str(item.get("description") or "").strip()
+        verified = bool(description) and any(description in line and str(note["value"]) in line.replace(",", "") for line in ocr_text.splitlines())
+        verified = verified and bool(currency) and (not note["currency"] or note["currency"] == currency)
+        quantity, price = numeric(item.get("quantity")), numeric(item.get("unit_price"))
+        if quantity is not None and price is not None and abs(quantity*price-note["value"]) >= .01:
+            verified = False
+        path = f"items[{index}].amount"
+        data.setdefault("field_evidence", {}).setdefault(path, []).append({"source": "normalization_candidate", **note, "selected": False, "independent_evidence": verified})
+        if verified:
+            for record in data["field_evidence"][path]:
+                record["selected"] = False
+            data["field_evidence"][path].append({"source":"normalization_verified", "value":note["value"], "selected":True})
+            item["amount"] = note["value"]
 
 
 def apply(data, type_key, chat, image_path, *, mode, ocr_text, context, confirmed_fields=None, native_path=None):
@@ -45,10 +117,26 @@ def apply(data, type_key, chat, image_path, *, mode, ocr_text, context, confirme
     protected = set(confirmed_fields or {})
     identity = {"invoice": ("seller_tax_id", "seller_name"), "receipt": ("tax_id", "vendor")}.get(type_key, ())
     identity = tuple(dict.fromkeys([*identity, *(a for k in ("voucher_id", "date") for a in mapping.get(k, []) if a in fields)]))
-    missing = [k for k in identity if fields.get(k) in (None, "") and k not in protected]
+    from app.services.taxid import validate_tax_id
+    identity = tuple(dict.fromkeys([*identity, *(k for k in fields if k in ("buyer_tax_id", "buyer_name") and
+        (fields.get(k) not in (None, "") or re.fullmatch(r"\d{8}", str(fields.get("buyer_name") or ""))))]))
+    missing = [k for k in identity if k not in protected and (fields.get(k) in (None, "") or
+               ("tax_id" in k and not validate_tax_id(str(fields.get(k) or ""))) or
+               ((k.endswith("name") or k == "vendor") and re.fullmatch(r"\d{8}", str(fields.get(k) or ""))))]
+    # Labeled OCR disagreement is an evidence conflict even when raw values are nonempty.
+    missing.extend(k for k in identity if k not in protected and fields.get(k) not in (None, "") and
+                   (k.startswith(("buyer", "seller"))) and re.search(r"買方|買受人|賣方|銷售人", ocr_text) and not party_evidence(k, fields[k], ocr_text))
+    for key in missing:
+        if fields.get(key) not in (None, ""):
+            data["validation_warnings"].append(f"{key} 欄位語意或識別格式無效，待人工確認")
     money = []
-    if arithmetic(fields, mapping) is False:
+    if arithmetic(fields, mapping) is False or any(numeric(fields.get(a)) is None for a in mapping.get("total_amount", [])):
         money = [a for k in LABELS for a in mapping.get(k, []) if a in fields and a not in protected]
+    money.extend(a for k in LABELS for a in mapping.get(k, []) if a in fields and a not in protected and fields[a] not in (None, "") and numeric(fields[a]) is None)
+    conditions = context.get("image_conditions") or {}
+    if conditions.get("low_text_contrast") or conditions.get("skew_degrees"):
+        money.extend(a for k in LABELS for a in mapping.get(k, []) if a in fields and a not in protected)
+        missing.extend(k for k in identity if k not in protected)
     requested = list(dict.fromkeys(missing + money))
     if not requested:
         return
@@ -63,11 +151,39 @@ def apply(data, type_key, chat, image_path, *, mode, ocr_text, context, confirme
             return
         # Independent OCR is read from the native ROI, never from the model candidate.
         try:
+            if not context.get("ocr_enabled", True):
+                raise RuntimeError("VLM direct mode leaves OCR disabled")
             provider, _ = pipeline.settings_store.parse_setting(pipeline.settings_store.get_settings()["ocr"])
             ocr = pipeline.model_factory.get_ocr(provider)
             lines = ocr.recognize(roi_path)
             ocr_text = ocr.plain_text(lines)
+            from app.core import image_evidence, barcode
+            enhanced, info = image_evidence.enhancement(roi_path, lines, Path(roi_path).with_name(Path(roi_path).stem + "_enhanced.png"))
+            invocation_trace.add({"kind":"image_enhancement", **info})
+            if enhanced:
+                extra_lines = ocr.recognize(enhanced)
+                extra_text = ocr.plain_text(extra_lines)
+                invocation_trace.add({"kind":"enhanced_ocr", "lines":extra_lines, "text":extra_text})
+                context["enhanced_ocr_text"] = extra_text
+                # Conflicting OCR evidence remains separate; it cannot justify replacement.
+                if extra_text.strip() != ocr_text.strip():
+                    context["ocr_copy_conflict"] = True
+                    data["validation_warnings"].append("OCR 原圖與增強副本不同，候選待人工確認")
+                roi_path = enhanced
+                if type_key == "invoice":
+                    qr_info = barcode.decode_diagnostics(enhanced)
+                    invocation_trace.add({"kind":"qr_enhanced", **qr_info})
+                    if qr_info["status"] == "valid":
+                        candidate_qr = qr_info["candidates"][0]
+                        if not context.get("qr"):
+                            context["qr"] = candidate_qr
+                        elif candidate_qr != context["qr"]:
+                            context["qr_copy_conflict"] = True
+                            data["validation_warnings"].append("QR 原圖與增強副本內容衝突，候選待人工確認")
+                    elif qr_info["status"] == "conflict":
+                        context["qr_copy_conflict"] = True
             invocation_trace.add({"kind": "supplement_ocr", "lines": lines, "text": ocr_text})
+            ocr_text += "\n" + spatial_text(lines)
         except Exception as exc:
             invocation_trace.add({"kind": "supplement_ocr_error", "error": str(exc)})
     try:
@@ -84,12 +200,18 @@ def apply(data, type_key, chat, image_path, *, mode, ocr_text, context, confirme
         if key in protected or value in (None, ""):
             continue
         common_key = next((k for k in LABELS if key in mapping.get(k, [])), None)
+        note = normalization.amount_annotation(value)
+        if common_key and note:
+            if note["currency"] and note["currency"] != currency:
+                continue
+            value = note["value"]
+            candidate[key] = value
         if common_key:
             allow = bool(currency) and independent_money(common_key, value, ocr_text, qr) and arithmetic(candidate, mapping) is not False
         else:
-            allow = str(value).replace(" ", "") in ocr_text.replace(" ", "")
-            if "tax_id" in key or key == "tax_id":
-                allow = allow and len(pipeline._clean_taxid(value)) == 8
+            allow = party_evidence(key, value, ocr_text) if key in ("buyer_name", "seller_name", "buyer_tax_id", "seller_tax_id", "tax_id", "vendor") else str(value).replace(" ", "") in ocr_text.replace(" ", "")
+        if context.get("ocr_copy_conflict") or context.get("qr_copy_conflict"):
+            allow = False
         data.setdefault("field_evidence", {}).setdefault("fields." + key, []).append({"source": "supplement", "value": value, "selected": False, "independent_evidence": allow})
         if allow:
             accepted[key] = value

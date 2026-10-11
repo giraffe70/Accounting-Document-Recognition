@@ -21,9 +21,25 @@
 
 前端離線檢查可執行 `node --check app/static/js/validation.js` 與 `python -m unittest tests.test_frontend_form`；驗證 API／匯出契約使用 `scripts\verify.bat -Scope validation`。這些檢查不啟動真實模型，也不替代獨立人工證據核對。
 
+Ollama 輸出上限使用 `ChatOllama` 模型副本的 `num_predict`，由套件轉為 SDK 的 `options.num_predict`；不可使用 `bind(num_predict=...)`，它會把參數傳到 `Client.chat()` 頂層並造成 `TypeError`。`tests/test_retry_contracts.py` 與 `tests/test_recognition_optimization.py` 以實際安裝的 `ChatOllama`、保留 SDK 方法簽名的網路替身驗證參數、Schema 降級與設定保留，避免只有寬鬆模擬模型通過卻在正式套件失敗。
+
 新結果以頁面 `result.id` 和單據 `parent_result_id` 關聯；單據 `id` 唯一識別單據，`document_index` 在資料中從 0 起算。`origin` 記錄來源頁與區域，`quality` 記錄內容類型、品質狀態及問題。舊結果沒有 `quality` 時應顯示未評估。品質狀態與 `completed_rate` 用於提示是否需要覆核及頁面擷取是否完成，均不代表欄位準確率；準確率只能由獨立覆核證據與標註評估。空白 `skipped` 頁不計入完成率分母，待分割 `partial` 頁仍需人工處理。來源頁只作追溯，不作為財務單據計入。
 
 CSV 匯出新增 `pages.csv` 後，沿用含 `vouchers.csv`、`fields.csv`、`items.csv`、`entries.csv` 的相容格式進行評分；不要把 `pages.csv` 當作 vouchers 表格讀取。離線驗收不啟動 OCR/VLM/LLM，也不以結果完成率取代準確率檢查。
+
+## 驗證服務版本、結果檢視與舊診斷
+
+開啟 `/validation.html` 後，前端先讀取 `/api/validation/runtime`。只有 `ready=true`、`restart_required=false` 且 `schema_ready=true` 才能開始驗證、續跑或重跑失敗；端點不存在、載入版本與磁碟版本不一致或 schema 未就緒時，先完整重新啟動服務，再重新載入頁面。頁面不會自行重啟服務。執行新批次前確認 runtime 顯示就緒，並建立新批次以保存目前的程式、模型和契約版本。
+
+本次更新後的操作順序：
+
+1. 在目前服務的終端按 `Ctrl+C`，確認服務已停止；於專案根目錄重新執行 `start_webui.bat`（使用 `pdfscan312`）。
+2. 登入後開啟 `http://127.0.0.1:8090/api/validation/runtime`，確認 `ready=true`、`schema_ready=true`、`restart_required=false`，且 `loaded_version` 與 `disk_version` 相同；再以 `Ctrl+F5` 重新載入 `/validation.html`。
+3. 建立新批次，於「最新結果」檢視頁級狀態並匯出。舊批次僅供歷史與唯讀診斷；不要用它的重跑成績驗收新版本。
+
+結果區預設「最新結果」：每個頁面、模型組合及重複次數只採用最新 attempt，避免把先前失敗與重跑結果累加。選「完整歷史」可查看每次嘗試；其筆數、成功率與耗時都代表執行紀錄，不能解讀成唯一頁面完成率。JSON、CSV 與 ZIP 匯出會沿用畫面選擇的 `view`；未帶 `view` 的舊 API 呼叫保留歷史匯出相容性。遇到舊批次混用程式或結果契約、或結果資料不完整時，最新完成率會顯示「無法可靠評估」。完成率只表示流程完成，不表示欄位正確。
+
+舊結果可按需查看「保存的裁切結果／未驗收」診斷。它只讀取原頁、layout、已保存文件和 trace，供追查分割或執行問題；不回填正式 `documents[]`、不重新判定 quality、不納入統計或匯出，也不建立可入帳憑證。歷史批次不會因查看診斷而改寫；需驗收新契約時，修正服務版本後建立新批次。
 
 ## 保存結果評分
 
