@@ -142,7 +142,9 @@ def detect(image_path, *, mode="image", ocr_lines=None, ocr_text="", model_setti
             invocation_trace.add({"kind":"layout_ocr_error","error":str(exc)})
             ocr_lines=[]
     ocr_lines=ocr_lines or []
-    coordinates=model_coordinates.for_image(image_path,setting)
+    from app.core import request_budget, prompt_evidence
+    diagnostics={"version":1,"requests":[],"issues":[]}
+    coordinates=model_coordinates.for_image(image_path,setting,deferred=True)
     qr=barcode.decode_diagnostics(native_path or image_path)
     invocation_trace.add({"kind":"layout_qr",**qr})
     evidence=image_evidence.layout_evidence(native_path or image_path,ocr_lines,size,qr)
@@ -153,10 +155,10 @@ def detect(image_path, *, mode="image", ocr_lines=None, ocr_text="", model_setti
         "content_kind: blank/supporting/non_voucher/document/unknown；layout_kind: single/multiple/uncertain；confidence: high/medium/low。",
         "多聯、表格欄位、明細列及合計區屬同一單據。佐證會計關係不等同非憑證；有独立付款資訊的收據與車票仍是document。",
         "reason最多120字。rotate順時針0/90/180/270，純文字模式固定0。"])
-    data={"ocr_text":ocr_text,"source_evidence":_prompt_evidence(evidence)}
+    data={**prompt_evidence.assemble(ocr_text,{"ocr_lines":ocr_lines},image_path),"source_evidence":_prompt_evidence(evidence)}
     content=[{"type":"text","text":instructions+prompts.DATA_SEPARATOR+prompts._json(data)}]
     if mode=="image":
-        content.append({"type":"image_url","image_url":{"url":pipeline._data_uri(image_path)}})
+        content.append(request_budget.image_part(coordinates))
     page_errors=[]
     def page_validator(raw):
         page=validate_page(raw,mode)
@@ -165,8 +167,10 @@ def detect(image_path, *, mode="image", ocr_lines=None, ocr_text="", model_setti
         return page
     try:
         with activity.stage("structure",setting+"（頁面角色／判類型）"):
-            page=model_invocation.invoke_structured(chat,content,page_validator,task="layout",schema=_page_schema(mode),invoke=pipeline._invoke_text)
+            page=model_invocation.invoke_structured(chat,content,page_validator,task="layout",schema=_page_schema(mode),invoke=pipeline._invoke_text,diagnostics=diagnostics)
     except ValueError as exc:
+        if isinstance(exc, request_budget.BudgetError):
+            raise
         page_errors.append(str(exc))
         supported,reason=classification_evidence.supported_type(ocr_text)
         if not supported or image_evidence.single_document(evidence) is None:
@@ -177,7 +181,7 @@ def detect(image_path, *, mode="image", ocr_lines=None, ocr_text="", model_setti
         page["type"]=effective
         page["content_kind"]="document"
     result={**page,"regions":[],"auto_split":False,"issues":page_errors,"fallback_reason":None,"source_evidence":evidence,
-            "version":LAYOUT_VERSION,"coordinate_context":coordinates,"image_transforms":transforms,"classification_evidence":classification}
+            "version":LAYOUT_VERSION,"coordinate_context":coordinates,"image_transforms":transforms,"classification_evidence":classification,"recognition_diagnostics":diagnostics}
     if mode=="ocr_text" and rotation:
         result["rotate"]=rotation
     if page["content_kind"] in ("blank","supporting","non_voucher"):
@@ -213,10 +217,10 @@ def detect(image_path, *, mode="image", ocr_lines=None, ocr_text="", model_setti
                 positions={r["id"]:r["box"] for r in evidence.get("text_boxes", [])}
                 region_data["ocr_lines"]=[{"id":i,"text":r.get("text",""),"box":positions.get(i)} for i,r in enumerate(ocr_lines)]
             else:
-                region_data["ocr_text"]=ocr_text
+                region_data.update(prompt_evidence.assemble(ocr_text,{"ocr_lines":ocr_lines},image_path))
             region_content=[{"type":"text","text":prompts.DATA_BOUNDARY+"\n"+directive+"\n類型："+menu+prompts.DATA_SEPARATOR+prompts._json(region_data)}]
             if region_mode=="image":
-                region_content.append({"type":"image_url","image_url":{"url":pipeline._data_uri(image_path)}})
+                region_content.append(request_budget.image_part(coordinates))
             def validator(raw):
                 if set(raw)!={"regions"}:
                     raise ValueError("region task requires only regions")
@@ -226,12 +230,14 @@ def detect(image_path, *, mode="image", ocr_lines=None, ocr_text="", model_setti
                 return layout
             try:
                 with activity.stage("structure",setting+"（多單據定位）"):
-                    located=model_invocation.invoke_structured(chat,region_content,validator,task="layout",schema=schema,invoke=pipeline._invoke_text)
+                    located=model_invocation.invoke_structured(chat,region_content,validator,task="layout",schema=schema,invoke=pipeline._invoke_text,diagnostics=diagnostics)
                 result.update(regions=located["regions"],auto_split=True)
                 if region_mode=="ocr_text":
                     for region in result["regions"]:
                         region["rotate"]=result["rotate"]
             except ValueError as exc:
+                if isinstance(exc, request_budget.BudgetError):
+                    raise
                 result["issues"].append(str(exc))
                 if image_evidence.single_document(evidence) and len(image_evidence.independent_groups(evidence))<2:
                     result.update(layout_kind="single",auto_split=True,fallback_reason="分割未通過；獨立證據支持單張，保留完整原頁",regions=[{"type":page["type"],"rotate":result["rotate"],"reason":page["reason"],"confidence":"high","box":[0,0,1000,1000],"coordinate_source":"whole_page"}])

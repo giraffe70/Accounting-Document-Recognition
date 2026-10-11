@@ -111,6 +111,17 @@ def normalize_candidates(data, type_key, ocr_text, qr=None, confirmed_fields=Non
             item["amount"] = note["value"]
 
 
+def failed(data, context, exc):
+    code = getattr(exc, "code", None) or ("context_limit" if "exceed" in str(exc).lower() and "context" in str(exc).lower() else
+            "timeout" if isinstance(exc, TimeoutError) else "supplement_error")
+    issue = {"code":"supplement_failed", "stage":"supplement", "reason":code,
+             "error":f"{type(exc).__name__}: {exc}", "details":getattr(exc,"details",{})}
+    context.setdefault("recognition_diagnostics", {"version":1,"requests":[],"issues":[]}).setdefault("issues",[]).append(issue)
+    data["recognition_diagnostics"] = context["recognition_diagnostics"]
+    data.setdefault("validation_warnings",[]).append("指定欄位補讀失敗，保留首讀結果：" + str(exc)[:120])
+    invocation_trace.add({"kind":"supplement_failure", **issue})
+
+
 def apply(data, type_key, chat, image_path, *, mode, ocr_text, context, confirmed_fields=None, native_path=None):
     from app.core import pipeline, page_layout
     fields = data["fields"]
@@ -149,6 +160,9 @@ def apply(data, type_key, chat, image_path, *, mode, ocr_text, context, confirme
     if not requested and not groups or context.get("supplement_done"):
         return
     context["supplement_done"] = True
+    if context.get("checkpoint_path"):
+        from app.core import recognition_checkpoint
+        recognition_checkpoint.mark_supplement(context["checkpoint_path"])
     invocation_trace.add({"kind":"supplement_start", "fields":requested, "groups":groups, "task_limit":1})
     roi_path = image_path
     if mode == "image":
@@ -157,7 +171,7 @@ def apply(data, type_key, chat, image_path, *, mode, ocr_text, context, confirme
         try:
             roi_path = page_layout.crop(source, region, Path(image_path).with_name(Path(image_path).stem + "_supplement.png"), max_edge=2400)
         except (OSError, ValueError) as exc:
-            data["validation_warnings"].append("補讀來源不可用：" + str(exc)[:120])
+            failed(data, context, exc)
             return
         # Independent OCR is read from the native ROI, never from the model candidate.
         try:
@@ -168,6 +182,9 @@ def apply(data, type_key, chat, image_path, *, mode, ocr_text, context, confirme
             lines = ocr.recognize(roi_path)
             ocr_text = ocr.plain_text(lines)
             context["supplement_ocr_lines"] = lines
+            from PIL import Image
+            with Image.open(roi_path) as image:
+                context["supplement_ocr_size"] = list(image.size)
             from app.core import image_evidence, barcode
             enhanced, info = image_evidence.enhancement(roi_path, lines, Path(roi_path).with_name(Path(roi_path).stem + "_enhanced.png"))
             invocation_trace.add({"kind":"image_enhancement", **info})
@@ -176,6 +193,7 @@ def apply(data, type_key, chat, image_path, *, mode, ocr_text, context, confirme
                 extra_text = ocr.plain_text(extra_lines)
                 invocation_trace.add({"kind":"enhanced_ocr", "lines":extra_lines, "text":extra_text})
                 context["enhanced_ocr_text"] = extra_text
+                context["supplement_prompt_lines"] = extra_lines
                 # Conflicting OCR evidence remains separate; it cannot justify replacement.
                 if extra_text.strip() != ocr_text.strip():
                     context["ocr_copy_conflict"] = True
@@ -209,8 +227,8 @@ def apply(data, type_key, chat, image_path, *, mode, ocr_text, context, confirme
             result = {}
             values = pipeline.reread_fields(roi_path, type_key, chat, requested, mode=mode, ocr_text=ocr_text,
                 hint="金額只讀合計區，區分明細金額與未稅合計；識別欄位讀文件本身名稱及統編", evidence=context)
-    except (ValueError, RuntimeError) as exc:
-        data["validation_warnings"].append("指定欄位補讀失敗：" + str(exc)[:120])
+    except Exception as exc:
+        failed(data, context, exc)
         return
     if corrected_type != type_key:
         # Correct the contract before adopting fields; keep the previous AI data.

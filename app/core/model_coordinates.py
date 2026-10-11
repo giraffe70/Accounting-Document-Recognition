@@ -152,7 +152,13 @@ def from_profile(profile, input_size, *, identity=None):
         return {**base, "reason": str(exc)}
 
 
-def for_image(image_path, setting, *, max_edge=1180):
+class ImageContext(dict):
+    def __deepcopy__(self, memo):
+        # The validator and preflight share the final transmitted frame.
+        return self
+
+
+def for_image(image_path, setting, *, max_edge=1180, deferred=False):
     from app.core.settings_store import parse_setting
     provider, model = parse_setting(setting)
     with Image.open(image_path) as image:
@@ -162,16 +168,18 @@ def for_image(image_path, setting, *, max_edge=1180):
         size = image.size
         from io import BytesIO
         sent = BytesIO()
-        image.save(sent, format="PNG")
+        if not deferred:
+            image.save(sent, format="PNG")
     sent_path = Path(image_path).with_name(Path(image_path).stem + "_model_input.png")
     temporary = None
     try:
-        with tempfile.NamedTemporaryFile(dir=sent_path.parent, suffix=".tmp", delete=False) as stream:
-            temporary = Path(stream.name)
-            stream.write(sent.getvalue())
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, sent_path)
+        if not deferred:
+            with tempfile.NamedTemporaryFile(dir=sent_path.parent, suffix=".tmp", delete=False) as stream:
+                temporary = Path(stream.name)
+                stream.write(sent.getvalue())
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, sent_path)
     finally:
         if temporary and temporary.exists():
             temporary.unlink()
@@ -195,11 +203,13 @@ def for_image(image_path, setting, *, max_edge=1180):
             context["reason"] = "runtime geometry unavailable: " + str(exc)[:180]
     context.update(provider=provider, model=model, source_size=list(source_size), registry_sha256=registry_digest(),
                    input_path=str(sent_path),
-                   source_sha256=hashlib.sha256(Path(image_path).read_bytes()).hexdigest(), sent_sha256=hashlib.sha256(sent.getvalue()).hexdigest(),
+                   source_sha256=hashlib.sha256(Path(image_path).read_bytes()).hexdigest(), sent_sha256=hashlib.sha256(sent.getvalue()).hexdigest() if not deferred else None,
                    preprocessing={**INPUT_PREPROCESSING,"max_edge":max_edge,"padding":[0,0,0,0],
                                   "source_to_input":[[size[0]/source_size[0],0,0],[0,size[1]/source_size[1],0]]})
     invocation_trace.add({"kind": "model_coordinate_context", **context})
-    return context
+    if deferred:
+        context["budget_source_path"] = str(image_path)
+    return ImageContext(context)
 
 
 def convert(box, context):

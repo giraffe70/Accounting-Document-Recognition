@@ -13,6 +13,10 @@ _collector: ContextVar[list | None] = ContextVar("model_invocation_trace", defau
 _sink: ContextVar[Path | None] = ContextVar("trace_sink", default=None)
 
 
+def sink_path():
+    return _sink.get()
+
+
 def _safe(value):
     if isinstance(value, str) and value.startswith("data:image/"):
         return f"<embedded image: {len(value)} chars>"
@@ -84,6 +88,13 @@ def timed_call(content, attempt: int, parameters=None):
         yield record
     except Exception as exc:
         record["error"] = f"{type(exc).__name__}: {exc}"
+        record["error_code"] = getattr(exc,"code",None)
+        record["status_code"] = getattr(exc,"status_code",None)
+        try:
+            backend = json.loads(getattr(exc,"error", ""))
+            record["backend_error"] = backend.get("error",backend)
+        except (ValueError, TypeError, AttributeError):
+            pass
         raise
     finally:
         record["seconds"] = round(time.perf_counter() - started, 6)

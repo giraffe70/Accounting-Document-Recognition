@@ -186,6 +186,15 @@ def evaluate_quality(voucher: dict) -> dict:
     if isinstance(warnings, list):
         issues.extend(issue for issue in (_warning_issue(w) for w in warnings) if issue)
 
+    diagnostics = voucher.get("recognition_diagnostics") or {}
+    for diagnostic in diagnostics.get("issues", []):
+        if diagnostic.get("code") == "supplement_failed":
+            issues.append(_issue("supplement_failed", "recognition", "review", "", "補讀失敗，保留首次擷取結果，請覆核"))
+    for request in diagnostics.get("requests", []):
+        if request.get("downscaled"):
+            issues.append(_issue("input_downscaled_for_budget", "image", "review", "",
+                f"輸入預算縮圖：{request.get('original_input_sizes')} → {request.get('input_sizes')}；原圖與 OCR 保留"))
+
     if has_content and _matches_amount_conflict(fields):
         issues.append(_issue("amount_conflict", "amount", "review", "fields.amount_words",
                              "中文大寫與數字金額不一致，請人工核對"))

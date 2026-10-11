@@ -226,29 +226,29 @@ def reread_fields(image_path: str, type_key: str, chat, fields: list[str], *, mo
                   ocr_text="", hint="", evidence=None) -> dict:
     """A subset of the same extraction task, without side effects on other fields."""
     from app.core import prompts, model_invocation
-    from app.core import model_coordinates
-    coordinates = model_coordinates.for_image(image_path, settings_store.get_settings()["structure"], max_edge=2400) if mode == "image" else None
+    from app.core import model_coordinates, request_budget
+    coordinates = model_coordinates.for_image(image_path, settings_store.get_settings()["structure"], max_edge=2400, deferred=True) if mode == "image" else None
     content = [{"type": "text", "text": prompts.build_extract_prompt(type_key, mode=mode, ocr_text=ocr_text,
-                                       hint=hint, fields=fields, evidence=evidence, coordinate_context=coordinates)}]
+                                       hint=hint, fields=fields, evidence=evidence, coordinate_context=coordinates, image_path=image_path)}]
     if mode == "image":
-        content.append({"type": "image_url", "image_url": {"url": _data_uri(image_path, max_edge=2400)}})
+        content.append(request_budget.image_part(coordinates))
     with activity.stage("structure", "指定欄位補讀"):
         result = model_invocation.invoke_structured(chat, content,
                     lambda obj: _validate_image_extraction(obj, type_key, mode, image_path, fields, coordinate_context=coordinates), task="supplement", invoke=_invoke_text,
-                    schema=prompts.extraction_schema(type_key, mode, fields, coordinate_context=coordinates))
+                    schema=prompts.extraction_schema(type_key, mode, fields, coordinate_context=coordinates), diagnostics=(evidence or {}).get("recognition_diagnostics"))
     return result["fields"]
 
 
 def reread_document(image_path, type_key, chat, *, mode="image", ocr_text="", hint="", evidence=None):
     """Full contract reread; deliberately does not invoke extraction/supplement again."""
-    from app.core import prompts, model_invocation, model_coordinates
-    coordinates = model_coordinates.for_image(image_path, settings_store.get_settings()["structure"], max_edge=2400) if mode == "image" else None
-    content = [{"type":"text", "text":prompts.build_extract_prompt(type_key,mode=mode,ocr_text=ocr_text,hint=hint,evidence=evidence,coordinate_context=coordinates)}]
+    from app.core import prompts, model_invocation, model_coordinates, request_budget
+    coordinates = model_coordinates.for_image(image_path, settings_store.get_settings()["structure"], max_edge=2400, deferred=True) if mode == "image" else None
+    content = [{"type":"text", "text":prompts.build_extract_prompt(type_key,mode=mode,ocr_text=ocr_text,hint=hint,evidence=evidence,coordinate_context=coordinates,image_path=image_path)}]
     if mode == "image":
-        content.append({"type":"image_url","image_url":{"url":_data_uri(image_path,max_edge=2400)}})
+        content.append(request_budget.image_part(coordinates))
     with activity.stage("structure","欄位與表格補讀"):
         return model_invocation.invoke_structured(chat,content,lambda obj:_validate_image_extraction(obj,type_key,mode,image_path,coordinate_context=coordinates),
-                    task="supplement",invoke=_invoke_text,schema=prompts.extraction_schema(type_key,mode,coordinate_context=coordinates))
+                    task="supplement",invoke=_invoke_text,schema=prompts.extraction_schema(type_key,mode,coordinate_context=coordinates),diagnostics=(evidence or {}).get("recognition_diagnostics"))
 
 
 def _validate_image_extraction(obj: dict, type_key: str, mode: str, image_path: str, fields=None, *, coordinate_context=None) -> dict:
@@ -258,31 +258,36 @@ def _validate_image_extraction(obj: dict, type_key: str, mode: str, image_path: 
 
 def extract_evidence(image_path: str, type_key: str, chat, ocr_lines: list, ocr_text: str,
                      *, mode="image", hint="", company="", confirmed_fields=None, native_path=None, image_conditions=None, confirmed_type=False, confirmed_paths=None) -> Voucher:
-    from app.core import barcode, prompts, model_invocation, model_coordinates, classification_evidence
+    from app.core import barcode, prompts, model_invocation, model_coordinates, classification_evidence, request_budget
     from copy import deepcopy
     type_key, classification = classification_evidence.resolve(type_key,ocr_text,protected=confirmed_type or bool(confirmed_fields) or bool(confirmed_paths))
     model_invocation.invocation_trace.add({"kind":"classification_evidence",**classification})
-    coordinates = model_coordinates.for_image(image_path,settings_store.get_settings()["structure"]) if mode == "image" else None
+    coordinates = model_coordinates.for_image(image_path,settings_store.get_settings()["structure"],deferred=True) if mode == "image" else None
     context = _company_context(company)
+    diagnostics = context["recognition_diagnostics"] = {"version":1,"requests":[],"issues":[]}
     model_invocation.invocation_trace.add({"kind": "ocr", "lines": ocr_lines, "text": ocr_text})
     context["ocr_enabled"] = settings_store.parse_setting(settings_store.get_settings()["ocr"])[0] not in ("disabled", "none")
     context["image_conditions"] = image_conditions or {}
     context["confirmed_type"] = confirmed_type or bool(confirmed_fields) or bool(confirmed_paths)
     context["confirmed_paths"] = list(confirmed_paths or [])
     context["ocr_lines"] = ocr_lines
+    if ocr_lines:
+        from PIL import Image
+        with Image.open(image_path) as source_image:
+            context["ocr_size"] = list(source_image.size)
     qr_info = barcode.decode_diagnostics(native_path or image_path) if mode == "image" and type_key == "invoice" else None
     candidates = qr_info["candidates"] if qr_info else []
     if qr_info:
         model_invocation.invocation_trace.add({"kind": "qr_diagnostic", **qr_info})
     if len(candidates) == 1:
         context["qr"] = candidates[0]
-    content = [{"type": "text", "text": prompts.build_extract_prompt(type_key, mode=mode, ocr_text=ocr_text, hint=hint, evidence=context,coordinate_context=coordinates)}]
+    content = [{"type": "text", "text": prompts.build_extract_prompt(type_key, mode=mode, ocr_text=ocr_text, hint=hint, evidence=context,coordinate_context=coordinates,image_path=image_path)}]
     if mode == "image":
-        content.append({"type": "image_url", "image_url": {"url": _data_uri(image_path)}})
+        content.append(request_budget.image_part(coordinates))
     with activity.stage("structure", "欄位萃取"):
         data = model_invocation.invoke_structured(chat, content,
                 lambda obj: _validate_image_extraction(obj, type_key, mode, image_path,coordinate_context=coordinates), task="extract", invoke=_invoke_text,
-                schema=prompts.extraction_schema(type_key, mode,coordinate_context=coordinates))
+                schema=prompts.extraction_schema(type_key, mode,coordinate_context=coordinates),diagnostics=diagnostics)
     initial_ai = deepcopy(data)
     _record_evidence(data, "model", mode)
     data["validation_warnings"] = []
@@ -307,8 +312,24 @@ def extract_evidence(image_path: str, type_key: str, chat, ocr_lines: list, ocr_
     normalized = _build_voucher(deepcopy(data), type_key, normalize_word_total=False)
     data["fields"] = normalized.fields
     data["validation_warnings"] = list(dict.fromkeys(data["validation_warnings"] + normalized.validation_warnings))
-    supplement.apply(data, type_key, chat, image_path, mode=mode, ocr_text=evidence_text,
-                     context=context, confirmed_fields=confirmed_fields, native_path=native_path)
+    data["recognition_diagnostics"] = diagnostics
+    from app.core import recognition_checkpoint
+    normalized.initial_ai = initial_ai
+    normalized.field_evidence = data.get("field_evidence", {})
+    normalized.coordinate_context = coordinates
+    normalized.recognition_diagnostics = diagnostics
+    checkpoint = recognition_checkpoint.save(image_path, native_path or image_path, normalized, initial_ai,
+                                              confirmed_fields, confirmed_paths)
+    context["checkpoint_path"] = str(checkpoint)
+    first_read = deepcopy(data)
+    try:
+        supplement.apply(data, type_key, chat, image_path, mode=mode, ocr_text=evidence_text,
+                         context=context, confirmed_fields=confirmed_fields, native_path=native_path)
+    except Exception as exc:
+        data = first_read
+        supplement.failed(data, context, exc)
+    recognition_checkpoint.complete(checkpoint)
+    data["recognition_diagnostics"] = diagnostics
     type_key = context.get("effective_type", type_key)
     if doc_types.get(type_key).get("has_entries") and ocr_lines and not any(p == "entries" or p.startswith("entries[") for p in (confirmed_paths or [])):
         from copy import deepcopy
@@ -327,6 +348,7 @@ def extract_evidence(image_path: str, type_key: str, chat, ocr_lines: list, ocr_
                         keep_unmatched=mode == "image" and not dense) if ocr_lines else ({} if dense else vlm_boxes)
     voucher = _build_voucher(data, type_key)
     voucher.initial_ai = initial_ai
+    voucher.recognition_diagnostics = diagnostics
     if data.get("previous_contract_candidate"):
         voucher.previous_contract_candidate = data["previous_contract_candidate"]
     voucher.coordinate_context = coordinates
@@ -698,6 +720,7 @@ def _build_voucher(data: dict, type_key: str, *, derive_entries: bool = True, no
         "box_issues": data.get("box_issues") or [], "origin": data.get("origin") or {},
         "field_evidence": evidence, "validation_warnings": list(dict.fromkeys(warnings)),
         "classification_meta": data.get("classification_meta") or {},
+        "recognition_diagnostics": data.get("recognition_diagnostics") or {},
         **(_entries_from_voucher_form(data, spec) if derive_entries else {}),
         "currency": "TWD" if type_key in ("import_declaration", "export_declaration") and common["total_amount"] is not None else f.get("currency") or "TWD", "voucher_id": common["voucher_id"] or "",
         "date": common["date"] or "", "subtotal": common["subtotal"],

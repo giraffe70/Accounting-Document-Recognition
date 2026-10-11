@@ -3,28 +3,10 @@ from __future__ import annotations
 import json
 import logging
 from copy import deepcopy
-from app.core import invocation_trace, prompts
+from app.core import invocation_trace, prompts, request_budget
 logger = logging.getLogger("pdf_scan.model_invocation")
 OUTPUT_LIMITS = {"layout": 2048, "route": 2048, "extract": 4096, "supplement": 2048}
 REPAIR_CHAR_LIMIT = 1024
-
-
-def _input_estimate(messages, schema):
-    import re
-    values = []
-    images = 0
-    for message in messages:
-        content = message.get("content", "")
-        if isinstance(content, list):
-            values.extend(p.get("text", "") for p in content if p.get("type") == "text")
-            images += sum(p.get("type") == "image_url" for p in content)
-        else:
-            values.append(str(content))
-    values.append(json.dumps(schema or {}, ensure_ascii=False))
-    text = "\n".join(values)
-    non_ascii = len(re.findall(r"[^\x00-\x7f]", text))
-    # Approximation, not a tokenizer claim; reserve headroom for messages/vision.
-    return int((len(text)-non_ascii)/3 + non_ascii*1.6 + 128 + images*1024)
 
 
 def _permanent_error(exc):
@@ -50,7 +32,7 @@ def _output_bound(chat, limit):
             options = kwargs["options"]
             if hasattr(options, "model_dump"):
                 options = options.model_dump(exclude_none=True)
-            kwargs["options"] = {**options, "num_predict": limit}
+            kwargs["options"] = {"num_ctx":bounded.num_ctx, **options, "num_predict": limit}
         return chat.model_copy(update={"bound": bounded, "kwargs": kwargs})
     if any(s in module for s in ("openai", "anthropic", "google")):
         return chat.bind(max_tokens=limit)
@@ -175,16 +157,18 @@ def _parse_json(text: str) -> dict:
 def _format_rejected(exc):
     """Only an explicit backend format rejection permits a weaker output mode."""
     message = str(exc).lower()
+    if any(marker in message for marker in ("exceeds the available context", "exceed_context_size", "context length exceeded")):
+        return False
     return (getattr(exc, "status_code", None) in (400, 422) or isinstance(exc, ValueError)) and any(
         marker in message for marker in ("unsupported format", "format is not supported", "invalid format", "unsupported schema", "invalid json schema", "json schema is not supported", "cannot unmarshal object into go struct field chatrequest.format"))
 
 
-def invoke_structured(chat, content, validator, task="extract", invoke=None, schema=None) -> dict:
+def invoke_structured(chat, content, validator, task="extract", invoke=None, schema=None, diagnostics=None) -> dict:
     """At most two semantic rounds, each with at most three transport attempts."""
     caller = invoke or _invoke_text
     errors = ""
     previous_raw = ""
-    is_ollama = "ollama" in type(chat).__module__.lower()
+    is_ollama = "ollama" in type(getattr(chat, "bound", chat)).__module__.lower()
     formats = [schema, "json", None] if schema and is_ollama and hasattr(chat, "bind") else [None]
     format_index = 0
     original = prompts.task_messages(content)
@@ -198,32 +182,33 @@ def invoke_structured(chat, content, validator, task="extract", invoke=None, sch
                 request.insert(0, {"role": "system", "content": instruction})
             request.append({"role": "user", "content": json.dumps({"contract_errors": errors[:512], "previous_output_raw": previous_raw[:REPAIR_CHAR_LIMIT], "previous_output_truncated": len(previous_raw) > REPAIR_CHAR_LIMIT}, ensure_ascii=False)})
         output_limit = OUTPUT_LIMITS.get(task, 4096)
-        context_limit = getattr(getattr(chat, "bound", chat), "num_ctx", None)
-        estimate = _input_estimate(request, schema)
-        if context_limit and round_no == 2 and estimate > context_limit - 512:
-            repair = json.loads(request[-1]["content"])
-            repair.update(previous_output_raw="", previous_output_truncated=True)
-            request[-1]["content"] = json.dumps(repair, ensure_ascii=False)
-            estimate = _input_estimate(request, schema)
-        if context_limit and estimate > context_limit - 256:
-            invocation_trace.add({"kind":"context_budget_rejected", "task":task, "round":round_no,
-                                  "estimated_input_tokens":estimate, "context_limit":context_limit})
-            raise ValueError("estimated request exceeds context budget; reduce original evidence")
-        text_bytes = sum(len(json.dumps(m.get("content", ""), ensure_ascii=False).encode("utf-8")) for m in request if not isinstance(m.get("content"), list))
-        # Image payloads are not text tokens; report separate conservative text/visual estimates.
-        for message in request:
-            if isinstance(message.get("content"), list):
-                text_bytes += sum(len(p.get("text", "").encode("utf-8")) for p in message["content"] if p.get("type") == "text")
-        invocation_trace.add({"kind": "request_budget", "task": task, "round": round_no, "text_token_upper_bound": text_bytes,
-                              "estimated_input_tokens":estimate, "context_limit":context_limit, "output_limit": output_limit, "visual_tokens": "backend-dependent"})
         invocation_trace.add({"kind": "structured_round", "task": task, "round": round_no, "errors": errors})
         while True:
             selected_format = formats[format_index]
+            try:
+                outgoing, budget = request_budget.preflight(chat, request, selected_format, output_limit, task=task)
+            except request_budget.BudgetError as exc:
+                invocation_trace.add({"kind":"request_budget_failure", "task":task,"round":round_no,"code":exc.code,"details":exc.details})
+                if round_no != 2 or exc.code != "context_budget_exhausted":
+                    if diagnostics is not None:
+                        diagnostics.setdefault("issues",[]).append({"code":exc.code,"stage":task,"details":exc.details})
+                    raise
+                repair = json.loads(request[-1]["content"])
+                if not repair.get("previous_output_raw"):
+                    raise
+                repair.update(previous_output_raw="", previous_output_truncated=True)
+                request[-1]["content"] = json.dumps(repair, ensure_ascii=False)
+                invocation_trace.add({"kind":"repair_fragment_omitted", "task":task, "reason":exc.code})
+                outgoing, budget = request_budget.preflight(chat, request, selected_format, output_limit, task=task)
+            budget.update(task=task, round=round_no, output_mode="schema" if isinstance(selected_format,dict) else "json" if selected_format else "text")
+            invocation_trace.add({"kind":"request_budget", **budget})
+            if diagnostics is not None:
+                diagnostics.setdefault("requests", []).append(budget)
             bound = chat.bind(format=selected_format) if selected_format is not None else chat
             bound = _output_bound(bound, output_limit)
             invocation_trace.add({"kind": "output_mode", "task": task, "mode": "schema" if isinstance(selected_format, dict) else "json" if selected_format else "text"})
             try:
-                raw = caller(bound, request)
+                raw = caller(bound, outgoing)
                 break
             except Exception as exc:
                 if format_index >= len(formats) - 1 or not _format_rejected(exc):
@@ -264,7 +249,7 @@ def source_versions() -> dict:
                for name in ("accounting_policies.json", "accounts.json", "companies.json", "entry_examples.json")}
     from importlib.metadata import version, PackageNotFoundError
     dependencies = {}
-    for package in ("langchain-ollama", "ollama", "langchain-openai", "openai", "pydantic", "Pillow", "numpy", "opencv-python", "paddleocr", "paddlepaddle", "paddlepaddle-gpu"):
+    for package in ("langchain-ollama", "ollama", "langchain-openai", "openai", "pydantic", "Pillow", "numpy", "opencv-python", "paddleocr", "paddlepaddle", "paddlepaddle-gpu", "tokenizers"):
         try:
             dependencies[package] = version(package)
         except PackageNotFoundError:
@@ -275,6 +260,8 @@ def source_versions() -> dict:
     parameters = {"ollama_num_ctx": config.OLLAMA_NUM_CTX, "output_limits": OUTPUT_LIMITS, "repair_char_limit": REPAIR_CHAR_LIMIT}
     from app.core import model_coordinates
     parameters.update(coordinate_profiles_sha256=model_coordinates.registry_digest(), layout_version=3, page_ocr_version=1)
+    parameters.update(request_budget_version=request_budget.VERSION, tokenizer_profile_sha256=request_budget.registry_digest(),
+                      budget_safety=request_budget.SAFETY, budget_edges=request_budget.EDGES, evidence_version=1)
     return {"hash_version": 3, "source_sha256": sources, "runtime_sha256": runtime, "dependencies": dependencies,
             "recognition_contract": {"version": 3, "coordinates": "normalized_1000", "model_coordinates":"explicit_calibrated_profile", "router_stages":["page","regions_if_multiple"], "max_regions": 16, "split_iou_max": .1, "supplement_tasks": 1, "supplement_max_edge": 2400, "output_limits": OUTPUT_LIMITS, "repair_char_limit": REPAIR_CHAR_LIMIT},
             "prompt_version_sha256": digest(prompt_sources), "code_version_sha256": digest(sources),

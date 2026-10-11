@@ -6,7 +6,7 @@
   const statusLabel = {queued:"排隊中",running:"執行中",cancelling:"取消中",cancelled:"已取消",interrupted:"已中斷",terminated:"已終止",completed:"已完成",succeeded:"成功",partial:"部分完成／待分割",skipped:"來源附頁／略過",failed:"失敗",timeout:"逾時"};
   const qualityStateLabel = {usable:"可用",needs_review:"待覆核",insufficient:"資訊不足"};
   const contentKindLabel = {supporting:"佐證文件",non_voucher:"非憑證頁",document:"單據",unknown:"未判定",blank:"空白頁"};
-  const processingReasonLabel = {manual_split:"等待人工分割",page_review:"頁面角色／單張判斷待覆核",document_partial_failure:"單據部分擷取失敗",insufficient_data:"擷取完成但資料不足",completed:"擷取完成",skipped:"已略過",execution_failure:"執行失敗"};
+  const processingReasonLabel = {manual_split:"等待人工分割",page_review:"頁面角色／單張判斷待覆核",document_partial_failure:"單據部分擷取失敗",insufficient_data:"擷取完成但資料不足",completed:"擷取完成",skipped:"已略過",execution_failure:"執行失敗",input_budget_insufficient:"輸入預算不足"};
   function statusText(data) {
     return data.status === "partial" && processingReasonLabel[data.processing_reason] ? processingReasonLabel[data.processing_reason] : statusLabel[data.status] || data.status;
   }
@@ -72,7 +72,7 @@
         const mismatch = data.restart_required || (data.loaded_version && data.disk_version && data.loaded_version !== data.disk_version);
         banner.textContent = runtimeReady
           ? `驗證環境就緒 · 協定 ${data.worker_protocol ?? "—"} · 版本 ${data.loaded_version ?? "—"}`
-          : `驗證環境尚未就緒${mismatch ? "：載入版本與磁碟版本不一致" : ""}。請完整重新啟動服務並重新載入此頁面。`;
+          : `驗證環境尚未就緒${mismatch ? "：載入版本與磁碟版本不一致" : data.token_budget?.ready === false ? `：輸入預算設定未就緒（${data.token_budget.reason || "請準備本機詞表"}）` : ""}。請完成設定並完整重新啟動服務，再載入此頁面。`;
         banner.classList.toggle("hidden", runtimeReady);
         banner.classList.toggle("warn", !runtimeReady);
       }
@@ -448,13 +448,15 @@
     const docArtifacts = Array.isArray(selectedDoc?.artifacts) ? selectedDoc.artifacts : [];
     const docOriginal = docArtifacts.find(item => item.kind === "original" && item.url);
     const docInput = docArtifacts.find(item => item.kind === "input" && item.url);
+    const sentInputs = docArtifacts.filter(item => /^model_input_\d+$/.test(item.kind) && item.url);
     const inputLabel = data.mode === "ocr_llm" ? "OCR 對照圖（未傳送圖片至模型）" : "模型輸入圖";
     const docImagePanel = [docOriginal,docInput].filter(Boolean).length ? `<details class="detail-box"><summary>單據影像（裁切圖／${esc(inputLabel)}）</summary>${[docOriginal,docInput].filter(Boolean).map(item=>`<div class="document-artifact-preview"><h4>${item.kind==="original"?"單據原圖（裁切圖）":esc(inputLabel)}</h4><a href="${esc(item.url)}" target="_blank" rel="noopener"><img src="${esc(item.url)}" alt="${item.kind==="original"?"單據裁切圖":esc(inputLabel)}"></a></div>`).join("")}</details>` : "";
     const selectedDetail = selectedDoc ? `<div class="detail-box"><h3>${esc(typeSpec.label || selectedVoucher.doc_type || "單據結果")}</h3>${statusReason ? `<div class="processing-reason">${esc(statusReason)}</div>` : ""}${selectedDoc.error ? `<div class="hint warn">${esc(selectedDoc.error)}</div>` : ""}${qualityBlock(selectedDoc.quality || selectedVoucher.quality)}</div>
       <div class="detail-box"><h4>欄位</h4><table class="document-field-table"><tbody>${displayFieldRows(selectedVoucher, fieldSpecs)}</tbody></table></div>
       <div class="detail-box"><h4>明細</h4>${labeledTable(selectedVoucher.items, itemSpecs)}</div><div class="detail-box"><h4>分錄</h4>${labeledTable(selectedVoucher.entries, entrySpecs)}</div>${docImagePanel}
       <details class="detail-box"><summary>技術診斷</summary><details class="detail-box"><summary>欄位定位、轉換資訊與分類證據</summary><pre class="diagnostic-pre">${esc(JSON.stringify({origin:selectedDoc.origin || selectedVoucher.origin,boxes:selectedDoc.boxes || selectedVoucher.boxes,coordinate_context:selectedDoc.coordinate_context || selectedVoucher.coordinate_context,image_transforms:selectedDoc.image_transforms || selectedVoucher.image_transforms,classification_evidence:selectedDoc.classification_evidence || selectedVoucher.classification_evidence},null,2))}</pre></details>
-      <details class="detail-box"><summary>單據 OCR 與模型追蹤</summary><pre class="diagnostic-pre">${esc(JSON.stringify({ocr:selectedDoc.ocr,trace:selectedDoc.trace},null,2))}</pre></details>
+      <details class="detail-box"><summary>輸入預算、補讀診斷與模型追蹤</summary><pre class="diagnostic-pre">${esc(JSON.stringify({recognition_diagnostics:selectedDoc.recognition_diagnostics || selectedVoucher.recognition_diagnostics,ocr:selectedDoc.ocr,trace:selectedDoc.trace},null,2))}</pre></details>
+      ${sentInputs.length ? `<details class="detail-box"><summary>各輪實際模型輸入圖（包含補讀）</summary>${sentInputs.map((item,index)=>`<div class="document-artifact-preview"><h4>模型輸入 ${index+1}</h4><a href="${esc(item.url)}" target="_blank" rel="noopener"><img src="${esc(item.url)}" loading="lazy" alt="模型輸入 ${index+1}"></a></div>`).join("")}</details>` : ""}
       <details class="detail-box"><summary>完整單據 JSON</summary><pre class="diagnostic-pre">${esc(JSON.stringify({voucher:selectedVoucher,origin:selectedDoc.origin,quality:selectedDoc.quality,processing_reason:selectedDoc.processing_reason},null,2))}</pre></details></details>` : `<div class="detail-box"><strong>${esc(statusReason || "尚無可顯示的擷取結果")}</strong>${data.error ? `<div class="hint warn">${esc(data.error)}</div>` : ""}${qualityBlock(data.quality)}</div>`;
     const tabs = `<div class="review-mobile-tabs"><button class="btn btn-sm active" type="button" data-mobile-view="image">圖片</button><button class="btn btn-sm" type="button" data-mobile-view="data">資料</button></div>`;
     const pageTech = `<details class="detail-box"><summary>頁面 OCR 與模型追蹤</summary><pre class="diagnostic-pre">${esc(JSON.stringify({ocr:data.ocr,trace:data.trace},null,2))}</pre></details>${diagnosticControl || ""}`;

@@ -151,7 +151,7 @@ def _constraints(schema: dict) -> str:
 
 
 def build_extract_prompt(type_key: str, mode: InputMode = "image", ocr_text: str = "", hint: str = "",
-                         fields: list[str] | None = None, evidence: dict | None = None, *, coordinate_context=None) -> str:
+                         fields: list[str] | None = None, evidence: dict | None = None, *, coordinate_context=None, image_path=None) -> str:
     spec = doc_types.get(type_key)
     def describe(specs):
         return "；".join(f"{s['key']}={s['label']}({'數/原文' if s['kind']=='number' else '原文'}|null)" for s in specs)
@@ -174,7 +174,8 @@ def build_extract_prompt(type_key: str, mode: InputMode = "image", ocr_text: str
             parts.append(model_coordinates.instructions(coordinate_context))
         else:
             parts.append("boxes 僅框可定位的指定欄位；[x1,y1,x2,y2] 為0至1000整數，未知省略。")
-    return "\n".join(parts) + DATA_SEPARATOR + _json({"locator_hint": hint, "reference_data": evidence or {}, "ocr_text": ocr_text})
+    from app.core import prompt_evidence
+    return "\n".join(parts) + DATA_SEPARATOR + _json({"locator_hint": hint, "reference_data": prompt_evidence.assemble(ocr_text, evidence, image_path)})
 
 
 def build_accounting_prompt(context: dict, chart: list, policy: dict, examples: list | None = None) -> str:

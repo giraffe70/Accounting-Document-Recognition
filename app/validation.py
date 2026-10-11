@@ -52,7 +52,6 @@ def _schema_ready(con):
             and "page_json" in {r[1] for r in con.execute("PRAGMA table_info(results)")})
 
 
-@router.get("/runtime")
 def runtime_status():
     disk = _versioning.source_versions()["code_version_sha256"]
     try:
@@ -64,6 +63,15 @@ def runtime_status():
             "result_contract_version":RESULT_CONTRACT, "schema_version":SCHEMA_VERSION,
             "restart_required": disk != LOADED_BUILD, "schema_ready": schema_ready,
             "ready": schema_ready and disk == LOADED_BUILD}
+
+
+@router.get("/runtime")
+def get_runtime_status():
+    from app.core import request_budget
+    runtime = runtime_status()
+    runtime["token_budget"] = request_budget.status()
+    runtime["ready"] = runtime["ready"] and runtime["token_budget"]["ready"]
+    return runtime
 
 
 def _handshake(payload):
@@ -812,7 +820,7 @@ def _child_entry(conn, payload):
         atomic_json(path, data["trace"])
         data["artifacts"]["trace_json"] = {"path":str(path), "media_type":"application/json"}
         conn.send({"ok": False, "data": data, "error": f"{type(exc).__name__}: {exc}",
-                   "traceback": traceback.format_exc()})
+                   "traceback": traceback.format_exc(),"cancelled":isinstance(exc,(KeyboardInterrupt,SystemExit))})
     finally:
         conn.close()
 
@@ -828,7 +836,44 @@ def _recover_diagnostics(payload):
             pass
         data["ocr"] = next((r.get("lines", []) for r in reversed(data["trace"]) if r.get("kind") in ("ocr", "ocr_result", "supplement_ocr")), [])
         data["artifacts"]["trace_json"] = {"path": str(path), "media_type": "application/json"}
+        data["recognition_diagnostics"]={"version":1,
+            "requests":[{k:v for k,v in r.items() if k!="kind"} for r in data["trace"] if r.get("kind")=="request_budget"],
+            "issues":[{k:v for k,v in r.items() if k!="kind"} for r in data["trace"] if r.get("kind") in ("request_budget_failure","supplement_failure")]}
     return data
+
+
+def _recover_first_read(payload, response):
+    """Only an interrupted optional reread may promote a validated checkpoint."""
+    from app.core import recognition_checkpoint
+    if payload.get("phase") != "document" or response.get("ok") or response.get("cancelled"):
+        return response
+    if response.get("error", "").startswith("子行程回傳協定"):
+        return response
+    with _connect() as con:
+        run = con.execute("SELECT status,cancel_requested FROM runs WHERE id=?",(payload["run_id"],)).fetchone()
+    if not run or run["status"] != "running" or run["cancel_requested"]:
+        return response
+    if not runtime_status()["ready"] or payload.get("execution_version_sha256") != _versioning.source_versions()["execution_version_sha256"]:
+        return response
+    directory = RUNS / payload["run_id"] / payload["id"]
+    voucher = recognition_checkpoint.recover(directory / "first_read_checkpoint.json",
+        execution_version=payload["execution_version_sha256"],source_path=payload["page_path"],reason=response.get("error", "子行程中斷"))
+    if voucher is None:
+        return response
+    data = response.get("data") or _recover_diagnostics(payload)
+    from app.core import invocation_trace
+    data.update(voucher=voucher,recognition_diagnostics=voucher["recognition_diagnostics"],
+        actual_path=payload["combo"]["mode"],boxes={"coordinates":voucher.get("boxes",{}),"sources":{},"image":"input"},
+        timings={"complete_seconds":response.get("wall_seconds",0)})
+    source = Path(payload["page_path"])
+    data.setdefault("artifacts",{})["original"] = {"path":str(source),"media_type":"image/png" if source.suffix.lower()==".png" else "image/jpeg"}
+    sent = (voucher.get("coordinate_context") or {}).get("input_path")
+    if sent and Path(sent).is_file() and Path(sent).resolve().is_relative_to(directory.resolve()):
+        data["artifacts"]["input"]={"path":sent,"media_type":"image/png"}
+    invocation_trace.atomic_json(directory / "result.json",voucher)
+    data["artifacts"]["result_json"]={"path":str(directory / "result.json"),"media_type":"application/json"}
+    response.update(ok=True,timeout=False,data=data,error="",checkpoint_recovered=True)
+    return response
 
 
 def _recognize_layout(payload):
@@ -888,7 +933,7 @@ def _run_page_child(payload, timeout, runner=None):
     layout = base["layout"]
     base.update(documents=[], voucher={}, actual_path=payload["combo"]["mode"],
                 origin=page_layout.origin(payload["page_path"], {"box":[0,0,1000,1000]}, payload["page_no"]))
-    base.update({k:layout.get(k) for k in ("coordinate_context","image_transforms","classification_evidence")})
+    base.update({k:layout.get(k) for k in ("coordinate_context","image_transforms","classification_evidence","recognition_diagnostics")})
     base["timings"] = {"complete_seconds": float(layout_response.get("wall_seconds", 0)), "recognition_seconds": float(layout_response.get("wall_seconds", 0))}
     if layout["content_kind"] in ("blank", "supporting", "non_voucher") and layout["auto_split"]:
         base.update(page_status="skipped", processing_reason="skipped", skip_reason=layout["content_kind"], quality={"version":1,"state":"usable","content_kind":layout["content_kind"],"issues":[]})
@@ -945,7 +990,8 @@ def _run_page_child(payload, timeout, runner=None):
                 quality["state"] = "needs_review"
             quality.setdefault("issues", []).append({"code":"layout_fallback", "category":"layout", "severity":"review", "message":layout["fallback_reason"]})
         status = "succeeded" if response.get("ok") else "timeout" if response.get("timeout") else "failed"
-        document = {**data, "id": document_id, "origin": origin, "status": status, "document_index": index, "error": response.get("error", "")}
+        document = {**data, "id": document_id, "origin": origin, "status": status, "document_index": index, "error": response.get("error", ""),
+                    "processing_reason":"input_budget_insufficient" if "context_budget_exhausted" in response.get("error","") else "execution_failure" if not response.get("ok") else "insufficient_data" if data.get("voucher",{}).get("quality",{}).get("state")=="insufficient" else "completed"}
         for kind, info in data.get("artifacts", {}).items():
             base.setdefault("artifacts", {})[f"document_{index}_{kind}"] = info
         total_seconds += float(response.get("wall_seconds", 0))
@@ -1015,7 +1061,7 @@ def _run_child(payload, timeout):
     parent.close()
     with _active_lock:
         _active_process, _active_run_id = None, None
-    return response
+    return _recover_first_read(payload,response)
 
 
 def _scheduler():
@@ -1082,7 +1128,7 @@ def _save_response(task, response):
     persistence_started = time.perf_counter()
     data = response.get("data") or {}
     if not response.get("ok"):
-        data["processing_reason"] = "execution_failure"
+        data["processing_reason"] = "input_budget_insufficient" if "context_budget_exhausted" in response.get("error", "") else "execution_failure"
     if task.get("worker_protocol") == WORKER_PROTOCOL:
         if response.get("ok") and (data.get("page_status") not in ("succeeded", "partial", "skipped") or
             not isinstance(data.get("layout"), dict) or not isinstance(data.get("quality"), dict) or
@@ -1101,7 +1147,7 @@ def _save_response(task, response):
             data.setdefault("trace", []).append({"kind":"persistence_version_error", "error":response["error"]})
             atomic_json(RUNS/task["run_id"]/task["id"]/"trace.json", data["trace"])
     if not response.get("ok"):
-        data["processing_reason"] = "execution_failure"
+        data["processing_reason"] = "input_budget_insufficient" if "context_budget_exhausted" in response.get("error", "") else "execution_failure"
     if not data.get("timings"):
         data["timings"] = {"complete_seconds": response.get("wall_seconds", 0),
                            "recognition_seconds": response.get("wall_seconds", 0)}
@@ -1127,7 +1173,7 @@ def _save_response(task, response):
            (response.get("error", "") + ("\n" + response["traceback"] if response.get("traceback") else "")),
            data.get("result_dir", ""), task["id"]))
         con.execute("UPDATE results SET page_json=? WHERE id=?",
-                    (json.dumps({key: data[key] for key in ("layout", "origin", "quality", "result_contract_version", "skip_reason", "integrity_errors", "processing_reason", "coordinate_context", "image_transforms", "classification_evidence") if key in data}, ensure_ascii=False), task["id"]))
+                    (json.dumps({key: data[key] for key in ("layout", "origin", "quality", "result_contract_version", "skip_reason", "integrity_errors", "processing_reason", "coordinate_context", "image_transforms", "classification_evidence", "recognition_diagnostics") if key in data}, ensure_ascii=False), task["id"]))
         con.execute("DELETE FROM artifacts WHERE result_id=?", (task["id"],))
         for kind, info in (data.get("artifacts") or {}).items():
             con.execute("INSERT INTO artifacts(id,result_id,kind,path,media_type) VALUES(?,?,?,?,?)",
@@ -1292,6 +1338,10 @@ def _recognize_document(payload):
     sent_path = (data.get("coordinate_context") or {}).get("input_path")
     if sent_path and Path(sent_path).is_file() and Path(sent_path).resolve().is_relative_to(result_dir.resolve()):
         artifacts["input"] = {"path":sent_path, "media_type":"image/png"}
+    for index, record in enumerate(r for r in trace if r.get("kind")=="model_input_final"):
+        sent_path = record.get("context",{}).get("input_path")
+        if sent_path and Path(sent_path).is_file() and Path(sent_path).resolve().is_relative_to(result_dir.resolve()):
+            artifacts[f"model_input_{index}"] = {"path":sent_path,"media_type":"image/png"}
     box_sources = {}
     for key in valid_boxes:
         if combo["mode"] == "vlm_direct":
@@ -1305,6 +1355,7 @@ def _recognize_document(payload):
     box_metadata = {"coordinates": valid_boxes, "sources": box_sources, "image": "input"}
     return {"actual_path": actual, "voucher": data, "boxes": box_metadata, "trace": trace,
             "coordinate_context":data.get("coordinate_context"), "classification_evidence":data.get("classification_evidence"),
+            "recognition_diagnostics":data.get("recognition_diagnostics"),
             "ocr": ocr_lines, "timings": timings, "result_dir": str(result_dir), "artifacts": artifacts}
 
 
@@ -1365,11 +1416,11 @@ def _csv_files(data):
       "fields.csv": ["result_id","source","field","value","box","located"],
       "items.csv": ["result_id","source","index","description","quantity","unit_price","amount","hs_code","origin_country","fee_code"],
       "entries.csv": ["result_id","source","index","description","amount","debit_account","debit_account_name","credit_account","credit_account_name","evidence_paths_json","amount_source"]}
-    specs["vouchers.csv"] += ["processing_reason","coordinate_contract_version","coordinate_context_json","classification_evidence_json"]
+    specs["vouchers.csv"] += ["processing_reason","coordinate_contract_version","coordinate_context_json","classification_evidence_json","recognition_diagnostics_json"]
     buffers = {name: io.StringIO(newline="") for name in specs}
     writers = {name: csv.DictWriter(buffers[name], fieldnames=fields, extrasaction="ignore") for name, fields in specs.items()}
     for writer in writers.values(): writer.writeheader()
-    specs["pages.csv"] = ["result_id","source","page","status","image_sha256","complete_seconds","document_count","combo","repeat","attempt","is_latest","result_contract_version","integrity_ok","integrity_reason","skip_reason","processing_reason","coordinate_contract_version","coordinate_context_json","classification_evidence_json"]
+    specs["pages.csv"] = ["result_id","source","page","status","image_sha256","complete_seconds","document_count","combo","repeat","attempt","is_latest","result_contract_version","integrity_ok","integrity_reason","skip_reason","processing_reason","coordinate_contract_version","coordinate_context_json","classification_evidence_json","recognition_diagnostics_json"]
     buffers["pages.csv"] = io.StringIO(newline="")
     writers["pages.csv"] = csv.DictWriter(buffers["pages.csv"], fieldnames=specs["pages.csv"])
     writers["pages.csv"].writeheader()
@@ -1387,7 +1438,7 @@ def _csv_files(data):
             "result_contract_version":page.get("result_contract_version"), "integrity_ok":page.get("integrity", {}).get("ok", False),
             "integrity_reason":_csv_safe(page.get("integrity", {}).get("reason", "")), "skip_reason":page.get("skip_reason", ""),
             "processing_reason":page.get("processing_reason",""), "coordinate_contract_version":(page.get("coordinate_context") or {}).get("contract_version"),
-            "coordinate_context_json":json.dumps(page.get("coordinate_context") or {},ensure_ascii=False), "classification_evidence_json":json.dumps(page.get("classification_evidence") or {},ensure_ascii=False)})
+            "coordinate_context_json":json.dumps(page.get("coordinate_context") or {},ensure_ascii=False), "classification_evidence_json":json.dumps(page.get("classification_evidence") or {},ensure_ascii=False),"recognition_diagnostics_json":json.dumps(page.get("recognition_diagnostics") or {},ensure_ascii=False)})
         if documents:
             for document in documents:
                 flattened.append({**page, **document, "timings":document.get("timings") or {}, "parent_result_id": page["id"], "document_id": document["id"]})
@@ -1410,6 +1461,7 @@ def _csv_files(data):
           "source_region": json.dumps((result.get("origin") or voucher.get("origin") or {}).get("region")),
           "origin_json": json.dumps(result.get("origin") or voucher.get("origin") or {}, ensure_ascii=False),
           "quality_json": json.dumps(voucher.get("quality") or {}, ensure_ascii=False),
+          "recognition_diagnostics_json":json.dumps(voucher.get("recognition_diagnostics") or {},ensure_ascii=False),
           "box_issues_json": json.dumps(voucher.get("box_issues") or [], ensure_ascii=False),
           "sha256": (result.get("origin") or voucher.get("origin") or {}).get("image_sha256", ""),
           "is_latest":result.get("is_latest", False), "result_contract_version":result.get("result_contract_version"),

@@ -107,10 +107,12 @@ class InvocationTests(unittest.TestCase):
         retry = json.loads(requests[1][-1]["content"])
         self.assertEqual(retry["previous_output_raw"], '{"ok": "wrong"}')
 
-    def test_ollama_format_rejection_falls_back_but_generic_error_does_not(self):
+    @patch("app.core.request_budget.runtime_profile", return_value=({"profile_id":"offline", "processor":{}},
+        type("OfflineTokenizer",(),{"encode":lambda self,text,**kw:type("Encoding",(),{"ids":list(text)})()})()))
+    def test_ollama_format_rejection_falls_back_but_generic_error_does_not(self, _profile):
         from langchain_ollama import ChatOllama
         from ollama import ChatResponse, Message, ResponseError
-        chat = ChatOllama(model="offline-test", base_url="http://127.0.0.1:1", temperature=0, seed=42)
+        chat = ChatOllama(model="offline-test", base_url="http://127.0.0.1:1", temperature=0, seed=42, num_ctx=8192)
         response = ChatResponse(model="offline-test",message=Message(role="assistant",content='{"ok":true}'),
                                 done=True,done_reason="stop")
         def reject_schema_then_return_json(**kwargs):

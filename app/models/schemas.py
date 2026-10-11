@@ -133,6 +133,7 @@ class Voucher(_StrCoerceModel):
     validation_warnings: list[str] = Field(default_factory=list)
     origin: dict = Field(default_factory=dict)
     quality: dict = Field(default_factory=dict)
+    recognition_diagnostics: dict = Field(default_factory=dict)
     box_issues: list[dict] = Field(default_factory=list)
     classification_meta: dict = Field(default_factory=dict)
     payment_state: dict = Field(default_factory=dict)  # 原始與正規化付款資訊

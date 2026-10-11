@@ -57,6 +57,29 @@ class RuntimeValidationTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "migration missing"):
                 validation._documents(con,"a")
 
+    def test_budget_runtime_and_csv_diagnostics_are_additive(self):
+        with patch("app.core.request_budget.status", return_value={"ready":False,"reason":"profile missing"}):
+            runtime = validation.get_runtime_status()
+        self.assertFalse(runtime["ready"])
+        self.assertFalse(runtime["token_budget"]["ready"])
+        diagnostic = {"version":1,"requests":[{"downscaled":True,"input_sizes":[[834,1180]]}],"issues":[{"code":"supplement_failed"}]}
+        self.result("diagnostic",1,"succeeded")
+        with validation._connect() as con:
+            row = con.execute("SELECT data_json FROM document_results WHERE id='diagnostic-doc'").fetchone()
+            document = json.loads(row["data_json"])
+            document["voucher"]["recognition_diagnostics"] = diagnostic
+            con.execute("UPDATE document_results SET data_json=? WHERE id='diagnostic-doc'",(json.dumps(document),))
+            page = json.loads(con.execute("SELECT page_json FROM results WHERE id='diagnostic'").fetchone()[0])
+            page["recognition_diagnostics"] = diagnostic
+            con.execute("UPDATE results SET page_json=? WHERE id='diagnostic'",(json.dumps(page),))
+        for view in ("latest","history"):
+            files = validation._csv_files(validation._export_data("run",view))
+            for name in ("vouchers.csv","pages.csv"):
+                rows = list(csv.DictReader(files[name].lstrip("\ufeff").splitlines()))
+                self.assertEqual(json.loads(rows[0]["recognition_diagnostics_json"]),diagnostic)
+            stat = validation.get_run("run")["latest_statistics"][0]
+            self.assertEqual(stat["failed"],0)
+
     def test_handshake_blocks_missing_old_parent_and_changed_batch_before_model(self):
         pipe = Mock()
         with patch.object(validation, "_recognize") as recognize:

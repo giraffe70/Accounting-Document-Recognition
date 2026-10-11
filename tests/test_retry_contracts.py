@@ -48,7 +48,9 @@ class StructuredRetryContractTests(unittest.TestCase):
         self.assertEqual(chat.invoke.call_count, 1)
         sleep.assert_not_called()
 
-    def test_ollama_tasks_bind_output_limit_schema_and_record_usage(self):
+    @patch("app.core.request_budget.runtime_profile", return_value=({"profile_id":"offline", "processor":{}},
+        SimpleNamespace(encode=lambda text, **kw:SimpleNamespace(ids=list(text)))))
+    def test_ollama_tasks_bind_output_limit_schema_and_record_usage(self, _profile):
         from langchain_ollama import ChatOllama
         from ollama import ChatResponse, Message
         schema = {"type": "object", "properties": {"ok": {"type": "boolean"}}}
@@ -93,7 +95,7 @@ class StructuredRetryContractTests(unittest.TestCase):
                 self.assertIsNot(bounded.bound,chat)
                 self.assertEqual(bounded.config,original.config)
                 self.assertEqual(bounded.kwargs["format"],"json")
-                self.assertEqual(bounded.kwargs["options"],{"seed":42,"temperature":0,"num_predict":2048})
+                self.assertEqual(bounded.kwargs["options"],{"num_ctx":8192,"seed":42,"temperature":0,"num_predict":2048})
                 self.assertEqual(bounded.bound.num_ctx,8192)
                 self.assertEqual(chat.num_predict,128)
                 self.assertEqual(original.kwargs["options"],options)

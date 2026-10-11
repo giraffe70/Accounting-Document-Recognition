@@ -186,7 +186,7 @@ class PageRoutingV3Tests(unittest.TestCase):
                 with (patch("app.core.model_factory.get_chat_model", return_value=object()),
                       patch("app.core.pipeline._invoke_text", return_value=json.dumps(_page())),
                       patch("app.core.barcode.decode_diagnostics", return_value={"detections": [], "source_size": [1000, 1000]}),
-                      patch("app.core.model_coordinates.for_image", return_value={"verified": False}),
+                      patch("app.core.model_coordinates.for_image", return_value={"verified":False,"input_path":str(image),"input_size":[1000,1000],"source_size":[1000,1000],"preprocessing":{}}),
                       patch("app.core.settings_store.get_settings", return_value=ocr_settings),
                       patch("app.core.page_ocr.read", side_effect=read_ocr) as reader):
                     result = page_layout.detect(str(image), mode="image", ocr_text="",
@@ -198,7 +198,7 @@ class PageRoutingV3Tests(unittest.TestCase):
             with (patch("app.core.model_factory.get_chat_model", return_value=object()),
                   patch("app.core.pipeline._invoke_text", return_value=json.dumps(_page())),
                   patch("app.core.barcode.decode_diagnostics", return_value={"detections": [], "source_size": [1000, 1000]}),
-                  patch("app.core.model_coordinates.for_image", return_value={"verified": False}),
+                  patch("app.core.model_coordinates.for_image", return_value={"verified":False,"input_path":str(image),"input_size":[1000,1000],"source_size":[1000,1000],"preprocessing":{}}),
                   patch("app.core.settings_store.get_settings", return_value={"structure": "fake/model", "ocr": "disabled/none"}),
                   patch("app.core.page_ocr.read") as reader):
                 page_layout.detect(str(image), mode="image", ocr_text="", model_setting="fake/model",

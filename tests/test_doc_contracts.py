@@ -131,6 +131,8 @@ class DocumentContractTests(unittest.TestCase):
              patch("app.core.settings_store.parse_setting", return_value=("fake", "model")), \
              patch("app.core.model_factory.get_chat_model", return_value=object()), \
              patch("app.core.pipeline._data_uri", return_value="data:image/png;base64,offline"), \
+             patch("app.core.model_coordinates.for_image", return_value={}), \
+             patch("app.core.request_budget.image_part", return_value={"type":"image_url","image_url":{"url":"data:image/png;base64,offline"}}), \
              patch("app.core.pipeline._invoke_text", side_effect=error, return_value=response), \
              patch("app.core.activity.stage", return_value=nullcontext()):
             return doc_router.classify("does-not-exist.png", mode=mode, ocr_text="OCR ONLY SENTINEL" if mode == "ocr_text" else "")

@@ -33,6 +33,15 @@ def qr(number="AA12345678", roc="1150604", subtotal=100, total=105):
 
 class RefactorFlowTests(unittest.TestCase):
     def setUp(self):
+        # These contract unit tests do not exercise image I/O or checkpoints.
+        for name, value in (("app.core.recognition_checkpoint.save", Path("offline-checkpoint")),
+                            ("app.core.recognition_checkpoint.mark_supplement", None),
+                            ("app.core.recognition_checkpoint.complete", None),
+                            ("app.core.request_budget.image_part", {"type":"image_url","image_url":{"url":"data:image/png;base64,test"}})):
+            mock = patch(name, return_value=value)
+            mock.start()
+            self.addCleanup(mock.stop)
+
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.data_patch = patch.object(config, "DATA_DIR", Path(self.temp.name))

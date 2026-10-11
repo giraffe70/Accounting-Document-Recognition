@@ -37,12 +37,16 @@ def classify(image_path: str = "", hint: str = "", *, mode="image", ocr_text="",
     chat = model_factory.get_chat_model(provider, model, temperature=0.0)
     content = [{"type": "text", "text": prompts.build_route_prompt(mode, ocr_text, hint)}]
     if mode == "image":
-        content.append({"type": "image_url", "image_url": {"url": pipeline._data_uri(image_path)}})
+        from app.core import request_budget, model_coordinates
+        content.append(request_budget.image_part(model_coordinates.for_image(image_path, setting, deferred=True)))
     try:
         with activity.stage("structure", setting + "（判類型）"):
             obj = model_invocation.invoke_structured(chat, content, lambda obj: validate_route(obj, mode),
                                                        task="route", invoke=pipeline._invoke_text, schema=prompts.RouteOutput.model_json_schema())
     except Exception as exc:
+        from app.core.request_budget import BudgetError
+        if isinstance(exc, BudgetError):
+            raise
         logger.warning("Router 失敗，改用 other：%s", exc)
         obj = {"type": "other", "rotate": 0, "reason": "分類失敗：" + str(exc)[:120]}
     from app.core import classification_evidence
