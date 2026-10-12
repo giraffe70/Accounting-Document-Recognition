@@ -98,7 +98,7 @@ def normalize_candidates(data, type_key, ocr_text, qr=None, confirmed_fields=Non
     fields = data["fields"]
     mapping = doc_types.get(type_key)["common_fields"]
     protected = set(confirmed_fields or {})
-    protected.update(path.removeprefix("fields.") for path in context.get("confirmed_paths", []) if path.startswith("fields."))
+    protected.update(path.removeprefix("fields.") for path in confirmed_paths or [] if path.startswith("fields."))
     protected.update(path.removeprefix("fields.") for path, records in (data.get("field_evidence") or {}).items()
                      if path.startswith("fields.") and any(record.get("source") == "manual" and record.get("selected") for record in records))
     currency = normalization.normalize_currency(fields.get("currency")) or ("TWD" if type_key == "invoice" else None)
@@ -229,6 +229,9 @@ def apply(data, type_key, chat, image_path, *, mode, ocr_text, context, confirme
     fields = data["fields"]
     mapping = doc_types.get(type_key)["common_fields"]
     protected = set(confirmed_fields or {})
+    protected.update(path.removeprefix("fields.") for path in context.get("confirmed_paths", []) if path.startswith("fields."))
+    protected.update(path.removeprefix("fields.") for path, records in (data.get("field_evidence") or {}).items()
+                     if path.startswith("fields.") and any(record.get("source") == "manual" and record.get("selected") for record in records))
     requested, groups, skipped = select_targets(data, type_key, ocr_text, context, protected)
     money = [key for common in LABELS for key in mapping.get(common, []) if key in requested]
     conditions = context.get("image_conditions") or {}

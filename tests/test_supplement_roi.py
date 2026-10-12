@@ -30,6 +30,12 @@ def _test_tempdir():
 
 
 class SupplementTargetPolicyTests(unittest.TestCase):
+    def test_normalize_candidates_uses_its_confirmed_paths_without_context(self):
+        data = _data("invoice", {"total_amount": "155", "currency": "TWD"})
+        data["field_evidence"]["fields.total_amount"] = [{"source": "manual", "selected": True, "value": "155"}]
+        supplement.normalize_candidates(data, "invoice", "總計 155", confirmed_paths=["fields.total_amount"])
+        self.assertEqual(data["fields"]["total_amount"], "155")
+
     def test_receipt_nullable_identifiers_do_not_trigger_without_printed_label(self):
         data = _data("receipt", {"date": None, "vendor": None, "tax_id": None,
                                   "voucher_id": None, "total_amount": 100,
@@ -148,6 +154,26 @@ class SupplementRoiGeometryTests(unittest.TestCase):
         self.assertEqual(supplement_roi.box_to_document([200, 100, 600, 400], region),
                          [180, 240, 340, 360])
 
+    def test_enhanced_box_inverse_maps_to_document(self):
+        region = {"box": [100, 200, 500, 600]}
+        # Enhanced pixels move right by 10; inverse mapping must remove the shift.
+        self.assertEqual(supplement_roi.box_to_document(
+            [200, 100, 600, 400], region, image_size=(1000, 1000),
+            enhancement_matrix=[[1, 0, 10], [0, 1, 0]]),
+            [176, 240, 336, 360])
+
+    def test_rotated_native_image_is_not_a_reusable_document_frame(self):
+        with _test_tempdir() as folder:
+            image = Image.new("RGB", (200, 120), "white")
+            for x in range(30, 70):
+                for y in range(20, 45):
+                    image.putpixel((x, y), (0, 0, 0))
+            display = Path(folder) / "display.png"
+            rotated = Path(folder) / "rotated.png"
+            image.save(display)
+            image.rotate(180).save(rotated)
+            self.assertFalse(supplement_roi.same_visual_frame(display, rotated))
+
 
 class SupplementOcrDecisionTests(unittest.TestCase):
     def _apply_with_readable_roi(self, *, ocr_enabled=True):
@@ -193,6 +219,38 @@ class SupplementOcrDecisionTests(unittest.TestCase):
         decision = next(event for event in trace if event.get("kind") == "supplement_ocr_decision")
         self.assertFalse(decision["fresh"])
         self.assertEqual(decision["reason"], "ocr_disabled")
+
+    def test_enhanced_copy_conflict_blocks_original_supported_candidate(self):
+        image_path, data, context, _ = self._apply_with_readable_roi()
+        context["ocr_lines"] = [_line("應付金額 100", (100, 150, 330, 175), score=.2)]
+
+        class FakeOcr:
+            outputs = [[_line("應付金額 100", (20, 20, 230, 50), score=.2)],
+                       [_line("應付金額 200", (20, 20, 230, 50), score=.9)]]
+
+            def recognize(self, _path):
+                return self.outputs.pop(0)
+
+            def plain_text(self, lines):
+                return "\n".join(line["text"] for line in lines)
+
+        def enhance(source, lines, target):
+            if target is None:
+                return None, {"low_text_contrast": False, "skew_degrees": 0, "text_contrast": 30}
+            return str(target), {"low_text_contrast": True, "skew_degrees": 2,
+                                 "text_contrast": 20, "matrix": [[1, 0, 0], [0, 1, 0]]}
+
+        with patch("app.core.settings_store.get_settings", return_value={"ocr": "paddle/pp-ocrv5"}), \
+             patch("app.core.model_factory.get_ocr", return_value=FakeOcr()), \
+             patch("app.core.image_evidence.enhancement", side_effect=enhance), \
+             patch("app.core.pipeline.reread_fields", return_value={"total_amount": 100}), \
+             invocation_trace.capture() as trace:
+            supplement.apply(data, "receipt", object(), image_path, mode="image",
+                             ocr_text="應付金額 100", context=context)
+        self.assertTrue(context["ocr_copy_conflict"])
+        self.assertIsNone(data["fields"]["total_amount"])
+        self.assertEqual(next(record for record in trace if record.get("kind") == "supplement_result")
+                         ["rejected"]["total_amount"], "copy_conflict")
 
 
 if __name__ == "__main__":

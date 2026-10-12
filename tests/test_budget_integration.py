@@ -28,6 +28,8 @@ class BudgetIntegrationTests(unittest.TestCase):
         Image.new("RGB",(1653,2339),"white").save(image)
         raw = prompts.extraction_example("invoice")
         raw["fields"].update(total_amount=500,seller_name="合成商店")
+        first_ocr = [{"text": "發票號碼 AB12345678", "score": .99,
+                      "box": [[100, 100], [400, 100], [400, 130], [100, 130]]}]
         response = ChatResponse(model="offline",message=Message(role="assistant",content=json.dumps(raw,ensure_ascii=False)),done=True)
         chat = ChatOllama(model="offline",base_url="http://127.0.0.1:1",num_ctx=8192)
         with (patch.object(request_budget,"runtime_profile",return_value=(self.profile,self.tokenizer)),
@@ -35,7 +37,8 @@ class BudgetIntegrationTests(unittest.TestCase):
               patch("app.core.barcode.decode_diagnostics",return_value={"candidates":[]}),
               patch.object(chat._client,"chat",autospec=True,side_effect=[iter([response]), ResponseError("exceeds the available context size",status_code=400)]) as sdk,
               invocation_trace.capture(self.folder / "trace.json") as trace):
-            result = pipeline.extract_evidence(str(image),"invoice",chat,[],"",confirmed_fields={"total_amount":499})
+            result = pipeline.extract_evidence(str(image), "invoice", chat, first_ocr,
+                                               "發票號碼 AB12345678", confirmed_fields={"total_amount": 499})
         self.assertEqual(sdk.call_count,2)
         self.assertEqual(result.total_amount,499)
         self.assertEqual(result.initial_ai["fields"]["total_amount"],500)

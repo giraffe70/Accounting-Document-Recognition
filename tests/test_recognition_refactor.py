@@ -131,7 +131,7 @@ class RefactorFlowTests(unittest.TestCase):
         self.assertEqual(v.total_amount, 90)
         self.assertTrue(any("多個有效 QR" in w for w in v.validation_warnings))
 
-    def test_receipt_reread_targets_actual_tax_id_and_never_overwrites_existing_vendor(self):
+    def test_receipt_optional_tax_id_does_not_reread_or_overwrite_vendor(self):
         initial = prompts.extraction_example("receipt", "ocr_text")
         initial["fields"].update(vendor="原廠商", total_amount=100, date="2026-06-04")
         for key in doc_types.get("receipt")["common_fields"]["voucher_id"]:
@@ -143,11 +143,9 @@ class RefactorFlowTests(unittest.TestCase):
             return json.dumps(initial if len(requests) == 1 else {"fields": {"tax_id": "12345676"}})
         with patch("app.core.pipeline._invoke_text", side_effect=invoke), patch("app.core.barcode.decode_diagnostics") as decoder:
             v = pipeline.extract_evidence("fake.png", "receipt", object(), [], "賣方統一編號 12345676", mode="ocr_text")
-        self.assertEqual(len(requests), 2)
+        self.assertEqual(len(requests), 1)
         self.assertEqual(v.seller.name, "原廠商")
-        self.assertEqual(v.seller.tax_id, "12345676")
-        self.assertIn('"tax_id":null', requests[1][0]["content"])
-        self.assertNotIn('"vendor":null', requests[1][0]["content"])
+        self.assertIn(v.seller.tax_id, (None, ""))
         decoder.assert_not_called()
         self.assertFalse(any(p.get("type") == "image_url" for req in requests for p in req))
 

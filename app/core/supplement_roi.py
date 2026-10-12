@@ -64,14 +64,27 @@ def _area(box):
 def same_visual_frame(display_path, source_path):
     """Reject a rotated or unrelated native image before reusing mapped OCR."""
     from PIL import Image, ImageChops, ImageStat
+    import numpy as np
     with Image.open(display_path) as display, Image.open(source_path) as source:
         dw, dh = display.size
         sw, sh = source.size
         if min(dw, dh, sw, sh) <= 0 or abs(dw / dh - sw / sh) >= .02:
             return False
-        display = display.convert("L").resize((128, 128), Image.Resampling.LANCZOS)
-        source = source.convert("L").resize((128, 128), Image.Resampling.LANCZOS)
-    return ImageStat.Stat(ImageChops.difference(display, source)).mean[0] <= 22
+        display = display.convert("L").resize((256, 256), Image.Resampling.LANCZOS)
+        source = source.convert("L").resize((256, 256), Image.Resampling.LANCZOS)
+    if ImageStat.Stat(ImageChops.difference(display, source)).mean[0] > 22:
+        return False
+    first, second = np.asarray(display) < 245, np.asarray(source) < 245
+    if min(int(first.sum()), int(second.sum())) < 20:
+        return True
+
+    def nearby(mask):
+        padded = np.pad(mask, 1)
+        return np.logical_or.reduce([padded[dy:dy + 256, dx:dx + 256]
+                                     for dy in range(3) for dx in range(3)])
+
+    return (int((first & nearby(second)).sum()) / int(first.sum()) >= .60 and
+            int((second & nearby(first)).sum()) / int(second.sum()) >= .60)
 
 
 def _table_ids(kind, rows):
