@@ -10,7 +10,7 @@ from app.db.models import ReviewStatus
 from app.services import reports
 
 
-def record(current: dict, status=ReviewStatus.accountant_approved):
+def record(current: dict, status=ReviewStatus.confirmed):
     return SimpleNamespace(current_json=json.dumps(current, ensure_ascii=False), status=status)
 
 

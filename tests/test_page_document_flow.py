@@ -32,7 +32,7 @@ def _region(type_key, box):
 
 
 class PreparedVoucherFlowTests(unittest.TestCase):
-    def test_source_parent_children_listing_approval_guard_and_manual_recognition_history(self):
+    def test_source_parent_children_listing_confirmed_recognition_and_manual_history(self):
         with _temporary_directory() as temp:
             root = Path(temp)
             engine = create_engine(f"sqlite:///{root / 'review.db'}", connect_args={"check_same_thread": False})
@@ -66,13 +66,13 @@ class PreparedVoucherFlowTests(unittest.TestCase):
                 with self.assertRaises(review.RecognitionProtected):
                     review.update_current(records[0].id, {"fields": {"total_amount": 123}})
                 with self.assertRaises(review.RecognitionProtected):
-                    review.clerk_review(records[0].id)
-                with self.assertRaises(review.RecognitionProtected):
                     review.crop_image(records[0].id, [0, 0, 0.5, 0.5])
 
-                approved = review.save_voucher(voucher(amount=400), status=ReviewStatus.accountant_approved)
-                with self.assertRaises(review.RecognitionProtected):
-                    review._save_recognition(approved.id, voucher(amount=999))
+                confirmed = review.save_voucher(voucher(amount=400), status=ReviewStatus.confirmed)
+                with patch("app.core.pipeline.canonicalize_voucher", side_effect=lambda value: value), \
+                     patch("app.core.model_invocation.source_versions", return_value={"version": "synthetic"}):
+                    reprocessed = review._save_recognition(confirmed.id, voucher(amount=999))
+                self.assertEqual(reprocessed.status, ReviewStatus.pending)
 
                 original_ai = json.loads(records[1].ai_json)
                 manual_edit = {"fields": {"total_amount": 200},

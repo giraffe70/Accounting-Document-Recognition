@@ -6,6 +6,7 @@
   let jobTimer = null;
   let currentId = null;
   let currentVoucher = {};   // 目前載入的 current（保留 entries 等未編輯欄位）
+  let editBusy = false;
   let currentUser = null;
   let currentIsImport = false;
   let DOC_TYPES = {};   // 各單據類型欄位契約（/api/doc-types）
@@ -26,21 +27,17 @@
   }
 
   const STATUS_LABEL = {
-    prepared: "待外觀確認", queued: "待提取", pending: "待審", clerk_reviewed: "記帳士已確認",
-    accountant_approved: "會計師已核定", rejected: "退回",
+    prepared: "待外觀確認", queued: "待提取", pending: "待確認", confirmed: "已確認",
   };
   const STATUS_CLASS = {
-    prepared: "prep", queued: "scan", pending: "", clerk_reviewed: "warn",
-    accountant_approved: "high", rejected: "low",
+    prepared: "prep", queued: "scan", pending: "", confirmed: "high",
   };
   // 階段分頁 → 對應狀態（import 為動作視圖，非狀態）
   const STAGE_STATUS = {
     prepared: "prepared", queued: "queued", pending: "pending",
-    clerk_reviewed: "clerk_reviewed", accountant_approved: "accountant_approved", rejected: "rejected",
   };
   const STAGE_TITLE = {
-    prepared: "② 外觀確認佇列", queued: "③ 掃描清單（待提取）", pending: "④ 待審佇列",
-    clerk_reviewed: "⑤ 記帳士確認佇列", accountant_approved: "⑥ 會計師核定佇列", rejected: "退回佇列",
+    prepared: "② 外觀確認佇列", queued: "③ 掃描清單（待提取）", pending: "④ 確認",
   };
   let currentStage = "import";
   let stageAction = "";   // 目前紀錄的階段動作：confirm / recognize
@@ -109,7 +106,7 @@
       eProgress(`內容提取中 ${job.done}/${job.total}　${job.current || ""}`, pct);
       if (job.status === "completed") {
         clearInterval(jobTimer); eProgressHide(); $("btnExtractAll").disabled = false;
-        toast("提取完成，已移至④待審"); loadList(); refreshStats();
+        toast("提取完成，已移至④確認"); loadList(); refreshStats();
         if (job.errors && job.errors.length) alert("部分失敗：\n" + job.errors.join("\n"));
       }
     }, 1500);
@@ -148,6 +145,7 @@
   // ── 階段分頁 ──
   document.querySelectorAll(".stage-tab").forEach((t) =>
     t.addEventListener("click", () => setStage(t.dataset.stage)));
+  $("confirmationFilter").addEventListener("change", () => loadList());
 
   function setStage(stage) {
     currentStage = stage;
@@ -157,6 +155,7 @@
     $("importView").classList.toggle("hidden", !isImport);
     $("queueView").classList.toggle("hidden", isImport);
     $("btnExtractAll").classList.toggle("hidden", stage !== "queued");
+    $("confirmationFilter").classList.toggle("hidden", stage !== "pending");
     $("btnMerge").classList.toggle("hidden", !(stage === "prepared" || stage === "queued"));
     if (!isImport) { $("queueTitle").textContent = STAGE_TITLE[stage] || "佇列"; loadList(); }
     refreshStats();
@@ -175,15 +174,66 @@
     } catch (e) { /* ignore */ }
   }
 
+  // ── 來源頁：僅保留原圖供追溯，不顯示於前端清單 ──
+  const EMPTY_LIST_TEXT = "此階段目前沒有憑證。";
+  function isSourceRecord(r) { return !!r && r.record_role === "source_page"; }
+  // 由既有版面判定衍生來源頁狀態（不新增資料庫狀態）：
+  // skipped 已略過（空白／佐證／非單據）、split 已拆分、review 待人工處理
+  function sourceTrace(r, childCount) {
+    const layout = (r && r.origin && r.origin.layout) || {};
+    const kind = layout.content_kind || (r && r.quality && r.quality.content_kind) || "";
+    const auto = layout.auto_split === true;
+    const skipLabel = { blank: "空白頁", supporting: "佐證附頁", non_voucher: "非單據頁" }[kind];
+    if (auto && skipLabel) return { state: "skipped", label: `已略過（${skipLabel}）`, reason: kind };
+    if (childCount > 0 || (auto && kind === "document")) {
+      const regions = Array.isArray(layout.regions) ? layout.regions.length : 0;
+      return { state: "split", label: "已拆分", reason: kind || "document", regions };
+    }
+    return { state: "review", label: "待人工處理", reason: kind };
+  }
+  // 清單分流：已拆分／已略過的來源頁不顯示；尚未自動分割、需人工處理的來源頁仍須可見，
+  // 否則該頁內容會無人處理（②外觀確認階段才有來源頁）
+  function queueViewModel(rows, stage) {
+    const all = rows || [];
+    const counts = {};
+    all.forEach((r) => { if (!isSourceRecord(r) && r.source_parent_id != null) counts[r.source_parent_id] = (counts[r.source_parent_id] || 0) + 1; });
+    let hidden = 0, skipped = 0;
+    const vouchers = all.filter((r) => {
+      if (!isSourceRecord(r)) return true;
+      const t = sourceTrace(r, counts[r.id] || 0);
+      if (stage === "prepared" && t.state === "review") return true;
+      hidden += 1; if (t.state === "skipped") skipped += 1;
+      return false;
+    });
+    const emptyText = !vouchers.length && skipped
+      ? `目前沒有待外觀確認的單據（已自動略過 ${skipped} 個非單據頁）。` : EMPTY_LIST_TEXT;
+    return { vouchers, hidden, skipped, emptyText };
+  }
+  // 依來源頁狀態給出準確提示（僅需人工處理的來源頁通常可被開啟）
+  function sourceHintHtml(trace, autoSplit) {
+    if (trace.state === "skipped") {
+      const what = { blank: "空白頁", supporting: "佐證附頁", non_voucher: "非單據頁" }[trace.reason] || "非單據頁";
+      return `<b>來源頁（已略過）</b>：此頁確認為${what}，沒有可處理的單據；原圖保留供追溯，不會確認或送入辨識。`;
+    }
+    if (autoSplit) {
+      return trace.regions === 1
+        ? "<b>來源頁</b>：此頁為單張完整單據，已建立對應的單據；來源頁僅保留原圖供追溯，請處理清單中的該單據，不需重複處理。"
+        : "<b>來源頁</b>：此頁已自動拆分為多張單據，來源頁僅保留原圖供追溯；請開啟清單中拆分出的單據處理。";
+    }
+    return "<b>來源頁（待人工處理）</b>：系統無法自動分割此頁。請用上方「裁切為新憑證」建立單據；來源頁保留供追溯，不會確認或送入辨識。";
+  }
+
   // ── 清單 ──
   async function loadList() {
     if (currentStage === "import") { refreshStats(); return; }
-    const status = STAGE_STATUS[currentStage] || "";
-    const url = "/api/vouchers" + (status ? `?status=${status}` : "");
+    const status = currentStage === "pending" ? $("confirmationFilter").value : STAGE_STATUS[currentStage] || "";
+    const url = "/api/vouchers" + (status ? `?status=${encodeURIComponent(status)}` : "");
     const data = await (await fetch(url)).json();
-    const rows = data.items || [];
+    const view = queueViewModel(data.items || [], currentStage);
+    const rows = view.vouchers;
     const body = $("listBody");
-    if (!rows.length) { $("listTable").classList.add("hidden"); $("listEmpty").classList.remove("hidden"); refreshStats(); return; }
+    $("listEmpty").textContent = view.emptyText;
+    if (!rows.length) { $("listTable").classList.add("hidden"); $("listEmpty").classList.remove("hidden"); updateMergeBtn(); refreshStats(); return; }
     $("listEmpty").classList.add("hidden"); $("listTable").classList.remove("hidden");
     const mergeable = currentStage === "prepared" || currentStage === "queued";
     body.innerHTML = rows.map((r) => {
@@ -195,10 +245,8 @@
       const spec = DOC_TYPES[r.doc_type_key];
       const type = esc((spec && spec.label) || r.doc_type) || "（未判類型）";
       const manual = r.manual_entry ? ` <span class="att-badge" title="欄位已人工修正確認">✍ 人工修正</span>` : "";
-      const sourceRole = r.record_role === "source_page" || r.origin?.layout?.auto_split === true;
-      const sourceTag = sourceRole
-        ? ` <span class="att-badge" title="來源頁保留供追溯${r.origin?.page_no != null ? `；原始頁碼 ${esc(r.origin.page_no)}` : ""}">來源頁${r.origin?.page_no != null ? ` p${esc(r.origin.page_no)}` : ""}</span>`
-        : r.source_parent_id != null ? ` <span class="att-badge" title="此單據由來源憑證拆分">來源 #${esc(r.source_parent_id)}</span>` : "";
+      const sourceTag = r.source_parent_id != null
+        ? ` <span class="att-badge" title="此單據拆分自原始掃描頁">來自${r.origin?.page_no != null ? ` p${esc(r.origin.page_no)}` : ` #${esc(r.source_parent_id)}`}</span>` : "";
       return `
       <tr data-id="${r.id}" class="${r.id === currentId ? "sel" : ""}" title="${esc(r.source_file || "")}">
         <td>${chk}${esc(r.voucher_id) || "—"}${att}${sourceTag}<div class="row-sub">${type}${manual}</div></td>
@@ -230,6 +278,7 @@
 
   // ── 審核編輯 ──
   async function openReview(id) {
+    if (editBusy) return;
     currentId = id;
     if (cropping) setCropMode(false);
     const rec = await (await fetch(`/api/vouchers/${id}`)).json();
@@ -247,8 +296,6 @@
     setPendingActionVisibility(rec.status);
     const isPrepared = rec.status === "prepared";
     const isQueued = rec.status === "queued";
-    // 退回是唯一沒有出口的狀態，補上「重新送審」；其餘階段不顯示
-    $("btnResubmit").classList.toggle("hidden", rec.status !== "rejected");
     const isPreExtract = isPrepared || isQueued;   // 尚未萃取欄位：隱藏編輯器
     $("revForm").classList.toggle("prepared", isPreExtract);
     $("prepHint").classList.toggle("hidden", !isPreExtract && !autoSplitSource);
@@ -256,6 +303,7 @@
     $("btnConfirmRecognize").disabled = sourcePage;
     $("btnReRecognize").disabled = sourcePage;
     $("btnClassify").disabled = sourcePage;
+    $("btnConfirm").disabled = sourcePage;
     ["btnRotL", "btnRotR", "btnFineRot", "btnCrop", "btnSplit"].forEach((id) => { $(id).disabled = autoSplitSource; });
     $("revConfWrap").classList.toggle("hidden", isPreExtract || autoSplitSource);
     if (isPrepared) {
@@ -268,9 +316,9 @@
       $("prepHint").innerHTML = "<b>③ 掃描清單</b>：外觀已確認。按「🔍 辨識此張」提取內容欄位，或到清單頂端「⚡ 一鍵提取全部」批次處理。";
     }
     if (sourcePage && isPreExtract) {
-      $("prepHint").innerHTML = autoSplitSource
-        ? "<b>來源頁</b>：此頁已完成自動分割或確認為空白，保留原圖供追溯；請開啟拆分出的單據處理。"
-        : "<b>來源頁</b>：請用上方「裁切為新憑證」建立單據；來源頁保留供追溯，不會確認或送入辨識。";
+      $("prepHint").innerHTML = sourceHintHtml(sourceTrace({ origin: v.origin, quality: v.quality }, 0), autoSplitSource);
+    } else if (isPreExtract && rec.source_parent_id != null) {
+      $("prepHint").innerHTML += `<br><span class="hint">此單據拆分自來源頁 #${esc(rec.source_parent_id)}${v.origin?.page_no != null ? `（原始頁 p${esc(v.origin.page_no)}）` : ""}。</span>`;
     }
     $("revCompanySel").value = rec.company || "";
     const typeKey = v.doc_type_key || "other";
@@ -281,8 +329,7 @@
     $("revConf").textContent = conf;
     $("revConf").className = "tag " + (conf === "high" ? "high" : conf === "low" ? "low" : "warn");
     $("f-note").value = v.note || "";
-    $("f-clerk_note").value = rec.clerk_note || "";
-    $("f-acc_note").value = rec.accountant_note || "";
+    $("f-correction_note").value = rec.correction_note || "";
     $("f-dev_note").value = rec.dev_note || "";
     $("f-manual_entry").checked = !!rec.manual_entry;
     const hasItems = !!(DOC_TYPES[typeKey] && DOC_TYPES[typeKey].has_items);
@@ -338,12 +385,25 @@
     el.textContent = STATUS_LABEL[status] || status;
   }
 
-  // 「暫存／下一份」只屬於內容辨識完成、尚待審核的憑證；不能讓使用者把已確認或
-  // 已核定的資料誤送回待審。此函式也供審核動作成功後即時隱藏按鈕使用。
+  // 待確認與已確認共用編輯區；無變動儲存維持確認，實際修改由後端撤銷確認。
   function setPendingActionVisibility(status) {
-    const isPending = status === "pending";
-    $("btnSavePending").classList.toggle("hidden", !isPending);
-    $("btnReturnImport").classList.toggle("hidden", !isPending);
+    const editable = status === "pending" || status === "confirmed";
+    $("btnReturnImport").classList.toggle("hidden", !editable);
+    $("btnConfirm").classList.toggle("hidden", !editable);
+    $("btnConfirm").textContent = status === "confirmed" ? "✅ 已確認（修改後可重新確認）" : "✅ 確認完成";
+  }
+
+  function applyRecordStatus(record) {
+    if (record.id !== currentId) return;
+    setStatus(record.status);
+    setPendingActionVisibility(record.status);
+  }
+
+  async function refreshCurrentStatus(id = currentId) {
+    if (!id) return;
+    const resp = await fetch(`/api/vouchers/${id}`);
+    if (resp.ok) applyRecordStatus(await resp.json());
+    loadList();
   }
 
   // ── 動態欄位（依單據類型）+ 掃描影像彩色框對照 ──
@@ -360,19 +420,26 @@
 
   // 外觀確認 / 重新辨識：以「目前選定的類型」在準備好的影像上做內容辨識
   async function runRecognize() {
-    if (!currentId) return;
-    // 重新辨識會以模型輸出覆寫 current_json。只在使用者明確勾了「人工修正」時才問——
-    // 用「值有沒有變動」當條件會天天跳提醒（存過一次就不同了），反而被無視。
+    if (!currentId || editBusy || inferBusy) return;
     if ($("f-manual_entry").checked) {
-      if (!confirm("這張已勾選「人工修正」。\n重新辨識會用模型的結果覆蓋目前所有欄位值，你的修正將遺失。\n\n確定要重新辨識嗎？")) return;
+      if (!confirm("這張已勾選「人工修正」。\n重新辨識會保留人工選定的欄位並新增模型結果，成功後須重新確認。\n\n確定要重新辨識嗎？")) return;
     }
-    const tk = $("revTypeSel").value;
-    await fetch(`/api/vouchers/${currentId}/set-type`, { method: "POST", headers: json(), body: JSON.stringify({ doc_type_key: tk }) });
-    await saveNotes();   // 三個備註欄都是辨識提示，先落地再辨識（含記帳士／會計師備註）
-    const d = await withInferProgress("內容辨識中…", () =>
-      fetch(`/api/vouchers/${currentId}/recognize`, { method: "POST", headers: json() }).then((r) => r.json()));
-    if (!d.ok) { alert(errText(d, "辨識失敗")); return; }
-    toast("辨識完成"); openReview(currentId); loadList();
+    const id = currentId, tk = $("revTypeSel").value;
+    try {
+      if (!$("revForm").classList.contains("prepared")) await persistCurrentEdits();
+      const typeResp = await fetch(`/api/vouchers/${id}/set-type`, { method: "POST", headers: json(), body: JSON.stringify({ doc_type_key: tk }) });
+      if (!typeResp.ok) throw new Error(await responseError(typeResp, "類型儲存失敗"));
+      const notesResp = await saveNotes(id);
+      if (!notesResp.ok) throw new Error(await responseError(notesResp, "備註儲存失敗"));
+      const d = await withInferProgress("內容辨識中…", () =>
+        fetch(`/api/vouchers/${id}/recognize`, { method: "POST", headers: json() }).then((r) => r.json()));
+      if (!d.ok) throw new Error(errText(d, "辨識失敗"));
+      toast("辨識完成，待確認");
+      if (currentId === id) await openReview(id);
+      loadList();
+    } catch (err) {
+      alert(`辨識失敗：${err.message}`);
+    }
   }
 
   function buildActiveFields(typeKey) {
@@ -640,21 +707,22 @@
       currentVoucher.payment_state = r.payment_state || {};
       renderWarnings();
       renderEntries(r.entries, r.debit_total, r.credit_total, r.balance_check);
+      await refreshCurrentStatus();
       toast("已產生會計分錄");
     } catch (err) {
       alert(`分類失敗：${err.message}`);
     }
   });
 
-  // 三個備註欄不在 collectForm()（那是憑證內容），需另存；它們是下次辨識的人工修正提示
+  // 修正備註不在憑證內容內，單獨保存並作為下次辨識提示。
   function collectNotes() {
-    const n = { clerk_note: $("f-clerk_note").value, accountant_note: $("f-acc_note").value,
+    const n = { correction_note: $("f-correction_note").value,
                 manual_entry: $("f-manual_entry").checked };
     if (!$("devNoteWrap").classList.contains("hidden")) n.dev_note = $("f-dev_note").value;
     return n;
   }
-  async function saveNotes() {
-    return fetch(`/api/vouchers/${currentId}/notes`, { method: "POST", headers: json(), body: JSON.stringify(collectNotes()) });
+  async function saveNotes(id = currentId, notes = collectNotes()) {
+    return fetch(`/api/vouchers/${id}/notes`, { method: "POST", headers: json(), body: JSON.stringify(notes) });
   }
 
   async function responseError(resp, fallback) {
@@ -666,75 +734,82 @@
   // 才視為成功，避免頁面切換後把失敗誤認成已保存。
   async function persistCurrentEdits() {
     if (!currentId) throw new Error("尚未選取憑證");
-    const voucherResp = await fetch(`/api/vouchers/${currentId}`, {
-      method: "PUT", headers: json(), body: JSON.stringify(collectForm()),
+    const id = currentId, form = collectForm(), notes = collectNotes();
+    const companyResp = await fetch(`/api/vouchers/${id}/company`, {
+      method: "POST", headers: json(), body: JSON.stringify({ company: $("revCompanySel").value }),
+    });
+    if (!companyResp.ok) throw new Error(await responseError(companyResp, "歸屬公司儲存失敗"));
+    applyRecordStatus(await companyResp.json());
+    const voucherResp = await fetch(`/api/vouchers/${id}`, {
+      method: "PUT", headers: json(), body: JSON.stringify(form),
     });
     if (!voucherResp.ok) throw new Error(await responseError(voucherResp, "儲存修正失敗"));
     const record = await voucherResp.json();
-    currentVoucher = record.current || currentVoucher;
-    renderWarnings();
+    applyRecordStatus(record);
+    if (currentId === id) {
+      currentVoucher = record.current || currentVoucher;
+      renderWarnings();
+    }
 
-    const notesResp = await saveNotes();
+    const notesResp = await saveNotes(id, notes);
     if (!notesResp.ok) throw new Error(await responseError(notesResp, "儲存備註失敗"));
+    const saved = await notesResp.json();
+    applyRecordStatus(saved);
+    return saved;
   }
 
-  $("btnSave").addEventListener("click", async () => {
+  async function withEditLock(fn) {
+    if (editBusy || inferBusy) return;
+    editBusy = true;
+    const controls = Array.from($("revForm").querySelectorAll("input, textarea, select, button"));
+    const disabled = controls.map((control) => control.disabled);
+    controls.forEach((control) => { control.disabled = true; });
     try {
-      await persistCurrentEdits();
-      toast("已儲存修正與備註"); loadList();
-    } catch (err) {
-      alert(`儲存失敗：${err.message}`);
+      await fn();
+    } finally {
+      editBusy = false;
+      controls.forEach((control, index) => { control.disabled = disabled[index]; });
     }
-  });
+  }
 
-  async function saveToPending(returnToImport = false) {
-    if (!currentId) return;
-    const savedId = currentId;
+  async function saveDraft(returnToImport = false) {
     try {
-      await persistCurrentEdits();
-      if (returnToImport) {
+      const saved = await persistCurrentEdits();
+      if (returnToImport && currentId === saved.id) {
         clearReview();
         fileInput.value = "";
         $("dirInput").value = "";
         setStage("import");
-        toast("已暫存至④待審，可開始辨識下一份");
-        return;
+        toast("已儲存，可開始匯入下一份");
+      } else {
+        toast(saved.status === "confirmed" ? "已儲存修正與備註，維持已確認" : "已儲存草稿，待確認");
       }
-      setStage("pending");
-      await openReview(savedId);
-      toast("已暫存至④待審");
+      loadList();
     } catch (err) {
-      alert(`暫存失敗：${err.message}`);
+      alert(`儲存失敗：${err.message}`);
+      loadList();
     }
   }
 
-  $("btnSavePending").addEventListener("click", () => saveToPending());
-  $("btnReturnImport").addEventListener("click", () => saveToPending(true));
-  $("btnClerk").addEventListener("click", () => act("clerk-review", $("f-clerk_note").value, "記帳士已確認"));
-  $("btnApprove").addEventListener("click", () => act("approve", $("f-acc_note").value, "會計師已核定"));
-  $("btnReject").addEventListener("click", () => act("reject", $("f-acc_note").value, "已退回"));
-  $("btnResubmit").addEventListener("click", () => act("resubmit", $("f-clerk_note").value, "已重新送審（回到④待審）"));
-
-  async function act(path, note, msg) {
-    // 先存目前編輯，再轉狀態
-    await fetch(`/api/vouchers/${currentId}`, { method: "PUT", headers: json(), body: JSON.stringify(collectForm()) });
-    const resp = await fetch(`/api/vouchers/${currentId}/${path}`, { method: "POST", headers: json(), body: JSON.stringify({ note }) });
-    // 原本不檢查回應：端點不存在（404/405，多半是伺服器沒重啟）或權限不足時，
-    // 照樣跳「已完成」的 toast，按鈕看起來毫無反應也查不出原因。
-    if (!resp.ok) {
-      const d = await resp.json().catch(() => ({}));
-      alert(resp.status === 405 || resp.status === 404
-        ? `此功能的後端端點不存在（HTTP ${resp.status}），請重新啟動伺服器後再試。`
-        : errText(d, `操作失敗（HTTP ${resp.status}）`));
-      return;
+  async function confirmCurrent() {
+    try {
+      const saved = await persistCurrentEdits();
+      const resp = await fetch(`/api/vouchers/${saved.id}/confirm`, {
+        method: "POST", headers: json(), body: JSON.stringify({ expected_updated_at: saved.updated_at }),
+      });
+      if (!resp.ok) throw new Error(await responseError(resp, "確認失敗"));
+      applyRecordStatus(await resp.json());
+      toast("已確認，可納入日記帳");
+      loadList();
+    } catch (err) {
+      alert(`確認失敗：${err.message}`);
+      loadList();
     }
-    const r = await resp.json();
-    if (r.status) {
-      setStatus(r.status);
-      setPendingActionVisibility(r.status);
-    }
-    toast(msg); loadList();
   }
+
+  $("btnSave").addEventListener("click", () => withEditLock(() => saveDraft()));
+  $("btnReturnImport").addEventListener("click", () => withEditLock(() => saveDraft(true)));
+  $("btnConfirm").addEventListener("click", () => withEditLock(() => confirmCurrent()));
 
   const json = () => ({ "Content-Type": "application/json" });
   function toast(msg) { progressText.textContent = msg; progress.classList.remove("hidden"); barFill.style.width = "100%"; setTimeout(hideProgress, 1200); }
@@ -824,7 +899,11 @@
   // ── 影像手動旋轉 + 重新辨識 ──
   async function rotateImage(dir) {
     if (!currentId) return;
-    await fetch(`/api/vouchers/${currentId}/rotate`, { method: "POST", headers: json(), body: JSON.stringify({ direction: dir }) });
+    const resp = await fetch(`/api/vouchers/${currentId}/rotate`, { method: "POST", headers: json(), body: JSON.stringify({ direction: dir }) });
+    if (!resp.ok) { alert(await responseError(resp, "旋轉失敗")); return; }
+    const result = await resp.json();
+    if (!result.ok) { alert("旋轉失敗"); return; }
+    await refreshCurrentStatus();
     const img = $("revImage");
     img.onload = () => { resetZoom(); drawBoxes({}); };   // 旋轉後清框（不再對齊）
     img.src = `/api/vouchers/${currentId}/image?t=${Date.now()}`;
@@ -846,7 +925,10 @@
     if (!currentId) return;
     const angle = Number($("fineAngle").value) || 0;
     if (!angle) return;
-    await fetch(`/api/vouchers/${currentId}/rotate-fine`, { method: "POST", headers: json(), body: JSON.stringify({ angle }) });
+    const resp = await fetch(`/api/vouchers/${currentId}/rotate-fine`, { method: "POST", headers: json(), body: JSON.stringify({ angle }) });
+    if (!resp.ok) { alert(await responseError(resp, "微調失敗")); return; }
+    if (!(await resp.json()).ok) { alert("微調失敗"); return; }
+    await refreshCurrentStatus();
     reloadImage(); toast(`已微調 ${angle}°，按「🔄 重新辨識」更新`);
   });
 
@@ -909,7 +991,7 @@
       if (!d.ok) { alert(errText(d, "分割失敗")); return; }
       toast("已建立新憑證（原圖該區已塗白）"); loadList();
       if (d.source_blank) {
-        alert(`原憑證 #${srcId} 的內容已全部分割出去，剩下空白頁，請在②外觀確認中略過或合併掉。`);
+        alert(`原憑證 #${srcId} 的內容已全部分割出去，剩下空白頁。請合併或不再處理它。`);
       } else if (d.source_extracted) {
         alert(`原憑證 #${srcId} 的影像已變動（該區塗白），先前辨識的欄位對應的是舊影像，請對它按「🔄 重新辨識」。`);
       }
@@ -919,6 +1001,8 @@
       const r = await fetch(`/api/vouchers/${currentId}/crop`, { method: "POST", headers: json(), body: JSON.stringify({ box }) });
       setCropMode(false);
       if (!r.ok) { alert("裁切失敗"); return; }
+      if (!(await r.json()).ok) { alert("裁切失敗"); return; }
+      await refreshCurrentStatus();
       reloadImage(); toast("已裁切，按「🔄 重新辨識」更新");
     }
   });
@@ -929,7 +1013,7 @@
   async function confirmAppearance() {
     if (!currentId) return;
     const tk = $("revTypeSel").value;
-    const d = await (await fetch(`/api/vouchers/${currentId}/confirm`, { method: "POST", headers: json(), body: JSON.stringify({ doc_type_key: tk }) })).json();
+    const d = await (await fetch(`/api/vouchers/${currentId}/confirm-appearance`, { method: "POST", headers: json(), body: JSON.stringify({ doc_type_key: tk }) })).json();
     if (!d.ok) { alert(errText(d, "確認失敗")); return; }
     toast("已加入掃描清單"); clearReview(); loadList();
   }
@@ -943,13 +1027,16 @@
     const company = $("revCompanySel").value;
     const r = await fetch(`/api/vouchers/${currentId}/company`, { method: "POST", headers: json(), body: JSON.stringify({ company }) });
     if (!r.ok) { alert(`歸屬公司儲存失敗（HTTP ${r.status}）`); return; }
+    applyRecordStatus(await r.json());
     toast(company ? `歸屬公司已設為 ${company}` : "已清除歸屬公司");
     loadList();
   });
   $("revTypeSel").addEventListener("change", async () => {
     if (!currentId) return;
     const tk = $("revTypeSel").value;
-    await fetch(`/api/vouchers/${currentId}/set-type`, { method: "POST", headers: json(), body: JSON.stringify({ doc_type_key: tk }) });
+    const resp = await fetch(`/api/vouchers/${currentId}/set-type`, { method: "POST", headers: json(), body: JSON.stringify({ doc_type_key: tk }) });
+    if (!resp.ok) { alert(await responseError(resp, "單據類型儲存失敗")); return; }
+    await refreshCurrentStatus();
     buildActiveFields(tk);
     renderFields(currentVoucher.fields || {});
     loadList();
@@ -968,7 +1055,7 @@
   async function openFeedback() {
     const rows = (await (await fetch("/api/feedback")).json()).items || [];
     $("feedbackEmpty").classList.toggle("hidden", rows.length > 0);
-    const noteCell = (r) => [r.dev_note && "🛠" + r.dev_note, r.clerk_note && "記:" + r.clerk_note, r.accountant_note && "會:" + r.accountant_note].filter(Boolean).join("　") || "—";
+    const noteCell = (r) => [r.dev_note && "🛠" + r.dev_note, r.correction_note].filter(Boolean).join("　") || "—";
     $("feedbackBody").innerHTML = rows.map((r) =>
       `<tr data-id="${r.id}"><td>${esc(r.source_file)}</td><td>${esc(r.doc_type)}</td>
         <td><span class="tag ${STATUS_CLASS[r.status] || ""}">${STATUS_LABEL[r.status] || r.status}</span></td>
@@ -1159,7 +1246,7 @@
     const periods = data.periods || [];
     $("journalPeriod").innerHTML = periods.length
       ? periods.map((p) => `<option value="${p}">${p}</option>`).join("")
-      : `<option value="">（無已核定憑證）</option>`;
+      : `<option value="">（無已確認憑證）</option>`;
     $("journalModal").classList.remove("hidden");
     if (periods.length) loadJournal(); else showJournal(null);
   }
@@ -1176,7 +1263,7 @@
   function showJournal(d) {
     if (!d || !d.rows || !d.rows.length) {
       $("journalWrap").classList.add("hidden"); $("journalEmpty").classList.remove("hidden");
-      $("journalEmpty").textContent = d ? "此期別無已核定憑證分錄。" : "選擇期別以檢視日記帳（僅彙整「會計師已核定」的憑證）。";
+      $("journalEmpty").textContent = d ? "此期別無已確認憑證分錄。" : "選擇期別以檢視日記帳（僅彙整「已確認」的憑證）。";
       return;
     }
     $("journalEmpty").classList.add("hidden"); $("journalWrap").classList.remove("hidden");
@@ -1237,7 +1324,7 @@
     const rows = journalData.rows.map((r) => `<tr><td>${esc(r.date)}</td><td>${esc(r.voucher_id)}</td><td>${esc(r.summary)}</td><td>${esc(r.debit_account)}</td><td>${esc(r.credit_account)}</td><td class="num">${r.debit_amount == null ? "" : nf(r.debit_amount)}</td><td class="num">${r.credit_amount == null ? "" : nf(r.credit_amount)}</td><td>${esc(r.amount_source)}</td><td>${esc((r.evidence_paths || []).join("、"))}</td><td>${esc(r.payment_state == null ? "" : JSON.stringify(r.payment_state))}</td></tr>`).join("");
     printWindow(`日記帳 ${journalData.period}`, `
       <h1>單月日記帳　${esc(journalData.period)}</h1>
-      <div class="meta">${journalData.company ? "公司 " + esc(journalData.company) + "　" : ""}${journalData.count} 張已核定憑證</div>
+      <div class="meta">${journalData.company ? "公司 " + esc(journalData.company) + "　" : ""}${journalData.count} 張已確認憑證</div>
       <table><thead><tr><th>日期</th><th>憑證號</th><th>摘要</th><th>借方科目</th><th>貸方科目</th><th>借方金額</th><th>貸方金額</th><th>主要金額來源</th><th>輔助證據路徑</th><th>付款狀態</th></tr></thead>
       <tbody>${rows}</tbody>
       <tfoot><tr><td colspan="5">合計</td><td class="num">${nf(journalData.debit_total)}</td><td class="num">${nf(journalData.credit_total)}</td><td></td></tr></tfoot></table>`);
@@ -1268,10 +1355,7 @@
   }
 
   function applyRole() {
-    const canApprove = currentUser && (currentUser.role === "accountant" || currentUser.role === "admin");
     const canAdmin = currentUser && currentUser.role === "admin";
-    $("btnApprove").classList.toggle("hidden", !canApprove);
-    $("btnReject").classList.toggle("hidden", !canApprove);
     $("accountsBtn").classList.toggle("hidden", !canAdmin);
     $("backupBtn").classList.toggle("hidden", !canAdmin);
     $("databaseBtn").classList.toggle("hidden", !canAdmin);

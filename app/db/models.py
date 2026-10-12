@@ -15,10 +15,8 @@ from sqlmodel import Field, SQLModel
 class ReviewStatus(str, Enum):
     prepared = "prepared"                  # 待外觀確認（已判類型/轉正，尚未萃取欄位）
     queued = "queued"                      # 掃描清單／待內容提取（外觀已確認）
-    pending = "pending"                    # 待審（AI 已辨識完）
-    clerk_reviewed = "clerk_reviewed"      # 記帳士已初步修改確認
-    accountant_approved = "accountant_approved"  # 會計師最終核定
-    rejected = "rejected"                  # 退回
+    pending = "pending"                    # 待確認（內容辨識已完成）
+    confirmed = "confirmed"                # 人工確認完成，可納入日記帳
 
 
 class UserAccount(SQLModel, table=True):
@@ -50,6 +48,9 @@ class VoucherRecord(SQLModel, table=True):
     ai_json: str = "{}"                    # AI 原始結構化輸出（凍結不改）
     current_json: str = "{}"               # 目前值（人工修正後）
 
+    correction_note: str = ""
+    confirmed_at: Optional[datetime] = None
+    # 舊流程欄位只保留歷史資料，正式流程不再寫入。
     clerk_note: str = ""
     accountant_note: str = ""
     dev_note: str = ""               # 開發者備註（管理員專屬）：紀錄辨識錯誤供修正回饋

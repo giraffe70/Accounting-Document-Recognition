@@ -309,7 +309,7 @@ def _seed_examples(company="", voucher=None, chart=None, policy=None, k=3) -> li
             return []
         return [{"voucher": _voucher_brief(Voucher.model_validate(r["voucher"])), "entries": r["voucher"]["entries"]} for r in records
                 if isinstance(r, dict) and r.get("company") == company and isinstance(r.get("voucher"), dict)
-                and r.get("status") == ReviewStatus.accountant_approved.value and _example_valid(r["voucher"], voucher, chart, policy)][:k]
+                and r.get("status") in (ReviewStatus.confirmed.value, "accountant_approved") and _example_valid(r["voucher"], voucher, chart, policy)][:k]
     except (ValueError, TypeError, KeyError) as exc:
         logger.warning("種子案例略過：%s", exc)
         return []
@@ -319,7 +319,7 @@ def _retrieve_examples(voucher: Voucher, k=3, *, company="", chart=None, policy=
     if not company or chart is None or policy is None:
         return []
     try:
-        approved = review.list_vouchers(status=ReviewStatus.accountant_approved, company=company)
+        approved = review.list_vouchers(status=ReviewStatus.confirmed, company=company)
         pool = []
         for record in approved:
             if record.company != company:

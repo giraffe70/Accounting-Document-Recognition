@@ -1,4 +1,4 @@
-"""單月日記帳彙整：將「已核定」憑證的分錄，依期別彙整成當月日記帳。
+"""單月日記帳彙整：將「已確認」憑證的分錄，依期別彙整成當月日記帳。
 
 每列 = 一筆分錄（借項或貸項），依日期、憑證號排序，並計算借貸合計與平衡。
 """
@@ -10,15 +10,15 @@ from app.services import review
 
 
 def periods(company: str = "") -> list[str]:
-    """有已核定憑證的期別清單（YYYY-MM），新到舊。"""
-    recs = review.list_vouchers(status=ReviewStatus.accountant_approved, company=company)
+    """有已確認憑證的期別清單（YYYY-MM），新到舊。"""
+    recs = review.list_vouchers(status=ReviewStatus.confirmed, company=company)
     ps = sorted({r.period for r in recs if r.period}, reverse=True)
     return ps
 
 
 def build_journal(period: str, company: str = "") -> dict:
     """彙整指定期別的日記帳。"""
-    recs = review.list_vouchers(status=ReviewStatus.accountant_approved,
+    recs = review.list_vouchers(status=ReviewStatus.confirmed,
                                 company=company, period=period)
     rows = []
     complete = True

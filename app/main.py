@@ -48,7 +48,7 @@ _PUBLIC_API = {"/api/login", "/api/logout", "/api/me", "/api/health"}
 
 @app.middleware("http")
 async def auth_guard(request: Request, call_next):
-    """基本資安：/api 需登入；核定/退回限會計師、科目表儲存限管理員。"""
+    """基本資安：/api 需登入；設定、備份與開發者功能限管理員。"""
     path = request.url.path
     if path.startswith("/api/") and path not in _PUBLIC_API:
         user = auth.get_user_by_token(request.cookies.get("session"))
@@ -56,10 +56,7 @@ async def auth_guard(request: Request, call_next):
             return JSONResponse({"detail": "未登入"}, status_code=401)
         role = user["role"]
         if role != "admin":
-            if path.endswith("/approve") or path.endswith("/reject"):
-                if role != "accountant":
-                    return JSONResponse({"detail": "需會計師權限"}, status_code=403)
-            elif path == "/api/accounts" and request.method == "POST":
+            if path == "/api/accounts" and request.method == "POST":
                 return JSONResponse({"detail": "需管理員權限"}, status_code=403)
             elif path.startswith("/api/backup"):
                 return JSONResponse({"detail": "需管理員權限"}, status_code=403)
@@ -406,14 +403,15 @@ async def _save_upload(file: UploadFile) -> Path:
     return dest
 
 
-# ── 審核流程（記帳士初步修改 → 會計師核定）──────────────────────
+# ── 憑證確認（保存修正 → 人工確認完成）──────────────────────────
 def _rec_to_dict(rec: VoucherRecord, full: bool = False) -> dict:
     d = {
         "id": rec.id, "source_file": rec.source_file, "company": rec.company,
         "record_role": rec.record_role, "source_parent_id": rec.source_parent_id,
         "period": rec.period, "status": rec.status, "confidence": rec.confidence,
         "structure_model": rec.structure_model, "ocr_provider": rec.ocr_provider,
-        "clerk_note": rec.clerk_note, "accountant_note": rec.accountant_note,
+        "correction_note": rec.correction_note,
+        "confirmed_at": rec.confirmed_at.isoformat() if rec.confirmed_at else "",
         "dev_note": rec.dev_note, "manual_entry": bool(rec.manual_entry),
         # 人工是否動過欄位：重新辨識會覆蓋 current_json，前端據此先問過使用者
         "edited": rec.ai_json != rec.current_json,
@@ -444,7 +442,10 @@ def _rec_to_dict(rec: VoucherRecord, full: bool = False) -> dict:
 
 @app.get("/api/vouchers")
 def api_list(status: str = "", company: str = "", period: str = ""):
-    st = ReviewStatus(status) if status else None
+    try:
+        st = [ReviewStatus(value.strip()) for value in status.split(",")] if status else None
+    except ValueError:
+        return JSONResponse({"detail": "憑證狀態不合法"}, status_code=422)
     recs = review.list_vouchers(status=st, company=company, period=period, include_sources=True)
     return {"items": [_rec_to_dict(r) for r in recs]}
 
@@ -465,21 +466,9 @@ def api_update(rec_id: int, voucher: dict = Body(...)):
     return _rec_to_dict(rec, full=True)
 
 
-@app.post("/api/vouchers/{rec_id}/clerk-review")
-def api_clerk(rec_id: int, note: str = Body("", embed=True)):
-    rec = review.clerk_review(rec_id, note)
-    return _rec_to_dict(rec) if rec else JSONResponse({"detail": "查無此紀錄"}, status_code=404)
-
-
-@app.post("/api/vouchers/{rec_id}/approve")
-def api_approve(rec_id: int, note: str = Body("", embed=True)):
-    rec = review.accountant_approve(rec_id, note)
-    return _rec_to_dict(rec) if rec else JSONResponse({"detail": "查無此紀錄"}, status_code=404)
-
-
-@app.post("/api/vouchers/{rec_id}/reject")
-def api_reject(rec_id: int, note: str = Body("", embed=True)):
-    rec = review.reject(rec_id, note)
+@app.post("/api/vouchers/{rec_id}/confirm")
+def api_confirm_record(rec_id: int, expected_updated_at: str = Body(..., embed=True)):
+    rec = review.confirm_record(rec_id, expected_updated_at)
     return _rec_to_dict(rec) if rec else JSONResponse({"detail": "查無此紀錄"}, status_code=404)
 
 
@@ -491,35 +480,20 @@ def api_set_company(rec_id: int, company: str = Body("", embed=True)):
 
 
 @app.post("/api/vouchers/{rec_id}/notes")
-def api_notes(request: Request, rec_id: int, clerk_note: str = Body(None, embed=True),
-              accountant_note: str = Body(None, embed=True),
+def api_notes(request: Request, rec_id: int, correction_note: str = Body(None, embed=True),
               dev_note: str = Body(None, embed=True),
               manual_entry: bool = Body(None, embed=True)):
-    """只存備註、不轉狀態。
-
-    這三欄會被餵給下次辨識當人工修正提示，但先前只有「記帳士確認／核定／退回」
-    這些轉狀態的動作才會寫入 → 使用者在待審畫面打了備註按「儲存修正」，備註被
-    靜默丟棄，重新辨識自然沒有效果。角色限制比照既有：會計師備註限會計師、
-    開發者備註限管理員。"""
+    """保存修正備註及人工輸入標記，不轉狀態；開發者備註限管理員。"""
     user = auth.get_user_by_token(request.cookies.get("session")) or {}
     role = user.get("role", "")
     patch = {}
-    if clerk_note is not None:
-        patch["clerk_note"] = clerk_note
-    if accountant_note is not None and role in ("accountant", "admin"):
-        patch["accountant_note"] = accountant_note
+    if correction_note is not None:
+        patch["correction_note"] = correction_note
     if dev_note is not None and role == "admin":
         patch["dev_note"] = dev_note
     if manual_entry is not None:
         patch["manual_entry"] = manual_entry
     rec = review.set_notes(rec_id, **patch)
-    return _rec_to_dict(rec) if rec else JSONResponse({"detail": "查無此紀錄"}, status_code=404)
-
-
-@app.post("/api/vouchers/{rec_id}/resubmit")
-def api_resubmit(rec_id: int, note: str = Body("", embed=True)):
-    """退回 → 待審（重新送審）。不限會計師：退回多半由記帳士修正後送回。"""
-    rec = review.resubmit(rec_id, note)
     return _rec_to_dict(rec) if rec else JSONResponse({"detail": "查無此紀錄"}, status_code=404)
 
 
@@ -578,18 +552,16 @@ def api_set_type(rec_id: int, doc_type_key: str = Body(..., embed=True)):
     return {"ok": True, "id": rec.id} if rec else JSONResponse({"detail": "找不到紀錄"}, status_code=404)
 
 
-@app.post("/api/vouchers/{rec_id}/confirm")
-def api_confirm(rec_id: int, doc_type_key: str = Body("", embed=True)):
+@app.post("/api/vouchers/{rec_id}/confirm-appearance")
+def api_confirm_appearance(rec_id: int, doc_type_key: str = Body("", embed=True)):
     """外觀確認完成 → 加入掃描清單（prepared → queued）。可帶 doc_type_key 先修正類型。"""
-    if doc_type_key:
-        review.set_type(rec_id, doc_type_key)
-    rec = review.confirm_appearance(rec_id)
+    rec = review.confirm_appearance(rec_id, doc_type_key)
     return {"ok": True, "id": rec.id} if rec else JSONResponse({"detail": "找不到紀錄"}, status_code=404)
 
 
 @app.post("/api/vouchers/{rec_id}/recognize")
 def api_recognize(rec_id: int):
-    """依確認的類型在準備好的影像上做內容辨識（queued/prepared → pending 待審）。"""
+    """依確認的類型在準備好的影像上做內容辨識（queued/prepared → pending 待確認）。"""
     try:
         rec = review.recognize_record(rec_id)
     except review.RecognitionProtected as exc:
@@ -684,7 +656,10 @@ def api_classify(rec_id: int):
         review._check_model_write(rec)
         voucher = Voucher.model_validate(json.loads(rec.current_json))
         voucher = classify.classify(voucher, company=rec.company)
-        review.update_current(rec_id, voucher.model_dump(), mark_manual=False)
+        saved = review.update_current(rec_id, voucher.model_dump(), mark_manual=False,
+                                      expected_updated_at=getattr(rec, "updated_at", None))
+        if saved is None:
+            return JSONResponse({"detail": "查無此紀錄"}, status_code=404)
         return {"ok": True, "entries": [e.model_dump() for e in voucher.entries],
                 "debit_total": voucher.debit_total, "credit_total": voucher.credit_total,
                 "balance_check": voucher.balance_check, "classification_meta": voucher.classification_meta,
@@ -712,7 +687,7 @@ def api_feedback():
 
 @app.get("/api/alignment")
 def api_alignment():
-    """已核定紀錄中 AI 原始值 vs 人工修正值的差異（模型對齊訊號）。"""
+    """已確認紀錄中 AI 原始值 vs 人工修正值的差異（模型對齊訊號）。"""
     return {"pairs": review.alignment_pairs()}
 
 

@@ -41,10 +41,7 @@
     <button class="stage-tab active" data-stage="import">① 匯入</button>
     <button class="stage-tab" data-stage="prepared">② 外觀確認<span class="cnt" id="cnt-prepared">0</span></button>
     <button class="stage-tab" data-stage="queued">③ 掃描清單<span class="cnt" id="cnt-queued">0</span></button>
-    <button class="stage-tab" data-stage="pending">④ 待審<span class="cnt" id="cnt-pending">0</span></button>
-    <button class="stage-tab" data-stage="clerk_reviewed">⑤ 記帳士確認<span class="cnt" id="cnt-clerk_reviewed">0</span></button>
-    <button class="stage-tab" data-stage="accountant_approved">⑥ 會計師核定<span class="cnt" id="cnt-accountant_approved">0</span></button>
-    <button class="stage-tab minor" data-stage="rejected">退回<span class="cnt" id="cnt-rejected">0</span></button>
+    <button class="stage-tab" data-stage="pending">④ 確認<span class="cnt" id="cnt-pending" title="待確認件數">0</span></button>
   </nav>
 
   <main class="layout">
@@ -82,11 +79,16 @@
         </div>
       </div>
 
-      <!-- ②–⑥ 佇列視圖 -->
+      <!-- ②–④ 佇列視圖 -->
       <div id="queueView" class="panel hidden">
         <div class="row-between">
           <h2 id="queueTitle">佇列</h2>
           <span>
+            <select id="confirmationFilter" class="select select-sm hidden" aria-label="確認狀態篩選">
+              <option value="pending">待確認</option>
+              <option value="confirmed">已確認</option>
+              <option value="pending,confirmed">全部</option>
+            </select>
             <button id="btnMerge" class="btn btn-sm hidden" title="勾選同一份文件的多頁，合併為一張憑證（主頁＋附頁）">🔗 合併為一張</button>
             <button id="btnExtractAll" class="btn btn-sm primary hidden">⚡ 一鍵提取全部</button>
           </span>
@@ -109,13 +111,13 @@
     <!-- 右：審核編輯 -->
     <section class="panel">
       <div class="row-between">
-        <h2>審核與編輯</h2>
+        <h2>確認與編輯</h2>
         <span>
           <span id="importBadge" class="tag warn hidden">🔒 進口報單（鎖定）</span>
           <span id="revStatus" class="tag"></span>
         </span>
       </div>
-      <div id="revEmpty" class="hint">從左側清單選一筆憑證進行審核。</div>
+      <div id="revEmpty" class="hint">從左側清單選一筆憑證進行確認。</div>
 
       <div id="revForm" class="hidden">
         <div class="rev-toolbar">
@@ -184,8 +186,7 @@
         <label class="full manual-flag" title="欄位經你手動編輯確認後勾選。勾選後清單會標記，日後有人按「重新辨識」會先跳出提醒，避免覆蓋你的修正">
           <input type="checkbox" id="f-manual_entry"> ✍ <b>人工修正</b>（本張欄位已人工編輯確認，重新辨識前會提醒）
         </label>
-        <label class="full">記帳士備註（修正／回饋・<b>會作為下次辨識的修正提示</b>）<textarea id="f-clerk_note" rows="2" placeholder="例：合計金額應取右下角「應收帳款總額」，不是銷貨合計額"></textarea></label>
-        <label class="full">會計師備註（修正／回饋・<b>會作為下次辨識的修正提示</b>）<textarea id="f-acc_note" rows="2"></textarea></label>
+        <label class="full">修正備註（修正／回饋・<b>會作為下次辨識的修正提示</b>）<textarea id="f-correction_note" rows="2" placeholder="例：合計金額應取右下角「應收帳款總額」，不是銷貨合計額"></textarea></label>
         <div class="full hidden" id="devNoteWrap">
           <label>🛠 開發者備註（辨識錯誤／修正回饋・僅管理員）<textarea id="f-dev_note" rows="2" placeholder="例：水費帳單被拆成多張、支票領款單誤判為支票、掃描旋轉導致框偏…"></textarea></label>
           <button id="btnDevNote" class="btn btn-sm">💾 儲存開發者備註</button>
@@ -194,13 +195,9 @@
         <div class="src-hint hint" id="revSrc"></div>
 
         <div class="actions">
-          <button id="btnSavePending" class="btn primary hidden" title="儲存目前修正與備註，保留在④待審">💾 暫存至待審</button>
           <button id="btnReturnImport" class="btn hidden" title="先暫存目前修正與備註，再返回①匯入下一份檔案">↩ 返回①匯入下一份</button>
           <button id="btnSave" class="btn">💾 儲存修正</button>
-          <button id="btnResubmit" class="btn primary hidden" title="退回的憑證修正後送回④待審">↩ 重新送審</button>
-          <button id="btnClerk" class="btn">記帳士確認</button>
-          <button id="btnApprove" class="btn primary">會計師核定</button>
-          <button id="btnReject" class="btn danger">退回</button>
+          <button id="btnConfirm" class="btn primary" title="保存目前修正與備註，確認後納入日記帳">✅ 確認完成</button>
           <button id="btnPrintVoucher" class="btn">🖨 列印/PDF</button>
         </div>
         </div><!-- /reviewBody -->
@@ -224,7 +221,7 @@
         <div class="spacer"></div>
         <button id="btnPrintJournal" class="btn btn-sm">🖨 列印/PDF</button>
       </div>
-      <div id="journalEmpty" class="hint">選擇期別以檢視日記帳（僅彙整「會計師已核定」的憑證）。</div>
+      <div id="journalEmpty" class="hint">選擇期別以檢視日記帳（僅彙整「已確認」的憑證）。</div>
       <div id="journalWrap" class="journal-wrap hidden">
         <table class="journal">
           <thead><tr><th>日期</th><th>憑證號</th><th>摘要</th><th>借方科目</th><th>貸方科目</th><th>借方金額</th><th>貸方金額</th></tr></thead>

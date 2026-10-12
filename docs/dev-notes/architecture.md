@@ -74,7 +74,7 @@ flowchart TD
     API --> Memory[記憶體：session 與背景工作進度]
 ```
 
-分類範例檢索讀取 SQLite 中已核定的憑證，透過 Ollama embedding 與程式內餘弦相似度挑選範例；目前沒有獨立向量資料庫。
+分類範例檢索讀取 SQLite 中已確認的憑證，透過 Ollama embedding 與程式內餘弦相似度挑選範例；目前沒有獨立向量資料庫。
 
 ## 4. 資料庫與持久化
 
@@ -118,25 +118,24 @@ flowchart TD
 2. `pipeline.prepare_pages()` 進行頁面準備、類型判定與轉正；`review.save_voucher()` 將每筆憑證存入 SQLite，狀態為 `prepared`，並保存對照影像。
 3. 使用者確認外觀與文件類型後，紀錄轉為 `queued`，等待內容提取。
 4. 單筆或批次內容提取依文件類型使用 OCR／VLM，完成結構化及欄位清理，再將結果存回紀錄；`prepared`／`queued` 紀錄轉為 `pending`。
-5. 使用者修改欄位、執行會計科目分類，再由記帳士確認與會計師核定。修改、分錄、備註及狀態存回資料庫。
-6. 日記帳與報表服務讀取保存的憑證資料；對齊介面提供已核定資料中 AI 與人工版本有差異的配對。
+5. 使用者修改欄位並保存草稿；另按「確認」完成憑證確認。`correction_note` 為修正備註，`dev_note` 僅管理員可用。修正辨識結果、內容、公司或影像會讓憑證回到待確認；僅修改備註不改變狀態。確認時間記錄於 `confirmed_at`。
+6. 日記帳、會計傳票與配對只讀取已確認憑證。確認入口 `POST /api/vouchers/{rec_id}/confirm` 接受 `expected_updated_at`，所有已登入角色皆可使用；保存草稿不會加入帳務。
 
 ```mermaid
 flowchart LR
     A[prepared：待外觀確認] --> B[queued：待內容提取]
-    B --> C[pending：待審]
-    C --> D[clerk_reviewed：記帳士確認]
-    D --> E[accountant_approved：會計師核定]
-    C --> F[rejected：退回]
-    D --> F
-    F -->|修正後重新送審| C
+    B --> C[pending：待確認]
+    C -->|修正辨識／內容／公司／影像| C
+    C -->|確認| D[confirmed：已確認]
+    D -->|重新辨識／內容／公司／影像變更| C
+    D --> E[日記帳／傳票／配對]
 ```
 
-以上圖示表達預期操作流程；服務中的狀態更新並非完整的狀態機轉移驗證。
+歷史角色欄位保留供舊資料追溯：`accountant_approved` 映射為 `confirmed`；`clerk_reviewed` 與 `rejected` 映射為 `pending`。以上圖示表達預期操作流程；服務中的狀態更新並非完整的狀態機轉移驗證。
 
 ### 5.1 正式辨識流程與入口
 
-`POST /api/analyze` 與批次匯入只呼叫 `prepare_pages()`，不會立即擷取完整欄位。外觀確認可修正類型、旋轉、裁切、分割或合併；確認後才由 `POST /api/vouchers/{rec_id}/recognize` 或批次提取呼叫 `review.recognize_record()`，依已確認類型執行 `extract_for_type()`。
+`POST /api/analyze` 與批次匯入只呼叫 `prepare_pages()`，不會立即擷取完整欄位。外觀確認可修正類型、旋轉、裁切、分割或合併，呼叫 `POST /api/vouchers/{rec_id}/confirm-appearance`（可帶 `doc_type_key`）；確認後才由 `POST /api/vouchers/{rec_id}/recognize` 或批次提取呼叫 `review.recognize_record()`，依已確認類型執行 `extract_for_type()`。
 
 ```mermaid
 flowchart TD
@@ -152,12 +151,13 @@ flowchart TD
     I --> J
     J --> K[VLM 輸出 JSON]
     K --> L[兩語意輪／傳輸重試＋正規化＋衝突警告＋座標校正]
-    L --> M[保存結果，進入待審]
-    M --> N[人工修改、記帳士確認、會計師核定]
+    L --> M[保存結果，進入待確認]
+    O --> N[保存修正草稿]
+    N -->|確認| P[confirmed：已確認]
     M --> O[ACCOUNTING_TEMPLATE：公司政策與完整上下文]
 ```
 
-路由由 `ROUTE_TEMPLATE` 負責；`utility` 僅代表水電／電信等公用事業，`rotate` 嚴格限制 0、90、180、270，`other` 必須說明原因。人工確認後以 `EXTRACT_TEMPLATE` 配合 18 類契約及 `type_hints` 擷取。重新辨識仍按入口需要判定類型；一般內容提取不再判類型或旋轉。模型傳輸及語意重試由共用 `model_invocation.py` 管理，輸出清洗由 `normalization.py` 負責。
+路由由 `ROUTE_TEMPLATE` 負責；`utility` 僅代表水電／電信等公用事業，`rotate` 嚴格限制 0、90、180、270，`other` 必須說明原因。外觀確認後以 `EXTRACT_TEMPLATE` 配合 18 類契約及 `type_hints` 擷取。重新辨識仍按入口需要判定類型；一般內容提取不再判類型或旋轉。模型傳輸及語意重試由共用 `model_invocation.py` 管理，輸出清洗由 `normalization.py` 負責。
 
 多頁 PDF 預設逐頁建立紀錄，一頁多張單據則需人工分割。合併紀錄會保存附頁供檢視，但目前內容提取只讀主影像，沒有自動整合附頁內容。
 
@@ -198,7 +198,7 @@ flowchart TD
 
 政策預設為 `default-v1`：進口稅費對應預付費用、海關營業稅對應進項稅額、銀行手續費對應其他費用。進口政策預設 `include_goods_values=false`、`posting_currency=TWD`；外幣發票與明細仍完整保存，但不把外幣貨款和臺幣稅費混加。明示已付款仍須有付款方式才能選銀行或現金；未付款進口／商品用應付帳款，一般未付款費用用應付費用。角色由當次公司科目表解析；進口政策不套用出口。付款狀態或收支方向不明時保留候選及 warning，不強制貸記銀行。缺金額或科目為 `candidate`；原始單面傳票再次分類時標記 `status=skipped`、`reason=original_entries`，保留原列及 `original_checks` 且不生成另一側；檢查包含 `complete`、`single_sided`、`observed_totals` 與 `printed_totals_match`。`balance_check` 僅表示借貸實際相等，單面完整不等於平衡；其他 `skipped` 僅表示佐證附頁。
 
-會計分類範例僅接受同公司、同一當次 `policy_sha256`、`status=proposed`、已核定且有效平衡的分錄。缺少公司範圍或政策 hash 的舊 `entry_examples.json` 略過。設定範例、範例選擇與備份要求見[會計政策](accounting-policy.md)。
+會計分類範例僅接受同公司、同一當次 `policy_sha256`、`status=proposed`、已確認且有效平衡的分錄。缺少公司範圍或政策 hash 的舊 `entry_examples.json` 略過。設定範例、範例選擇與備份要求見[會計政策](accounting-policy.md)。
 
 本輪全套離線驗收 107 項通過；前輪驗收基準為 74 項。沒有用真實模型或可比資料比較新舊辨識結果，因此不宣稱準確率提升。改版前 43 份模板快照及 10 個動態片段仍保留於[提示詞目錄](prompt-catalog.md)，僅作變更前基準；舊盤點問題及真模型待辦見[提示詞檢視](prompt-review.md)。最新提示長度報告已重產：同一合成 OCR、完整文字輸入（不含圖片 bytes、公司資料或動態案例）下，影像平均由 1641.0 降至 1437.8 字元（-12.4%），純文字由 1544.3 降至 1433.7 字元（-7.2%）。這是字元數比較，不代表 token、耗時、辨識準確率或所有任務成本都下降。部分長契約增加，不能推論所有任務成本下降。詳見[提示長度報告](prompt-length-report.md)及[JSON 資料](prompt-length-report.json)。
 
@@ -280,7 +280,7 @@ OCR 本身不直接解析一般單據的語意欄位，主要內容仍由 VLM �
 
 ## 6. 主要 API
 
-除登入、登出、目前使用者與健康檢查等公開入口外，`/api/` 路由由 middleware 檢查登入。`/api/me` 本身仍會驗證 session。核定／退回限會計師或管理員；科目表寫入、備份、系統組態與開發者回饋等另有管理員限制，詳細條件見 `auth_guard()` 與個別路由。
+除登入、登出、目前使用者與健康檢查等公開入口外，`/api/` 路由由 middleware 檢查登入。`/api/me` 本身仍會驗證 session。憑證確認允許所有登入角色；`dev_note`、科目表寫入、備份、系統組態與開發者回饋等另有管理員限制，詳細條件見 `auth_guard()` 與個別路由。
 
 | 方法與路徑 | 用途 |
 |---|---|
@@ -290,11 +290,11 @@ OCR 本身不直接解析一般單據的語意欄位，主要內容仍由 VLM �
 | `GET /api/scan-source/list`、`POST /api/scan-source/import` | 掃描來源清單與匯入 |
 | `GET /api/vouchers`、`GET /api/vouchers/{rec_id}` | 依狀態／公司／期別查詢與單筆內容 |
 | `PUT /api/vouchers/{rec_id}` | 保存人工修正內容 |
-| `POST /api/vouchers/{rec_id}/confirm` | 外觀確認，加入待提取清單 |
+| `POST /api/vouchers/{rec_id}/confirm-appearance` | 外觀確認，可帶 `doc_type_key`，加入待提取清單 |
+| `POST /api/vouchers/{rec_id}/confirm` | 內容人工確認；body 含 `expected_updated_at`，所有登入角色可用；僅已確認憑證進入日記帳、傳票與配對 |
 | `POST /api/vouchers/{rec_id}/recognize` | 單筆內容提取 |
 | `POST /api/extract-batch`、`GET /api/extract-job` | 批次內容提取與進度輪詢 |
 | `POST /api/vouchers/{rec_id}/classify` | 產生會計科目分錄 |
-| `POST /api/vouchers/{rec_id}/clerk-review`、`/approve`、`/reject`、`/resubmit` | 記帳士確認、核定、退回、重新送審；後三者共用前述憑證路徑前綴 |
 | `GET /api/journal`、`GET /api/report` | 日記帳與報表 |
 | `GET /api/alignment`、`GET /api/feedback` | 對齊配對與開發者回饋 |
 | `GET /api/config`、`POST /api/config` | 模型設定 |
@@ -324,7 +324,7 @@ OCR 本身不直接解析一般單據的語意欄位，主要內容仍由 VLM �
 | 工作與 session | 保存在單一程序記憶體，重啟後消失；沒有持久化工作佇列或跨程序共享狀態，不宜直接用多 worker 假設狀態一致 |
 | 資料遷移 | 僅處理程式列出的新增／修正欄位，未提供完整版本化遷移流程 |
 | 修改歷程 | 保留 AI 與目前值及審核欄位，但不保存每次修改的完整版本；重新辨識會覆寫 AI 與目前值 |
-| 模型對齊 | 已有修正配對與已核定範例檢索，不代表已建置自動微調訓練流程 |
+| 模型對齊 | 已有修正配對與已確認範例檢索，不代表已建置自動微調訓練流程 |
 
 ### 8.2 辨識架構完整性與已知缺口
 
@@ -338,7 +338,7 @@ OCR 本身不直接解析一般單據的語意欄位，主要內容仍由 VLM �
 | 欄位契約與信心度 | 18 類契約已明列欄位，並保存 `field_evidence`、`validation_warnings`；分類 metadata 可留候選狀態及假設 | 仍需用真實模型與凍結資料量測欄位級品質；離線契約驗證不代表信心度校準 |
 | 自動轉正降級 | OCR 延遲載入；`_auto_orient_ocr()` 吞掉辨識例外並評為 0，可能不使用 Router 旋轉提示；原方向分數達 40 即不比較其他方向 | 明確區分「OCR 無法執行」與「判定不旋轉」，失敗採 Router 提示或標記人工確認 |
 | 進出口分錄政策 | 已改為只對已確認進口類型套用進口政策；出口不套。若類型確認或付款證據不足，候選分錄仍需人工檢視 | 以離線案例確認路由邊界，再用真實模型比較評估分錄品質 |
-| 歷史範例隔離 | 範例選取須符合當次公司、`policy_sha256`、`status=proposed`、已核定且有效平衡；無範圍的舊種子略過 | 用離線契約檢查與固定模型比較確認正式及驗證流程一致，並保留來源可追溯性 |
+| 歷史範例隔離 | 範例選取須符合當次公司、`policy_sha256`、`status=proposed`、已確認且有效平衡；無範圍的舊種子略過 | 用離線契約檢查與固定模型比較確認正式及驗證流程一致，並保留來源可追溯性 |
 | 完整追蹤 | 正式紀錄保存結果／模型資訊，但完整 prompt、response、OCR trace 主要在驗證的 `capture()` 上下文保存 | 正式辨識也保存每次執行版本、來源證據與錯誤，不覆寫唯一歷史 |
 | 正式批次恢復 | 匯入／提取使用背景執行緒與程序記憶體，缺少重啟恢復與跨程序一致性 | 建立持久化任務與失敗重試機制，獨立記錄每頁結果 |
 

@@ -131,7 +131,7 @@ SECTION = f"""
       <div class="mermaid">
 flowchart LR
   IMG["頁面影像與 OCR"] --> ROUTE["路由模板"] --> TYPE["文件類型與契約"]
-  TYPE --> EXTRACT["萃取模板"] --> READ["共用補讀與欄位檢查"] --> REVIEW["待審資料"]
+  TYPE --> EXTRACT["萃取模板"] --> READ["共用補讀與欄位檢查"] --> REVIEW["待確認資料"]
   REVIEW --> ACCOUNT["會計模板"] --> CANDIDATE["候選分錄"]
       </div>
       <div class="diagram-cap">路由與萃取共用提示詞模板，再以文件類型契約和提示補充差異；會計模板產生供審核的候選分錄。</div>
@@ -166,7 +166,7 @@ flowchart LR
 
     <h4>③ 會計模板（<code>ACCOUNTING_TEMPLATE</code>）</h4>
     <p>只對已確認為進口的文件套用進口規則；出口類型不套用。預設角色映射為：進口稅費→預付費用、海關營業稅→進項稅額、銀行手續費→其他費用。未付款進口／商品使用應付帳款，一般未付款費用使用應付費用；已付款須有付款方式，才能選銀行存款或現金。科目角色由當次公司的科目表解析，不固定寫入科目代碼。進口預設 <code>include_goods_values=false</code>、<code>posting_currency=TWD</code>；外幣發票與明細完整保留，但不將外幣貨款與臺幣稅費混合加總。</p>
-    <p>付款方式或收支方向不明時，提出候選分錄並明示假設；不能據此強制貸記銀行。會計輸出標記為 <code>proposed</code>、<code>candidate</code> 或 <code>skipped</code>。缺金額或科目屬候選；原始單面傳票再次分類會以 <code>status=skipped</code>、<code>reason=original_entries</code> 保留既有分錄，不生成另一側。其 <code>original_checks</code> 記錄 <code>complete</code>、<code>single_sided</code>、<code>observed_totals</code> 與 <code>printed_totals_match</code>；<code>balance_check</code> 僅表示借貸實際相等，單面完整不代表平衡。候選結果供人員檢視確認，不代表已核定。</p>
+    <p>付款方式或收支方向不明時，提出候選分錄並明示假設；不能據此強制貸記銀行。會計輸出標記為 <code>proposed</code>、<code>candidate</code> 或 <code>skipped</code>。缺金額或科目屬候選；原始單面傳票再次分類會以 <code>status=skipped</code>、<code>reason=original_entries</code> 保留既有分錄，不生成另一側。其 <code>original_checks</code> 記錄 <code>complete</code>、<code>single_sided</code>、<code>observed_totals</code> 與 <code>printed_totals_match</code>；<code>balance_check</code> 僅表示借貸實際相等，單面完整不代表平衡。候選結果供人員檢視確認，但不代表憑證已確認。</p>
     <p>辨識欄位可保留 <code>field_evidence</code> 與 <code>validation_warnings</code>；會計模型只接收已選取的現行證據，完整歷史仍保存。人工修改後會重算日期、金額、統編等目前警告，並保留原始來源與衝突診斷。分類結果記錄於 <code>classification_meta</code>，分錄證據路徑記錄於 <code>JournalEntry.evidence_paths</code>。日記帳列保留 null 金額與證據路徑，忽略舊 <code>bill_detail</code> 分錄列；前端與報表列印附上 escaped 來源、驗證及政策紀錄。舊瀏覽器重複儲存不覆蓋服務端 audit 與 stale 標記。</p>
     <p><code>JournalEntry.amount</code> 與 <code>amount_source</code> 可缺省為 null，<code>LineItem.fee_code</code> 可缺省為 null，<code>Voucher.payment_state</code> 預設為空物件。分類 API 回應追加 <code>payment_state</code> 供前端收取；日記帳列提供 <code>amount_source</code> 與付款狀態。CSV 追加 <code>amount_source</code>、<code>fee_code</code> 與 <code>payment_state_json</code> 欄位，列印輸出保留這些契約資料。對帳單幣別未知時保留未知，不預設 TWD；其 money metadata 使用文件幣別，現行對帳單會計政策及發票勾稽範圍不變。各類型明細欄位以深拷貝隔離，避免 metadata 跨類型污染。</p>
     <div class="codeblock"><span class="lang">prompt</span><pre>{esc(ACCOUNTING_TEMPLATE)}</pre></div>

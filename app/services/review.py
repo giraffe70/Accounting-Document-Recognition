@@ -1,4 +1,4 @@
-"""審核流程服務：辨識結果落地 → 記帳士修改 → 會計師核定，並保留對齊訊號。"""
+"""憑證確認流程：辨識結果落地 → 人工修正 → 確認完成，並保留對齊訊號。"""
 import json
 import os
 import shutil
@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Optional
 
 from sqlmodel import select
+from sqlalchemy import update
 
 from app import config
 from app.db.models import ReviewStatus, VoucherRecord
@@ -31,7 +32,7 @@ def _period_of(date_str: str) -> str:
 def save_voucher(voucher: Voucher, company: str = "",
                  status: ReviewStatus = ReviewStatus.pending, *, source_parent_id=None) -> VoucherRecord:
     """辨識完成後落地紀錄。ai_json 與 current_json 初始相同。
-    status 預設 pending（已辨識待審）；匯入外觀確認階段傳 prepared（僅判類型/轉正）。"""
+    status 預設 pending（已辨識待確認）；匯入外觀確認階段傳 prepared（僅判類型/轉正）。"""
     payload = voucher.model_dump()
     blob = json.dumps(payload, ensure_ascii=False)
     rec = VoucherRecord(
@@ -68,13 +69,14 @@ def save_voucher(voucher: Voucher, company: str = "",
     return rec
 
 
-def list_vouchers(status: Optional[ReviewStatus] = None, company: str = "", period: str = "", *, include_sources=False):
+def list_vouchers(status: Optional[ReviewStatus | list[ReviewStatus]] = None, company: str = "", period: str = "", *, include_sources=False):
     with get_session() as s:
         stmt = select(VoucherRecord)
         if not include_sources:
             stmt = stmt.where(VoucherRecord.record_role != "source_page")
         if status:
-            stmt = stmt.where(VoucherRecord.status == status)
+            statuses = status if isinstance(status, (list, tuple)) else [status]
+            stmt = stmt.where(VoucherRecord.status.in_(statuses))
         if company:
             stmt = stmt.where(VoucherRecord.company == company)
         if period:
@@ -103,10 +105,15 @@ class RecognitionProtected(ValueError):
 
 
 def _check_model_write(rec):
-    if rec.status == ReviewStatus.accountant_approved:
-        raise RecognitionProtected("已核定紀錄須先完成退回流程，才可重新辨識")
     if rec.record_role == "source_page":
         raise RecognitionProtected("來源頁只保存原圖，請辨識子單據或先人工分割")
+
+
+def _invalidate_confirmation(rec):
+    """實際內容變更才撤銷本次確認；備註與無變動儲存不呼叫此函式。"""
+    if getattr(rec, "status", None) == ReviewStatus.confirmed:
+        rec.status = ReviewStatus.pending
+        rec.confirmed_at = None
 
 
 def _preserve_source_image(rec_id):
@@ -158,19 +165,22 @@ def _save_recognition(rec_id, voucher):
         rec.current_json = json.dumps(data, ensure_ascii=False)
         rec.confidence, rec.structure_model, rec.ocr_provider = str(voucher.confidence or ""), voucher.structure_model, voucher.ocr_provider
         rec.period = _period_of(data.get("date", "")) or rec.period
-        if rec.status in (ReviewStatus.prepared, ReviewStatus.queued):
-            rec.status = ReviewStatus.pending
+        rec.status = ReviewStatus.pending
+        rec.confirmed_at = None
         rec.updated_at = datetime.now()
         session.add(rec); session.commit(); session.refresh(rec)
         return rec
 
 
-def update_current(rec_id: int, voucher_dict: dict, *, mark_manual: bool = True) -> Optional[VoucherRecord]:
+def update_current(rec_id: int, voucher_dict: dict, *, mark_manual: bool = True,
+                   expected_updated_at: Optional[datetime] = None) -> Optional[VoucherRecord]:
     """人工修正欄位（不動 ai_json，只更新 current_json）。"""
     with get_session() as s:
         rec = s.get(VoucherRecord, rec_id)
         if not rec:
             return None
+        if expected_updated_at is not None and rec.updated_at != expected_updated_at:
+            raise RecognitionProtected("辨識期間資料已被修改，請重新載入")
         if getattr(rec, "record_role", "voucher") == "source_page":
             raise RecognitionProtected("來源頁只保存原圖與版面診斷，請修改子憑證")
         if not mark_manual:
@@ -228,6 +238,9 @@ def update_current(rec_id: int, voucher_dict: dict, *, mark_manual: bool = True)
                 meta.update(status="candidate", stale=True)
                 meta["warnings"] = list(dict.fromkeys([*(meta.get("warnings") or []), "資料已人工修改，原分錄待重新確認"]))
         voucher_dict = pipeline.canonicalize_voucher(voucher_dict)
+        previous_normalized = pipeline.canonicalize_voucher(deepcopy(previous))
+        if not mark_manual or voucher_dict != previous_normalized:
+            _invalidate_confirmation(rec)
         rec.current_json = json.dumps(voucher_dict, ensure_ascii=False)
         rec.period = _period_of(voucher_dict.get("date", "")) or rec.period
         rec.updated_at = datetime.now()
@@ -237,19 +250,33 @@ def update_current(rec_id: int, voucher_dict: dict, *, mark_manual: bool = True)
         return rec
 
 
-def clerk_review(rec_id: int, note: str = "") -> Optional[VoucherRecord]:
-    return _transition(rec_id, ReviewStatus.clerk_reviewed, note_field="clerk_note",
-                       time_field="clerk_reviewed_at", note=note)
-
-
-def accountant_approve(rec_id: int, note: str = "") -> Optional[VoucherRecord]:
-    return _transition(rec_id, ReviewStatus.accountant_approved, note_field="accountant_note",
-                       time_field="accountant_approved_at", note=note)
-
-
-def reject(rec_id: int, note: str = "") -> Optional[VoucherRecord]:
-    return _transition(rec_id, ReviewStatus.rejected, note_field="accountant_note",
-                       time_field=None, note=note)
+def confirm_record(rec_id: int, expected_updated_at: str) -> Optional[VoucherRecord]:
+    """確認已保存的指定版本；條件 UPDATE 避免查核與寫入之間的競態。"""
+    with get_session() as s:
+        rec = s.get(VoucherRecord, rec_id)
+        if not rec:
+            return None
+        if rec.record_role == "source_page":
+            raise RecognitionProtected("來源頁不參與憑證確認，請操作子憑證")
+        if rec.status not in (ReviewStatus.pending, ReviewStatus.confirmed):
+            raise RecognitionProtected("請先完成內容辨識，再確認憑證")
+        if not rec.updated_at or rec.updated_at.isoformat() != expected_updated_at:
+            raise RecognitionProtected("資料已被修改，請重新載入後確認")
+        if rec.status == ReviewStatus.confirmed:
+            return rec
+        now = datetime.now()
+        result = s.execute(update(VoucherRecord).where(
+            VoucherRecord.id == rec_id, VoucherRecord.updated_at == rec.updated_at,
+            VoucherRecord.status == ReviewStatus.pending,
+            VoucherRecord.record_role != "source_page",
+        ).values(status=ReviewStatus.confirmed, confirmed_at=now, updated_at=now)
+          .execution_options(synchronize_session=False))
+        if result.rowcount != 1:
+            s.rollback()
+            raise RecognitionProtected("資料已被修改，請重新載入後確認")
+        s.commit()
+        s.refresh(rec)
+        return rec
 
 
 def set_company(rec_id: int, company: str) -> Optional[VoucherRecord]:
@@ -259,7 +286,10 @@ def set_company(rec_id: int, company: str) -> Optional[VoucherRecord]:
         rec = s.get(VoucherRecord, rec_id)
         if not rec:
             return None
-        rec.company = company or ""
+        company = company or ""
+        if rec.company != company:
+            _invalidate_confirmation(rec)
+        rec.company = company
         rec.updated_at = datetime.now()
         s.add(rec)
         s.commit()
@@ -270,7 +300,7 @@ def set_company(rec_id: int, company: str) -> Optional[VoucherRecord]:
 def set_notes(rec_id: int, **notes) -> Optional[VoucherRecord]:
     """只更新備註欄與人工輸入標記，不動狀態與 current_json。
     備註會成為下次辨識的人工修正提示，故必須能單獨儲存。"""
-    allowed = {"clerk_note", "accountant_note", "dev_note", "manual_entry"}
+    allowed = {"correction_note", "dev_note", "manual_entry"}
     with get_session() as s:
         rec = s.get(VoucherRecord, rec_id)
         if not rec:
@@ -285,21 +315,13 @@ def set_notes(rec_id: int, **notes) -> Optional[VoucherRecord]:
         return rec
 
 
-def resubmit(rec_id: int, note: str = "") -> Optional[VoucherRecord]:
-    """退回 → 待審：修正（或重新辨識）完成後重新送審。
-
-    沒有這條路的話退回就是單行道——recognize_record 只把 prepared/queued 轉 pending，
-    退回的紀錄重辨識後仍停在退回，永遠回不到審核流程。"""
-    return _transition(rec_id, ReviewStatus.pending, note_field="clerk_note",
-                       time_field=None, note=note)
-
-
 def _clear_boxes(rec_id: int):
     """影像變動後既有 boxes 不再對齊，清除之。"""
     with get_session() as s:
         r = s.get(VoucherRecord, rec_id)
         cur = json.loads(r.current_json)
         cur["boxes"] = {}
+        _invalidate_confirmation(r)
         r.current_json = json.dumps(cur, ensure_ascii=False)
         r.updated_at = datetime.now()
         s.add(r)
@@ -339,6 +361,8 @@ def rotate_fine(rec_id: int, angle: float):
     from PIL import Image
 
     try:
+        if float(angle) % 360 == 0:
+            return True
         im = Image.open(p).convert("RGB").rotate(-float(angle), expand=True, fillcolor=(255, 255, 255))
         im.save(p)
     except (OSError, ValueError):
@@ -454,6 +478,8 @@ def crop_image(rec_id: int, box):
         R, B = int(max(x1, x2) * w), int(max(y1, y2) * h)
         if R - L < 10 or B - T < 10:
             return None
+        if (L, T, R, B) == (0, 0, w, h):
+            return True
         _backup_once(p)
         im.crop((L, T, R, B)).save(p)
     except (OSError, ValueError, TypeError):
@@ -463,14 +489,14 @@ def crop_image(rec_id: int, box):
 
 
 def re_recognize(rec_id: int) -> Optional[VoucherRecord]:
-    """對既有影像重新辨識；並把備註欄（開發者/記帳士/會計師）作為人工修正提示餵入。"""
+    """對既有影像重新辨識，以修正備註與開發者備註作為提示。"""
     from app.core import pipeline
 
     rec = get_voucher(rec_id)
     if not rec or not rec.image_path:
         return None
     _check_model_write(rec)
-    hint = "；".join(n for n in (rec.dev_note, rec.clerk_note, rec.accountant_note) if n)
+    hint = "；".join(n for n in (rec.dev_note, rec.correction_note) if n)
     from app.core import invocation_trace, model_invocation, ocr_cache
     import uuid
     trace_path = config.DATA_DIR / "recognition" / str(rec_id) / (uuid.uuid4().hex + ".json")
@@ -497,7 +523,8 @@ def _route_unconfirmed_page(rec):
     from app.core import page_layout, invocation_trace
     current = json.loads(rec.current_json)
     manual = any(r.get("source") == "manual" and r.get("selected") for records in current.get("field_evidence", {}).values() for r in records)
-    if rec.source_parent_id or rec.manual_entry or manual or rec.status in (ReviewStatus.clerk_reviewed, ReviewStatus.accountant_approved):
+    if (rec.source_parent_id or rec.manual_entry or manual or rec.status == ReviewStatus.confirmed
+            or rec.clerk_reviewed_at or rec.accountant_approved_at):
         return None, None
     source = config.UPLOAD_DIR / rec.image_path
     layout = page_layout.detect(str(source))
@@ -525,13 +552,22 @@ def _route_unconfirmed_page(rec):
     return get_voucher(rec.id), None
 
 
-def confirm_appearance(rec_id: int) -> Optional[VoucherRecord]:
+def confirm_appearance(rec_id: int, type_key: str = "") -> Optional[VoucherRecord]:
     """外觀確認完成：prepared → queued（加入掃描清單，待內容提取）。不萃取欄位。"""
-    rec = get_voucher(rec_id)
-    if rec and rec.record_role == "source_page":
-        raise RecognitionProtected("來源頁只保存原圖，請先人工分割")
-    return _transition(rec_id, ReviewStatus.queued, note_field="clerk_note",
-                       time_field=None, note="")
+    with get_session() as s:
+        rec = s.get(VoucherRecord, rec_id)
+        if not rec:
+            return None
+        if rec.record_role == "source_page":
+            raise RecognitionProtected("來源頁只保存原圖，請先人工分割")
+        if rec.status not in (ReviewStatus.prepared, ReviewStatus.queued):
+            raise RecognitionProtected("此憑證已完成內容辨識，請至確認頁操作")
+        if type_key:
+            _apply_type(rec, type_key)
+        rec.status = ReviewStatus.queued
+        rec.updated_at = datetime.now()
+        s.add(rec); s.commit(); s.refresh(rec)
+        return rec
 
 
 def ids_by_status(status: ReviewStatus) -> list[int]:
@@ -553,6 +589,7 @@ def merge_vouchers(primary_id: int, other_ids: list) -> Optional[VoucherRecord]:
         p = s.get(VoucherRecord, primary_id)
         atts = json.loads(p.attachments or "[]")
         idx = len(atts) + 1
+        absorbed = False
 
         def _absorb(rel_path: str):
             nonlocal idx
@@ -581,7 +618,10 @@ def merge_vouchers(primary_id: int, other_ids: list) -> Optional[VoucherRecord]:
             for a in json.loads(o.attachments or "[]"):
                 _absorb(a)                           # 該頁自己的附頁也一併搬入
             s.delete(o)
+            absorbed = True
         p.attachments = json.dumps(atts, ensure_ascii=False)
+        if absorbed:
+            _invalidate_confirmation(p)
         p.updated_at = datetime.now()
         s.add(p)
         s.commit()
@@ -591,20 +631,13 @@ def merge_vouchers(primary_id: int, other_ids: list) -> Optional[VoucherRecord]:
 
 def set_type(rec_id: int, type_key: str) -> Optional[VoucherRecord]:
     """外觀確認階段：修正表單種類（更新 current_json 的 doc_type_key/doc_type）。"""
-    from app.core import doc_types
-
     with get_session() as s:
         rec = s.get(VoucherRecord, rec_id)
         if not rec:
             return None
-        cur = json.loads(rec.current_json)
-        cur["doc_type_key"] = type_key
-        cur["doc_type"] = doc_types.get(type_key)["label"]
-        evidence = cur.setdefault("field_evidence", {})
-        for item in evidence.get("doc_type_key", []):
-            item["selected"] = False
-        evidence.setdefault("doc_type_key", []).append({"source": "manual", "value": type_key, "selected": True})
-        rec.current_json = json.dumps(cur, ensure_ascii=False)
+        if rec.record_role == "source_page":
+            raise RecognitionProtected("來源頁只保存原圖，請修改子憑證類型")
+        _apply_type(rec, type_key)
         rec.updated_at = datetime.now()
         s.add(rec)
         s.commit()
@@ -612,9 +645,27 @@ def set_type(rec_id: int, type_key: str) -> Optional[VoucherRecord]:
         return rec
 
 
+def _apply_type(rec, type_key):
+    from app.core import doc_types
+
+    cur = json.loads(rec.current_json)
+    if cur.get("doc_type_key") != type_key:
+        _invalidate_confirmation(rec)
+    cur["doc_type_key"] = type_key
+    cur["doc_type"] = doc_types.get(type_key)["label"]
+    evidence = cur.setdefault("field_evidence", {})
+    selected = any(item.get("source") == "manual" and item.get("selected")
+                   and item.get("value") == type_key for item in evidence.get("doc_type_key", []))
+    if not selected:
+        for item in evidence.get("doc_type_key", []):
+            item["selected"] = False
+        evidence.setdefault("doc_type_key", []).append({"source": "manual", "value": type_key, "selected": True})
+    rec.current_json = json.dumps(cur, ensure_ascii=False)
+
+
 def recognize_record(rec_id: int) -> Optional[VoucherRecord]:
     """外觀確認完成後：依已確認的類型，在已準備好的影像上做內容辨識（萃取欄位＋框）。
-    完成後轉為 pending（待審）。備註欄作為人工修正提示餵入。"""
+    完成後轉為 pending（待確認）。備註欄作為人工修正提示餵入。"""
     from app.core import pipeline
 
     rec = get_voucher(rec_id)
@@ -623,7 +674,7 @@ def recognize_record(rec_id: int) -> Optional[VoucherRecord]:
     cur = json.loads(rec.current_json)
     type_key = cur.get("doc_type_key") or "other"
     _check_model_write(rec)
-    hint = "；".join(n for n in (rec.dev_note, rec.clerk_note, rec.accountant_note) if n)
+    hint = "；".join(n for n in (rec.dev_note, rec.correction_note) if n)
     confirmed = {path[7:]: cur.get("fields", {}).get(path[7:]) for path, records in cur.get("field_evidence", {}).items()
                  if path.startswith("fields.") and any(r.get("source") == "manual" and r.get("selected") for r in records)}
     from app.core import invocation_trace, model_invocation, ocr_cache
@@ -657,7 +708,7 @@ def feedback_log():
     out = []
     for rec in list_vouchers():
         changed = rec.ai_json != rec.current_json
-        notes = (rec.clerk_note, rec.accountant_note, rec.dev_note)
+        notes = (rec.correction_note, rec.dev_note)
         if not any(notes) and not changed and not rec.manual_entry:
             continue
         cur = json.loads(rec.current_json)
@@ -666,35 +717,16 @@ def feedback_log():
             "doc_type": cur.get("doc_type", ""), "doc_type_key": cur.get("doc_type_key", ""),
             "voucher_id": cur.get("voucher_id", ""), "status": rec.status, "changed": changed,
             "manual_entry": bool(rec.manual_entry),
-            "clerk_note": rec.clerk_note, "accountant_note": rec.accountant_note, "dev_note": rec.dev_note,
+            "correction_note": rec.correction_note, "dev_note": rec.dev_note,
         })
     return out
 
 
 def alignment_pairs():
-    """已核定紀錄中，AI 原始值與人工修正值不同者 → 模型對齊/微調訊號。"""
+    """已確認紀錄中，AI 原始值與人工修正值不同者 → 模型對齊/微調訊號。"""
     pairs = []
-    for rec in list_vouchers(status=ReviewStatus.accountant_approved):
+    for rec in list_vouchers(status=ReviewStatus.confirmed):
         if rec.ai_json != rec.current_json:
             pairs.append({"id": rec.id, "ai": json.loads(rec.ai_json),
                           "corrected": json.loads(rec.current_json)})
     return pairs
-
-
-def _transition(rec_id, status, note_field, time_field, note):
-    with get_session() as s:
-        rec = s.get(VoucherRecord, rec_id)
-        if not rec:
-            return None
-        if rec.record_role == "source_page":
-            raise RecognitionProtected("來源頁不参与憑證審核，請操作子憑證")
-        rec.status = status
-        if note:
-            setattr(rec, note_field, note)
-        if time_field:
-            setattr(rec, time_field, datetime.now())
-        rec.updated_at = datetime.now()
-        s.add(rec)
-        s.commit()
-        s.refresh(rec)
-        return rec

@@ -49,10 +49,10 @@ def main():
         # ② 匯入頁（含掃描來源目錄）
         shot("02_import", "① 匯入：拖拉上傳、選整個資料夾、伺服器端掃描來源目錄")
 
-        # ③ 待審佇列（清單欄位：憑證號/種類、公司、日期、總額、狀態）
+        # 舊版實機畫面（歷史流程快照）：透過舊 pending stage tab 擷取佇列
         pg.click('.stage-tab[data-stage="pending"]')
         pg.wait_for_timeout(1800)
-        shot("03_queue", "④ 待審佇列：清單顯示憑證號與單據種類、歸屬公司、日期、總額")
+        shot("03_queue", "舊版實機畫面（歷史流程快照）：待審佇列顯示憑證號、單據種類、公司、日期與總額")
 
         # ④ 審核畫面（點第一筆，等影像與框載入）
         rows = pg.query_selector_all("#listBody tr")
@@ -87,7 +87,7 @@ def main():
         # ⑦ 日記帳
         pg.evaluate("document.querySelector('#journalBtn').click()")
         pg.wait_for_timeout(2000)
-        shot("08_journal", "單月日記帳：彙整已核定憑證分錄，計算借貸合計與平衡")
+        shot("08_journal", "舊版實機畫面（歷史流程快照）：日記帳當時彙整已核定憑證分錄與借貸合計")
         b.close()
 
     print(f"\n共 {len(SHOTS)} 張 → {OUT.relative_to(ROOT)}")

@@ -1,7 +1,7 @@
 """產製報表：客製 Web 模板兩套（可列印／另存 PDF 的獨立 HTML 頁）。
 
 模板 A：憑證明細彙總表（期別內所有憑證的關鍵欄位 + 合計）
-模板 B：會計傳票格式（每張已核定憑證的借貸分錄，傳統傳票版面）
+模板 B：會計傳票格式（每張已確認憑證的借貸分錄，傳統傳票版面）
 """
 import json
 from html import escape
@@ -9,8 +9,8 @@ from html import escape
 from app.db.models import ReviewStatus
 from app.services import review
 
-_STATUS = {"pending": "待審", "clerk_reviewed": "記帳士已確認",
-           "accountant_approved": "會計師已核定", "rejected": "退回"}
+_STATUS = {"prepared": "待外觀確認", "queued": "待提取",
+           "pending": "待確認", "confirmed": "已確認"}
 
 TEMPLATES = [
     {"id": "summary", "name": "憑證明細彙總表"},
@@ -113,7 +113,7 @@ def _summary(period: str, company: str) -> str:
 
 
 def _journal_voucher(period: str, company: str) -> str:
-    recs = review.list_vouchers(status=ReviewStatus.accountant_approved,
+    recs = review.list_vouchers(status=ReviewStatus.confirmed,
                                 company=company, period=period)
     blocks = []
     for r in recs:
@@ -134,6 +134,6 @@ def _journal_voucher(period: str, company: str) -> str:
             f"<tbody>{''.join(erows) or '<tr><td colspan=4>（無分錄）</td></tr>'}</tbody></table>"
             f"{_audit(c)}</div>")
     body = (f"<h1>會計傳票</h1><div class='meta'>期別 {_esc(period)}"
-            f"{'　公司 ' + _esc(company) if company else ''}　共 {len(recs)} 張已核定</div>"
-            + "".join(blocks or ["<p>此期別無已核定憑證。</p>"]))
+            f"{'　公司 ' + _esc(company) if company else ''}　共 {len(recs)} 張已確認</div>"
+            + "".join(blocks or ["<p>此期別無已確認憑證。</p>"]))
     return _page(f"會計傳票 {period}", body)

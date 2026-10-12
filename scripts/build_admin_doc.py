@@ -50,21 +50,18 @@ main {{ margin-left:0; max-width:1080px; padding:32px 40px; }}
 <tr><td>登入系統、瀏覽憑證清單</td><td>✓</td><td>✓</td><td>✓</td></tr>
 <tr><td>上傳／匯入憑證、外觀確認、內容辨識</td><td>✓</td><td>✓</td><td>✓</td></tr>
 <tr><td>編輯欄位、影像旋轉裁切、自動分類科目</td><td>✓</td><td>✓</td><td>✓</td></tr>
-<tr><td>記帳士確認（送交會計師）</td><td>✓</td><td>✓</td><td>✓</td></tr>
-<tr><td><b>會計師核定</b></td><td>—</td><td>✓</td><td>✓</td></tr>
-<tr><td><b>退回憑證</b></td><td>—</td><td>✓</td><td>✓</td></tr>
-<tr><td>重新送審（退回後修正）</td><td>✓</td><td>✓</td><td>✓</td></tr>
+<tr><td>保存修正草稿</td><td>✓</td><td>✓</td><td>✓</td></tr>
+<tr><td><b>確認憑證</b></td><td>✓</td><td>✓</td><td>✓</td></tr>
+<tr><td><b>開發者備註（dev_note）</b></td><td>—</td><td>—</td><td>✓</td></tr>
 <tr><td>日記帳、報表、列印／PDF</td><td>✓</td><td>✓</td><td>✓</td></tr>
 <tr><td><b>會計科目表：檢視</b></td><td>✓</td><td>✓</td><td>✓</td></tr>
 <tr><td><b>會計科目表：儲存變更</b></td><td>—</td><td>—</td><td>✓</td></tr>
 <tr><td><b>地端備份與下載</b></td><td>—</td><td>—</td><td>✓</td></tr>
 <tr><td><b>系統組態</b>（模型連線、API 金鑰、掃描來源、雲端權限）</td><td>—</td><td>—</td><td>✓</td></tr>
 <tr><td><b>修正回饋頁</b>（檢視 AI 原始值與人工修正差異）</td><td>—</td><td>—</td><td>✓</td></tr>
-<tr><td><b>開發者備註</b>（辨識錯誤回報）</td><td>—</td><td>—</td><td>✓</td></tr>
 </table>
-<div class="callout note"><div class="ct">💡 為何管理員擁有全部權限</div>
-管理員可執行會計師與記帳士的所有操作，以便在人員請假或帳號異常時代為處理。
-若貴公司希望管理員<b>不得</b>核定憑證（職務分離），可另行調整，屬設計變更項目。</div>
+<div class="callout note"><div class="ct">💡 憑證確認權限</div>
+三種登入角色皆可完成憑證確認。管理員另可使用開發者備註及管理功能。</div>
 </section>
 
 <section class="doc"><h2><span class="ic">🔐</span>安全設計</h2>

@@ -85,10 +85,11 @@ class MetadataReportTests(unittest.TestCase):
                          "amount_source": "fields.total_amount",
                          "evidence_paths": ["fields.total_amount", "items.1.amount"]}],
         }
-        record = SimpleNamespace(current_json=json.dumps(voucher, ensure_ascii=False), status="accountant_approved")
-        with patch.object(reports.review, "list_vouchers", return_value=[record]):
+        record = SimpleNamespace(current_json=json.dumps(voucher, ensure_ascii=False), status="confirmed")
+        with patch.object(reports.review, "list_vouchers", return_value=[record]) as listed:
             summary = reports._summary("2026-10", "Example")
             journal_voucher = reports._journal_voucher("2026-10", "Example")
+        self.assertEqual(listed.call_args.kwargs["status"], "confirmed")
 
         for html in (summary, journal_voucher):
             self.assertIn("來源、驗證與政策紀錄", html)

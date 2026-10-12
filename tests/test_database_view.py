@@ -21,10 +21,13 @@ class DatabaseViewTests(unittest.TestCase):
         con.executescript("""
             CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, password_hash TEXT, salt TEXT);
             INSERT INTO users VALUES (1, '管理員', 'secret-hash', 'secret-salt');
-            CREATE TABLE voucher_records (id INTEGER PRIMARY KEY, company TEXT, current_json TEXT);
+            CREATE TABLE voucher_records (
+                id INTEGER PRIMARY KEY, company TEXT, current_json TEXT,
+                correction_note TEXT DEFAULT '', confirmed_at TEXT
+            );
             CREATE TABLE empty_table (id INTEGER PRIMARY KEY);
         """)
-        con.executemany("INSERT INTO voucher_records VALUES (?, ?, ?)",
+        con.executemany("INSERT INTO voucher_records (id, company, current_json) VALUES (?, ?, ?)",
                         [(i, "台灣公司" if i % 2 else "100%_公司", '{"total": 123}') for i in range(1, 58)])
         con.commit()
         con.close()
@@ -111,11 +114,15 @@ class DatabaseViewTests(unittest.TestCase):
         tables = self.client.get("/api/database/tables").json()["tables"]
         self.assertEqual(next(t for t in tables if t["name"] == "voucher_records")["label"], "憑證紀錄")
         self.assertEqual(next(t for t in tables if t["name"] == "voucher_records")["date_label"], "憑證日期")
+        voucher_columns = self.rows().json()["columns"]
+        labels = {column["name"]: column["label"] for column in voucher_columns}
+        self.assertEqual(labels["correction_note"], "修正備註")
+        self.assertEqual(labels["confirmed_at"], "確認完成時間")
         self.assertIsNone(next(t for t in tables if t["name"] == "empty_table")["date_label"])
         for table in tables:
             columns = self.rows(table=table["name"]).json()["columns"]
             self.assertTrue(all(c["label"] for c in columns))
-        self.assertEqual(sum(len(meta["columns"]) for meta in database_view.TABLE_META.values()), 92)
+        self.assertEqual(sum(len(meta["columns"]) for meta in database_view.TABLE_META.values()), 94)
         self.assertEqual(len(database_view.TABLE_META), 8)
 
     def test_voucher_date_status_and_keyword_are_combined(self):
@@ -129,16 +136,16 @@ class DatabaseViewTests(unittest.TestCase):
                         ('{"date":"2026-09-22","total":123}',))
             con.execute("UPDATE voucher_records SET current_json='not json' WHERE id=57")
             con.execute("ALTER TABLE voucher_records ADD COLUMN status TEXT DEFAULT 'pending'")
-            con.execute("UPDATE voucher_records SET status='rejected' WHERE id BETWEEN 21 AND 30")
+            con.execute("UPDATE voucher_records SET status='confirmed' WHERE id BETWEEN 21 AND 30")
             con.commit()
         response = self.rows(date_from="2026-09-21", date_to="2026-09-21",
-                             status="rejected", q="台灣", page_size=3)
+                             status="confirmed", q="台灣", page_size=3)
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertEqual((data["total"], data["pages"], len(data["rows"])), (5, 2, 3))
         self.assertEqual(self.rows(date_to="2026-09-20").json()["total"], 20)
         self.assertEqual(self.rows(date_from="2026-09-22").json()["total"], 16)
-        self.assertEqual(self.rows(date_from="2026-09-22", status="rejected").json()["total"], 0)
+        self.assertEqual(self.rows(date_from="2026-09-22", status="confirmed").json()["total"], 0)
         self.assertEqual(self.rows(date_from="2026-09-23", date_to="2026-09-22").status_code, 422)
         self.assertEqual(self.rows(date_from="2026-02-30").status_code, 422)
         self.assertEqual(self.rows(status="not-a-status").status_code, 422)

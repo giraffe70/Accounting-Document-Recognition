@@ -5,9 +5,8 @@
   let busy = false;
   let detailTrigger = null;
   const statusLabels = Object.fromEntries([
-    ["prepared", "待外觀確認"], ["queued", "待提取"], ["pending", "待審"],
-    ["clerk_reviewed", "記帳士已確認"], ["accountant_approved", "會計師已核定"],
-    ["rejected", "退回"], ["running", "執行中"], ["succeeded", "成功"],
+    ["prepared", "待外觀確認"], ["queued", "待提取"], ["pending", "待確認"],
+    ["confirmed", "已確認"], ["running", "執行中"], ["succeeded", "成功"],
     ["failed", "失敗"], ["timeout", "逾時"], ["cancelled", "已取消"],
     ["cancelling", "取消中"], ["interrupted", "已中斷"],
     ["terminated", "已終止"], ["completed", "已完成"],
