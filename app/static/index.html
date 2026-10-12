@@ -184,17 +184,6 @@
           <tbody id="entriesBody"></tbody></table>
         <div id="balanceInfo" class="hint"></div>
 
-        <label class="full manual-flag" title="欄位經你手動編輯確認後勾選。勾選後清單會標記，日後有人按「重新辨識」會先跳出提醒，避免覆蓋你的修正">
-          <input type="checkbox" id="f-manual_entry"> ✍ <b>人工修正</b>（本張欄位已人工編輯確認，重新辨識前會提醒）
-        </label>
-        <label class="full">修正備註（修正／回饋・<b>會作為下次辨識的修正提示</b>）<textarea id="f-correction_note" rows="2" placeholder="例：合計金額應取右下角「應收帳款總額」，不是銷貨合計額"></textarea></label>
-        <div class="full hidden" id="devNoteWrap">
-          <label>🛠 開發者備註（辨識錯誤／修正回饋・僅管理員）<textarea id="f-dev_note" rows="2" placeholder="例：水費帳單被拆成多張、支票領款單誤判為支票、掃描旋轉導致框偏…"></textarea></label>
-          <button id="btnDevNote" class="btn btn-sm">💾 儲存開發者備註</button>
-        </div>
-
-        <div class="src-hint hint" id="revSrc"></div>
-
         <div class="actions">
           <button id="btnReturnImport" class="btn hidden" title="先暫存目前修正與備註，再返回①匯入下一份檔案">↩ 返回①匯入下一份</button>
           <button id="btnSave" class="btn">💾 儲存修正</button>

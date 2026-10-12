@@ -18,16 +18,12 @@ const fs = require('fs');
 const vm = require('vm');
 const input = JSON.parse(fs.readFileSync(0, 'utf8'));
 const source = input.source;
-const start = source.indexOf('  function collectNotes()');
+const start = source.indexOf('  async function responseError(');
 const end = source.indexOf('  $("btnConfirm").addEventListener("click"', start);
 if (start < 0 || end < 0) throw new Error('could not locate production confirmation functions');
 const code = source.slice(start, end);
 const events = [];
 const nodes = {
-  'f-correction_note': { value: '人工依原圖修正' },
-  'f-manual_entry': { checked: true },
-  'devNoteWrap': { classList: { contains: () => true } },
-  'f-dev_note': { value: '' },
   'revCompanySel': { value: 'company-1' },
   'btnSave': { disabled: false, addEventListener: () => {} },
   'btnConfirm': { disabled: false, addEventListener: () => {} },
@@ -46,7 +42,6 @@ function $(id) { return nodes[id] || null; }
 function collectForm() { return { fields: { amount: 125 }, entries: [] }; }
 function json() { return { 'Content-Type': 'application/json' }; }
 function applyRecordStatus(record) { events.push({ type: 'status', id: record.id, status: record.status }); }
-function renderWarnings() { events.push({ type: 'renderWarnings' }); }
 function clearReview() { events.push({ type: 'clearReview' }); currentId = null; }
 function setStage(stage) { events.push({ type: 'setStage', stage }); }
 function loadList() { events.push({ type: 'loadList' }); }
@@ -60,17 +55,15 @@ async function fetch(url, options = {}) {
   const parsed = options.body ? JSON.parse(options.body) : null;
   events.push({ type: 'fetch', url, method: options.method || 'GET', body: parsed });
   const path = url.endsWith('/company') ? 'company' :
-    url.endsWith('/notes') ? 'notes' :
     url.endsWith('/confirm') ? 'confirm' :
     options.method === 'PUT' ? 'put' : 'other';
   if (path === input.failAt) return response(false, input.failStatus || 500, { detail: `${path} failed` });
   if (path === 'company') return response(true, 200, { id: 12, status: 'pending', updated_at: 'company-ts' });
-  if (path === 'put') return response(true, 200, {
-    id: 12, status: 'pending', updated_at: 'put-ts', current: currentVoucher,
-  });
-  if (path === 'notes') {
-    if (input.switchCurrentOnNotes) currentId = input.switchCurrentOnNotes;
-    return response(true, 200, { id: 12, status: 'pending', updated_at: 'notes-ts' });
+  if (path === 'put') {
+    if (input.switchCurrentOnPut) currentId = input.switchCurrentOnPut;
+    return response(true, 200, {
+      id: 12, status: 'pending', updated_at: 'put-ts', current: currentVoucher,
+    });
   }
   if (path === 'confirm') {
     const status = input.confirmStatus || 200;
@@ -84,7 +77,7 @@ const context = {
   console, events, nodes, input, get currentId() { return currentId; },
   set currentId(value) { currentId = value; }, currentVoucher, editBusy, inferBusy,
   fileInput, progressText, progress, barFill, $, collectForm, json, applyRecordStatus,
-  renderWarnings, clearReview, setStage, loadList, alert, toast, fetch,
+  clearReview, setStage, loadList, alert, toast, fetch,
 };
 vm.createContext(context);
 vm.runInContext(`${code}\nglobalThis.api = { confirmCurrent, saveDraft };`, context);
@@ -98,6 +91,109 @@ vm.runInContext(`${code}\nglobalThis.api = { confirmCurrent, saveDraft };`, cont
     currentId: vm.runInContext('currentId', context),
   }));
 })().catch((error) => { console.error(error.stack || error); process.exit(1); });
+"""
+
+
+REVIEW_HARNESS = r"""
+const fs = require('fs');
+const vm = require('vm');
+const input = JSON.parse(fs.readFileSync(0, 'utf8'));
+const source = input.source;
+const openStart = source.indexOf('  async function openReview(id)');
+const openEnd = source.indexOf('  // 多頁憑證：主頁＋附頁縮圖切換', openStart);
+const clearStart = source.indexOf('  function clearReview()', openEnd);
+const clearEnd = source.indexOf('  // 外觀確認 → 加入掃描清單', clearStart);
+const roleStart = source.indexOf('  function applyRole()', clearEnd);
+const roleEnd = source.indexOf('  async function enterApp()', roleStart);
+const recognizeStart = source.indexOf('  async function runRecognize()', openEnd);
+const recognizeEnd = source.indexOf('  function buildActiveFields(', recognizeStart);
+if ([openStart, openEnd, clearStart, clearEnd, roleStart, roleEnd, recognizeStart, recognizeEnd].some((p) => p < 0))
+  throw new Error('could not locate review/role/recognize functions');
+const events = [], requests = [];
+const removed = new Set(['voucherWarnings', 'f-manual_entry', 'f-correction_note', 'f-dev_note', 'devNoteWrap', 'revSrc']);
+const nodes = {};
+function node(id) {
+  if (removed.has(id)) return null;
+  if (!nodes[id]) nodes[id] = {
+    id, value: '', checked: false, disabled: false, textContent: '', innerHTML: '', className: '',
+    classList: { _set: new Set(), add(c) { this._set.add(c); }, remove(c) { this._set.delete(c); },
+      toggle(c, force) { if (force) this._set.add(c); else this._set.delete(c); }, contains(c) { return this._set.has(c); } },
+  };
+  return nodes[id];
+}
+const $ = node;
+let currentId = null, currentVoucher = {}, currentIsImport = false, editBusy = false, inferBusy = 0, cropping = false, stageAction = '';
+let currentManualEntry = false;
+const currentUser = { role: input.role || 'clerk' };
+const fileInput = { value: 'selected-file' }, progressText = { textContent: '' }, progress = { classList: { remove() {} } }, barFill = { style: {} };
+function setCropMode() {}
+function setStatus() {}
+function setPendingActionVisibility() {}
+function populateTypeSel() {}
+function buildActiveFields() {}
+function renderFields() {}
+function renderItems() {}
+function renderTaxcheck() {}
+function renderDatecheck() {}
+function renderAmountcheck() {}
+function renderEntries() {}
+function setupImage() {}
+function renderPages() {}
+function sourceHintHtml() { return ''; }
+function sourceTrace() { return {}; }
+function esc(s) { return s == null ? '' : String(s); }
+function loadList() { events.push({ type: 'loadList' }); }
+function alert(message) { events.push({ type: 'alert', message }); }
+function toast(message) { events.push({ type: 'toast', message }); }
+function confirm(message) { events.push({ type: 'confirm', message }); return !!input.acceptConfirm; }
+function json() { return { 'Content-Type': 'application/json' }; }
+async function persistCurrentEdits() {
+  events.push({ type: 'persist' });
+  if (input.persistFails) throw new Error('save failed');
+}
+async function withInferProgress(_label, operation) { return operation(); }
+async function fetch(url, options = {}) {
+  requests.push({ url, method: options.method || 'GET' });
+  if ((options.method || 'GET') === 'GET') return { ok: true, json: async () => input.records[url.split('/').pop()] };
+  if (url.endsWith('/recognize')) return { ok: true, json: async () => ({ ok: true }) };
+  if (url.endsWith('/set-type')) return { ok: true, json: async () => ({ ok: true }) };
+  throw new Error(`unexpected request ${options.method} ${url}`);
+}
+const context = { console, events, requests, input, nodes, $, currentUser, fileInput, progressText, progress, barFill,
+  get currentId() { return currentId; }, set currentId(v) { currentId = v; },
+  get currentVoucher() { return currentVoucher; }, set currentVoucher(v) { currentVoucher = v; },
+  get currentManualEntry() { return currentManualEntry; }, set currentManualEntry(v) { currentManualEntry = v; },
+  get currentIsImport() { return currentIsImport; }, set currentIsImport(v) { currentIsImport = v; },
+  editBusy, inferBusy, cropping, stageAction, DOC_TYPES: { other: { fields: [] } },
+  setCropMode, setStatus, setPendingActionVisibility, populateTypeSel, buildActiveFields, renderFields, renderItems,
+  renderTaxcheck, renderDatecheck, renderAmountcheck, renderEntries, setupImage, renderPages, sourceHintHtml, sourceTrace,
+  esc, loadList, alert, toast, confirm, json, persistCurrentEdits, withInferProgress, fetch };
+vm.createContext(context);
+const reviewCode = source.slice(openStart, openEnd) + '\n' + source.slice(clearStart, clearEnd) + '\n' + source.slice(roleStart, roleEnd) + '\n' + source.slice(recognizeStart, recognizeEnd);
+vm.runInContext(reviewCode + '\nglobalThis.api = { openReview, clearReview, applyRole, runRecognize };', context);
+(async () => {
+  const out = {};
+  if (input.action === 'open') {
+    await context.api.openReview(input.recordId);
+    out.currentId = currentId;
+    out.manualEntry = currentManualEntry;
+    out.absentNodes = [...removed].every((id) => !nodes[id]);
+  } else if (input.action === 'role') {
+    context.api.applyRole();
+    out.visible = Object.fromEntries(['accountsBtn', 'backupBtn', 'databaseBtn', 'sysconfigBtn', 'feedbackBtn'].map((id) => [id, !node(id).classList.contains('hidden')]));
+  } else if (input.action === 'recognize') {
+    await context.api.openReview(input.recordId);
+    if (input.clearBetween) {
+      context.api.clearReview();
+      out.manualEntryAfterClear = currentManualEntry;
+      await context.api.openReview(input.nextRecordId);
+    }
+    await context.api.runRecognize();
+    out.currentId = currentId;
+  }
+  out.events = events; out.requests = requests;
+  process.stdout.write(JSON.stringify(out));
+})().catch((e) => { console.error(e.stack || e); process.exit(1); });
 """
 
 
@@ -229,6 +325,21 @@ class ConfirmationFrontendTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr.decode("utf-8", errors="replace"))
         return json.loads(completed.stdout.decode("utf-8"))
 
+    def run_review(self, **scenario):
+        payload = {"source": self.source, **scenario}
+        completed = subprocess.run(
+            [str(NODE), "-e", REVIEW_HARNESS],
+            input=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr.decode("utf-8", errors="replace"))
+        return json.loads(completed.stdout.decode("utf-8"))
+
+    @staticmethod
+    def review_record(manual_entry=False):
+        return {"id": 12, "status": "pending", "manual_entry": manual_entry, "current": {"fields": {}, "items": [], "entries": []}}
+
     @staticmethod
     def requests(result):
         return [event for event in result["events"] if event["type"] == "fetch"]
@@ -237,19 +348,19 @@ class ConfirmationFrontendTests(unittest.TestCase):
     def event_types(result):
         return [event["type"] for event in result["events"]]
 
-    def test_confirm_persists_company_content_notes_then_uses_notes_timestamp(self):
+    def test_confirm_persists_company_and_content_then_uses_voucher_timestamp(self):
         result = self.run_flow(action="confirm")
 
         requests = self.requests(result)
         self.assertEqual([request["url"].rsplit("/", 1)[-1] for request in requests], [
-            "company", "12", "notes", "confirm",
+            "company", "12", "confirm",
         ])
-        self.assertEqual([request["method"] for request in requests], ["POST", "PUT", "POST", "POST"])
-        self.assertEqual(requests[-1]["body"], {"expected_updated_at": "notes-ts"})
+        self.assertEqual([request["method"] for request in requests], ["POST", "PUT", "POST"])
+        self.assertEqual(requests[-1]["body"], {"expected_updated_at": "put-ts"})
         self.assertIn("已確認", " ".join(e["message"] for e in result["events"] if e["type"] == "toast"))
 
     def test_confirm_does_not_run_when_any_persist_step_fails(self):
-        for failed_step, expected_count in (("company", 1), ("put", 2), ("notes", 3)):
+        for failed_step, expected_count in (("company", 1), ("put", 2)):
             with self.subTest(failed_step=failed_step):
                 result = self.run_flow(action="confirm", failAt=failed_step)
                 self.assertEqual(len(self.requests(result)), expected_count)
@@ -266,12 +377,12 @@ class ConfirmationFrontendTests(unittest.TestCase):
 
     def test_draft_and_return_to_import_never_call_confirm(self):
         draft = self.run_flow(action="draft")
-        self.assertEqual(len(self.requests(draft)), 3)
+        self.assertEqual(len(self.requests(draft)), 2)
         self.assertFalse(any(request["url"].endswith("/confirm") for request in self.requests(draft)))
         self.assertFalse(any(event["type"] in {"clearReview", "setStage"} for event in draft["events"]))
 
         returned = self.run_flow(action="draft", returnToImport=True)
-        self.assertEqual(len(self.requests(returned)), 3)
+        self.assertEqual(len(self.requests(returned)), 2)
         self.assertFalse(any(request["url"].endswith("/confirm") for request in self.requests(returned)))
         self.assertLess(self.event_types(returned).index("clearReview"), self.event_types(returned).index("setStage"))
         self.assertIn({"type": "setStage", "stage": "import"}, returned["events"])
@@ -279,7 +390,7 @@ class ConfirmationFrontendTests(unittest.TestCase):
         self.assertEqual(returned["dirValue"], "")
 
     def test_return_to_import_waits_for_all_saves_and_same_record(self):
-        for failed_step in ("company", "put", "notes"):
+        for failed_step in ("company", "put"):
             with self.subTest(failed_step=failed_step):
                 result = self.run_flow(action="draft", returnToImport=True, failAt=failed_step)
                 self.assertFalse(any(e["type"] in {"clearReview", "setStage"} for e in result["events"]))
@@ -287,9 +398,51 @@ class ConfirmationFrontendTests(unittest.TestCase):
                 self.assertEqual(result["dirValue"], "directory-selection")
                 self.assertTrue(any(e["type"] == "alert" for e in result["events"]))
 
-        switched = self.run_flow(action="draft", returnToImport=True, switchCurrentOnNotes=99)
+        switched = self.run_flow(action="draft", returnToImport=True, switchCurrentOnPut=99)
         self.assertFalse(any(e["type"] in {"clearReview", "setStage"} for e in switched["events"]))
         self.assertEqual(switched["fileValue"], "selected-file")
+
+    def test_review_opens_and_role_visibility_works_without_removed_elements(self):
+        opened = self.run_review(action="open", recordId=12, records={"12": self.review_record(True)})
+        self.assertEqual(opened["currentId"], 12)
+        self.assertTrue(opened["manualEntry"])
+        self.assertTrue(opened["absentNodes"])
+
+        clerk = self.run_review(action="role", role="clerk")
+        self.assertFalse(any(clerk["visible"].values()))
+        admin = self.run_review(action="role", role="admin")
+        self.assertTrue(all(admin["visible"].values()))
+
+    def test_re_recognition_manual_entry_prompt_cancel_and_accept(self):
+        records = {"12": self.review_record(True)}
+        cancelled = self.run_review(action="recognize", recordId=12, records=records, acceptConfirm=False)
+        self.assertEqual([e["type"] for e in cancelled["events"]], ["loadList", "confirm"])
+        self.assertEqual([r["method"] for r in cancelled["requests"]], ["GET"])
+
+        accepted = self.run_review(action="recognize", recordId=12, records=records, acceptConfirm=True)
+        self.assertIn("confirm", [e["type"] for e in accepted["events"]])
+        self.assertIn("persist", [e["type"] for e in accepted["events"]])
+        self.assertEqual([r["url"].rsplit("/", 1)[-1] for r in accepted["requests"]], ["12", "set-type", "recognize", "12"])
+        self.assertFalse(any("/notes" in r["url"] for r in accepted["requests"]))
+
+    def test_re_recognition_skips_prompt_for_unmarked_record_and_stops_after_save_failure(self):
+        records = {"12": self.review_record(False)}
+        ordinary = self.run_review(action="recognize", recordId=12, records=records)
+        self.assertNotIn("confirm", [e["type"] for e in ordinary["events"]])
+        self.assertEqual([r["url"].rsplit("/", 1)[-1] for r in ordinary["requests"]], ["12", "set-type", "recognize", "12"])
+
+        failed = self.run_review(action="recognize", recordId=12, records=records, persistFails=True)
+        self.assertEqual([r["url"].rsplit("/", 1)[-1] for r in failed["requests"]], ["12"])
+        self.assertIn("persist", [e["type"] for e in failed["events"]])
+        self.assertFalse(any(r["url"].endswith("/set-type") or r["url"].endswith("/recognize") for r in failed["requests"]))
+        self.assertTrue(any(e["type"] == "alert" and "辨識失敗" in e["message"] for e in failed["events"]))
+
+    def test_clearing_review_resets_manual_entry_before_loading_next_record(self):
+        records = {"12": self.review_record(True), "13": self.review_record(False)}
+        result = self.run_review(action="recognize", recordId=12, records=records, clearBetween=True, nextRecordId=13)
+        self.assertFalse(result["manualEntryAfterClear"])
+        self.assertNotIn("confirm", [e["type"] for e in result["events"]])
+        self.assertEqual([r["url"].rsplit("/", 1)[-1] for r in result["requests"]], ["12", "13", "set-type", "recognize", "13"])
 
     def test_confirmation_tabs_and_filter_options_are_present(self):
         parser = WorkflowMarkupParser()

@@ -6,6 +6,7 @@
   let jobTimer = null;
   let currentId = null;
   let currentVoucher = {};   // 目前載入的 current（保留 entries 等未編輯欄位）
+  let currentManualEntry = false;   // 保留既有人工修正紀錄的重新辨識提醒
   let editBusy = false;
   let currentUser = null;
   let currentIsImport = false;
@@ -371,6 +372,7 @@
     if (rec.detail) { alert(errText(rec, "操作失敗")); return; }
     const v = rec.current || {};
     currentVoucher = v;
+    currentManualEntry = !!rec.manual_entry;
     currentIsImport = !!rec.is_import;
     const autoSplitSource = v.origin?.layout?.auto_split === true;
     const sourcePage = rec.record_role === "source_page" || autoSplitSource;
@@ -415,9 +417,6 @@
     $("revConf").textContent = conf;
     $("revConf").className = "tag " + (conf === "high" ? "high" : conf === "low" ? "low" : "warn");
     $("f-note").value = v.note || "";
-    $("f-correction_note").value = rec.correction_note || "";
-    $("f-dev_note").value = rec.dev_note || "";
-    $("f-manual_entry").checked = !!rec.manual_entry;
     const hasItems = !!(DOC_TYPES[typeKey] && DOC_TYPES[typeKey].has_items);
     $("itemsSection").classList.toggle("hidden", !hasItems);
     renderItems(v.items || []);
@@ -425,10 +424,8 @@
     renderDatecheck(rec.datecheck);
     renderAmountcheck(rec.amountcheck);
     renderEntries(v.entries || [], v.debit_total, v.credit_total, v.balance_check);
-    renderWarnings();
     setupImage(id, rec.has_image, v.boxes || {});
     renderPages(id, rec.attachments || 0);
-    $("revSrc").textContent = `${sourcePage ? "來源頁（供追溯）　" : rec.source_parent_id != null ? `拆分自來源 #${rec.source_parent_id}　` : ""}來源：${rec.source_file || "—"}　OCR：${rec.ocr_provider || "—"}　結構化：${rec.structure_model || "—"}`;
     loadList();
   }
 
@@ -483,6 +480,7 @@
 
   function applyRecordStatus(record) {
     if (record.id !== currentId) return;
+    if ("manual_entry" in record) currentManualEntry = !!record.manual_entry;
     setStatus(record.status);
     setPendingActionVisibility(record.status);
   }
@@ -509,16 +507,14 @@
   // 外觀確認 / 重新辨識：以「目前選定的類型」在準備好的影像上做內容辨識
   async function runRecognize() {
     if (!currentId || editBusy || inferBusy) return;
-    if ($("f-manual_entry").checked) {
-      if (!confirm("這張已勾選「人工修正」。\n重新辨識會保留人工選定的欄位並新增模型結果，成功後須重新確認。\n\n確定要重新辨識嗎？")) return;
+    if (currentManualEntry) {
+      if (!confirm("這張已有「人工修正」標記。\n重新辨識會保留人工選定的欄位並新增模型結果，成功後須重新確認。\n\n確定要重新辨識嗎？")) return;
     }
     const id = currentId, tk = $("revTypeSel").value;
     try {
       if (!$("revForm").classList.contains("prepared")) await persistCurrentEdits();
       const typeResp = await fetch(`/api/vouchers/${id}/set-type`, { method: "POST", headers: json(), body: JSON.stringify({ doc_type_key: tk }) });
       if (!typeResp.ok) throw new Error(await responseError(typeResp, "類型儲存失敗"));
-      const notesResp = await saveNotes(id);
-      if (!notesResp.ok) throw new Error(await responseError(notesResp, "備註儲存失敗"));
       const d = await withInferProgress("內容辨識中…", () =>
         fetch(`/api/vouchers/${id}/recognize`, { method: "POST", headers: json() }).then((r) => r.json()));
       if (!d.ok) throw new Error(errText(d, "辨識失敗"));
@@ -753,33 +749,6 @@
     return {...currentVoucher, fields, items, note: $("f-note").value};
   }
 
-  function renderWarnings() {
-    let box = $("voucherWarnings");
-    if (!box) {
-      box = document.createElement("div"); box.id = "voucherWarnings"; box.className = "hint warn";
-      $("balanceInfo").insertAdjacentElement("afterend", box);
-    }
-    const meta = currentVoucher.classification_meta || {};
-    const lines = [...(currentVoucher.validation_warnings || []), ...(meta.warnings || []), ...(meta.assumptions || [])];
-    const origin = currentVoucher.origin || {}, quality = currentVoucher.quality;
-    if (origin.page_no != null || origin.region) {
-      lines.unshift(`來源定位：第 ${origin.page_no ?? "—"} 頁${origin.region ? `，區域 ${JSON.stringify(origin.region)}` : ""}${origin.rotation != null ? `，旋轉 ${origin.rotation}°` : ""}`);
-    }
-    if (quality) {
-      const state = {usable:"可用",needs_review:"待覆核",insufficient:"資訊不足"}[quality.state] || quality.state || "未判定";
-      const kind = {supporting:"佐證文件",document:"單據",unknown:"未判定",blank:"空白頁"}[quality.content_kind] || quality.content_kind || "未判定";
-      lines.unshift(`文件品質：${state} · ${kind}`);
-      for (const issue of quality.issues || []) {
-        lines.push(`品質${issue.severity ? `（${issue.severity}）` : "提示"}：${issue.message || issue.code || "需檢查"}${issue.path ? ` [${issue.path}]` : ""}`);
-      }
-    }
-    if (meta.status === "candidate") lines.unshift("候選分錄：請核對證據與假設後再審核。");
-    if (meta.original_checks && meta.original_checks.single_sided) lines.unshift("保留原始單面傳票；借貸平衡與原印合計分開檢查。");
-    if (meta.status === "skipped" && meta.reason === "supporting") lines.unshift("佐證附頁不單獨產生分錄。");
-    box.textContent = Array.from(new Set(lines)).join("；");
-    box.classList.toggle("hidden", !lines.length);
-  }
-
   $("btnClassify").addEventListener("click", async () => {
     // 先存目前編輯，再產生分錄
     try {
@@ -793,7 +762,6 @@
       currentVoucher.classification_meta = r.classification_meta || {};
       currentVoucher.validation_warnings = r.validation_warnings || [];
       currentVoucher.payment_state = r.payment_state || {};
-      renderWarnings();
       renderEntries(r.entries, r.debit_total, r.credit_total, r.balance_check);
       await refreshCurrentStatus();
       toast("已產生會計分錄");
@@ -802,27 +770,16 @@
     }
   });
 
-  // 修正備註不在憑證內容內，單獨保存並作為下次辨識提示。
-  function collectNotes() {
-    const n = { correction_note: $("f-correction_note").value,
-                manual_entry: $("f-manual_entry").checked };
-    if (!$("devNoteWrap").classList.contains("hidden")) n.dev_note = $("f-dev_note").value;
-    return n;
-  }
-  async function saveNotes(id = currentId, notes = collectNotes()) {
-    return fetch(`/api/vouchers/${id}/notes`, { method: "POST", headers: json(), body: JSON.stringify(notes) });
-  }
-
   async function responseError(resp, fallback) {
     const data = await resp.json().catch(() => ({}));
     return errText(data, `${fallback}（HTTP ${resp.status}）`);
   }
 
-  // 暫存與一般儲存共用：欄位、明細、分錄、人工修正標記與備註必須全數寫入後
+  // 暫存與一般儲存共用：歸屬公司、欄位、明細、分錄與摘要必須全數寫入後
   // 才視為成功，避免頁面切換後把失敗誤認成已保存。
   async function persistCurrentEdits() {
     if (!currentId) throw new Error("尚未選取憑證");
-    const id = currentId, form = collectForm(), notes = collectNotes();
+    const id = currentId, form = collectForm();
     const companyResp = await fetch(`/api/vouchers/${id}/company`, {
       method: "POST", headers: json(), body: JSON.stringify({ company: $("revCompanySel").value }),
     });
@@ -836,14 +793,9 @@
     applyRecordStatus(record);
     if (currentId === id) {
       currentVoucher = record.current || currentVoucher;
-      renderWarnings();
     }
 
-    const notesResp = await saveNotes(id, notes);
-    if (!notesResp.ok) throw new Error(await responseError(notesResp, "儲存備註失敗"));
-    const saved = await notesResp.json();
-    applyRecordStatus(saved);
-    return saved;
+    return record;
   }
 
   async function withEditLock(fn) {
@@ -1096,6 +1048,7 @@
   });
   function clearReview() {
     $("revForm").classList.add("hidden"); $("revEmpty").classList.remove("hidden"); currentId = null;
+    currentManualEntry = false;
   }
   // 外觀確認 → 加入掃描清單（prepared → queued）
   async function confirmAppearance() {
@@ -1128,13 +1081,6 @@
     buildActiveFields(tk);
     renderFields(currentVoucher.fields || {});
     loadList();
-  });
-
-  // ── 開發者備註（管理員，修正回饋）──
-  $("btnDevNote").addEventListener("click", async () => {
-    const r = await fetch(`/api/vouchers/${currentId}/dev-note`, { method: "POST", headers: json(), body: JSON.stringify({ note: $("f-dev_note").value }) });
-    if (!r.ok) { alert("儲存失敗（需管理員）"); return; }
-    toast("開發者備註已儲存"); loadList();
   });
 
   // ── 修正回饋清單 modal（管理員）──
@@ -1449,7 +1395,6 @@
     $("databaseBtn").classList.toggle("hidden", !canAdmin);
     $("sysconfigBtn").classList.toggle("hidden", !canAdmin);
     $("feedbackBtn").classList.toggle("hidden", !canAdmin);
-    $("devNoteWrap").classList.toggle("hidden", !canAdmin);
   }
 
   async function enterApp() {

@@ -191,10 +191,6 @@ table.list th:nth-child(4) { text-align: right; }
 .pg-thumb.active { background: var(--blue); color: #fff; border-color: var(--blue); font-weight: 600; }
 /* 清單附頁徽章 */
 .att-badge { font-size: 11px; color: #1b7c83; }
-/* 人工輸入標記：手寫／潦草憑證的欄位由人工鍵入 */
-.manual-flag { display: flex; align-items: center; gap: 6px; font-size: 13px;
-  background: #fff8e6; border: 1px solid #e6c98a; border-radius: 7px; padding: 7px 10px; }
-.manual-flag input { width: auto; }
 .mchk { margin-right: 6px; vertical-align: middle; }
 
 /* 匯入頁：資料夾選取與掃描來源列檔 */
@@ -253,7 +249,6 @@ table.acc-edit input:focus { outline: 1px solid var(--blue); border-radius: 4px;
 .chk.warn { color: #9a6700; }
 .chk.bad { color: var(--red); }
 
-.src-hint { margin: 10px 0; padding: 8px 10px; background: #f6f8fa; border-radius: 7px; }
 .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); }
 
 .modal { position: fixed; inset: 0; background: rgba(0,0,0,.4); display: grid; place-items: center; z-index: 50; }
