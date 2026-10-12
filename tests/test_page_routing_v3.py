@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from PIL import Image, ImageChops, ImageDraw
 
-from app.core import barcode, invocation_trace, page_layout, page_ocr
+from app.core import barcode, invocation_trace, page_layout, page_ocr, ocr_cache, ocr_engine
 
 
 def _temporary_directory():
@@ -220,10 +220,8 @@ class PageRoutingV3Tests(unittest.TestCase):
             source = Path(temporary) / "source.png"
             Image.new("RGB", (100, 200), "white").save(source)
             setting = "fake/ocr"
-            source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
-            identity = {"version": page_ocr.VERSION, "source_sha256": source_hash,
-                        "ocr": setting, "max_edge": 2400}
-            key = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+            identity = page_ocr.identity(source, setting)
+            key = ocr_cache.digest(identity)
             point = [20, 30]
             expected = {
                 0: [200.0, 300.0],
@@ -234,15 +232,21 @@ class PageRoutingV3Tests(unittest.TestCase):
             for rotation, mapped in expected.items():
                 with self.subTest(rotation=rotation):
                     ocr_size = [200, 100] if rotation in (90, 270) else [100, 200]
-                    record = {"identity": identity, "rotation": rotation, "size": ocr_size,
-                              "lines": [{"text": "mapped", "box": [point, point, point, point]}],
-                              "text": "mapped", "path": "cached-native.png"}
+                    record = ocr_cache.seal({"identity": identity, "rotation": rotation})
                     (folder / f"{key}.json").write_text(json.dumps(record), encoding="utf-8")
+                    upright = folder / "upright.png"
+                    Image.new("RGB", tuple(ocr_size), "white").save(upright)
+                    native = [{"text": "mapped", "box": [point, point, point, point], "score": .99}]
+                    with ocr_cache.scope(folder / "ocr_cache"):
+                        ocr_cache.recognize(upright, ocr_engine.runtime_signature(), lambda: native, {})
                     with invocation_trace.capture() as trace, \
-                            patch("app.core.model_factory.get_ocr") as get_ocr:
+                            patch("app.core.model_factory.get_ocr", return_value=ocr_engine.PaddleOCREngine()), \
+                            patch("app.core.ocr_engine._get_paddle") as loader, \
+                            patch("app.core.pipeline._auto_orient_ocr") as orient:
                         lines, text, actual_rotation, transforms = page_ocr.read(
                             str(source), (1000, 2000), folder=folder, setting=setting)
-                    get_ocr.assert_not_called()
+                    loader.assert_not_called()
+                    orient.assert_not_called()
                     self.assertEqual(text, "mapped")
                     self.assertEqual(actual_rotation, rotation)
                     self.assertEqual(lines[0]["box"][0], mapped)

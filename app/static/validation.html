@@ -33,13 +33,13 @@
       <div id="combos"></div>
       <div class="run-options">
         <label>重複次數 <input id="repeats" class="select compact" type="number" min="1" max="10" value="1"></label>
-        <label>單張逾時（秒） <input id="timeout" class="select compact" type="number" min="30" max="3600" value="600"></label>
+        <label title="版面與每張單據各自使用此上限。">每子行程上限（秒） <input id="timeout" class="select compact" type="number" min="30" max="3600" value="600"></label>
         <label title="辨識輸入圖的寬、高較大者上限；等比例縮小，不會放大原圖。">圖片長邊（像素） <input id="maxEdge" class="select compact" type="number" min="640" max="2400" value="1180"></label>
         <label title="每個模型組合先以第一張憑證額外辨識一次；保留紀錄，但不納入主要速度統計。"><input id="warmup" type="checkbox"> 每組先暖機一次</label>
         <input id="runName" class="select grow" placeholder="驗證批次名稱">
         <button id="startRun" class="btn primary">開始驗證</button>
       </div>
-      <p class="hint">圖片長邊：辨識輸入圖的最大寬或高，等比例縮小且不放大；預設 1180 像素，所有比較組合請使用相同設定。暖機：每組先用第一張額外辨識一次，該次保留紀錄但不計入主要統計。</p>
+      <p class="hint">圖片長邊：辨識輸入圖的最大寬或高，等比例縮小且不放大；預設 1180 像素，所有比較組合請使用相同設定。暖機：每組先用第一張額外辨識一次，該次保留紀錄但不計入主要統計。逾時上限分別套用於版面與各張單據的子行程。</p>
     </section>
 
     <section class="panel">

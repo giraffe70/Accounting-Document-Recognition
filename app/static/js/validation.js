@@ -311,7 +311,7 @@
     $("results").innerHTML = data.items.length ? data.items.map(item => `
       <div class="result-row" role="listitem" data-id="${item.id}"><div class="source">${esc(item.relative_path)}${item.page_no > 1 ? ` p${item.page_no}` : ""}</div>
         <div class="meta">${esc(item.combo_name)} · ${modeLabel[item.mode]} · 第 ${item.repeat_no || "暖機"} 輪</div>
-        <div><span class="status-pill ${item.status}">${esc(statusText(item))}</span> <span class="meta">${Array.isArray(item.documents) ? `· ${item.documents.length} 張單據` : ""} ${item.actual_path ? esc(item.actual_path) : ""} ${item.timings?.complete_seconds ? `· ${fmt(item.timings.complete_seconds)}s` : ""}</span></div>
+        <div><span class="status-pill ${item.status}">${esc(statusText(item))}</span> <span class="meta">${Array.isArray(item.documents) ? `· ${item.documents.length} 張單據` : ""} ${item.actual_path ? esc(item.actual_path) : ""} ${item.timings?.complete_seconds != null ? `· 總耗時 ${fmt(item.timings.complete_seconds)}s` : ""}</span></div>
         ${item.processing_reason ? `<div class="meta processing-reason">${esc(processingReasonLabel[item.processing_reason] || item.processing_reason)}</div>` : ""}
       </div>`).join("") : `<div class="hint">沒有符合條件的結果。</div>`;
     document.querySelectorAll(".result-row").forEach(row => row.onclick = () => showDetail(row.dataset.id, row));
@@ -323,6 +323,26 @@
     if (value == null || value === "") return "—";
     if (typeof value === "object") return JSON.stringify(value, null, 2);
     return String(value);
+  }
+  function timingBlock(timings, version, heading) {
+    const fields = [
+      ["orientation_ocr_seconds", "方向判斷 OCR"], ["full_ocr_seconds", "完整 OCR"],
+      ["supplement_ocr_seconds", "補讀 OCR"], ["model_seconds", "模型"],
+      ["ocr_cache_seconds", "OCR 快取"], ["ocr_init_seconds", "OCR 初始化"],
+      ["ocr_cache_hits", "OCR 快取命中"], ["ocr_cache_misses", "OCR 快取未命中"],
+      ["queue_seconds", "排隊"], ["complete_seconds", "總耗時"],
+    ];
+    const recorded = timings && typeof timings === "object";
+    const rows = fields.map(([key, label]) => {
+      const legacyTotal = key === "queue_seconds" || key === "complete_seconds";
+      const value = recorded && (version === 2 || legacyTotal) && timings[key] != null ? timings[key] : null;
+      const formatted = value == null || value === "" || !Number.isFinite(Number(value))
+        ? "未記錄"
+        : (key.endsWith("_seconds") ? `${fmt(value)} 秒` : String(value));
+      return `<tr><th>${esc(label)}</th><td>${esc(formatted)}</td></tr>`;
+    }).join("");
+    const incompleteNote = timings?.incomplete === true ? `<div class="hint">處理曾中斷，細項僅包含已完成的呼叫，耗時可能未完整記錄。</div>` : "";
+    return `<div class="detail-box timing-block"><h4>${esc(heading)}</h4><table class="data-table"><tbody>${rows}</tbody></table><div class="hint">頁面總耗時不含排隊；OCR 初始化時間已包含在實際 OCR 時間內，不應重複加總。</div>${incompleteNote}</div>`;
   }
   function table(items) {
     if (!items?.length) return `<div class="hint">無資料</div>`;
@@ -452,6 +472,7 @@
     const inputLabel = data.mode === "ocr_llm" ? "OCR 對照圖（未傳送圖片至模型）" : "模型輸入圖";
     const docImagePanel = [docOriginal,docInput].filter(Boolean).length ? `<details class="detail-box"><summary>單據影像（裁切圖／${esc(inputLabel)}）</summary>${[docOriginal,docInput].filter(Boolean).map(item=>`<div class="document-artifact-preview"><h4>${item.kind==="original"?"單據原圖（裁切圖）":esc(inputLabel)}</h4><a href="${esc(item.url)}" target="_blank" rel="noopener"><img src="${esc(item.url)}" alt="${item.kind==="original"?"單據裁切圖":esc(inputLabel)}"></a></div>`).join("")}</details>` : "";
     const selectedDetail = selectedDoc ? `<div class="detail-box"><h3>${esc(typeSpec.label || selectedVoucher.doc_type || "單據結果")}</h3>${statusReason ? `<div class="processing-reason">${esc(statusReason)}</div>` : ""}${selectedDoc.error ? `<div class="hint warn">${esc(selectedDoc.error)}</div>` : ""}${qualityBlock(selectedDoc.quality || selectedVoucher.quality)}</div>
+      ${timingBlock(selectedDoc.timings, selectedDoc.timings_version ?? data.timings_version ?? data.timings?.timings_version, "選取單據耗時")}
       <div class="detail-box"><h4>欄位</h4><table class="document-field-table"><tbody>${displayFieldRows(selectedVoucher, fieldSpecs)}</tbody></table></div>
       <div class="detail-box"><h4>明細</h4>${labeledTable(selectedVoucher.items, itemSpecs)}</div><div class="detail-box"><h4>分錄</h4>${labeledTable(selectedVoucher.entries, entrySpecs)}</div>${docImagePanel}
       <details class="detail-box"><summary>技術診斷</summary><details class="detail-box"><summary>欄位定位、轉換資訊與分類證據</summary><pre class="diagnostic-pre">${esc(JSON.stringify({origin:selectedDoc.origin || selectedVoucher.origin,boxes:selectedDoc.boxes || selectedVoucher.boxes,coordinate_context:selectedDoc.coordinate_context || selectedVoucher.coordinate_context,image_transforms:selectedDoc.image_transforms || selectedVoucher.image_transforms,classification_evidence:selectedDoc.classification_evidence || selectedVoucher.classification_evidence},null,2))}</pre></details>
@@ -459,7 +480,7 @@
       ${sentInputs.length ? `<details class="detail-box"><summary>各輪實際模型輸入圖（包含補讀）</summary>${sentInputs.map((item,index)=>`<div class="document-artifact-preview"><h4>模型輸入 ${index+1}</h4><a href="${esc(item.url)}" target="_blank" rel="noopener"><img src="${esc(item.url)}" loading="lazy" alt="模型輸入 ${index+1}"></a></div>`).join("")}</details>` : ""}
       <details class="detail-box"><summary>完整單據 JSON</summary><pre class="diagnostic-pre">${esc(JSON.stringify({voucher:selectedVoucher,origin:selectedDoc.origin,quality:selectedDoc.quality,processing_reason:selectedDoc.processing_reason},null,2))}</pre></details></details>` : `<div class="detail-box"><strong>${esc(statusReason || "尚無可顯示的擷取結果")}</strong>${data.error ? `<div class="hint warn">${esc(data.error)}</div>` : ""}${qualityBlock(data.quality)}</div>`;
     const tabs = `<div class="review-mobile-tabs"><button class="btn btn-sm active" type="button" data-mobile-view="image">圖片</button><button class="btn btn-sm" type="button" data-mobile-view="data">資料</button></div>`;
-    const pageTech = `<details class="detail-box"><summary>頁面 OCR 與模型追蹤</summary><pre class="diagnostic-pre">${esc(JSON.stringify({ocr:data.ocr,trace:data.trace},null,2))}</pre></details>${diagnosticControl || ""}`;
+    const pageTech = `${timingBlock(data.timings, data.timings_version ?? data.timings?.timings_version, "頁面耗時")}<details class="detail-box"><summary>頁面 OCR 與模型追蹤</summary><pre class="diagnostic-pre">${esc(JSON.stringify({ocr:data.ocr,trace:data.trace},null,2))}</pre></details>${diagnosticControl || ""}`;
     return `${tabs}<div id="reviewWorkbench" class="review-workbench" data-mobile-view="image"><section class="review-image-panel"><div class="review-image-toolbar"><span class="hint">${esc(originalNotice)}</span><button id="pageZoomOut" type="button" class="btn btn-sm" aria-label="縮小">－</button><span id="pageZoomReadout" class="zoom-readout">100%</span><button id="pageZoomIn" type="button" class="btn btn-sm" aria-label="放大">＋</button><button id="pageFit" type="button" class="btn btn-sm">適合畫面</button><label class="btn btn-sm"><input id="pageBoxToggle" type="checkbox" checked> 顯示單據框</label></div><div id="pageImageStage" class="evidence-view page-image-stage"><div id="pageImageCanvas">${pageImage}</div></div>${pageTech}</section><aside class="review-document-panel"><div class="detail-box"><div class="detail-head"><h3>單據資料</h3><span class="status-pill ${esc(data.status)}">${esc(statusText(data))}</span></div><div class="hint">${esc(activeMessage)}</div><div class="document-picker">${picker || `<div class="hint">目前沒有單據可供選取。</div>`}</div>${selectedDetail}</div></aside></div>`;
   }
   async function showDetail(id, row) {

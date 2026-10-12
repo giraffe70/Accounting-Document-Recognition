@@ -15,6 +15,7 @@ function sliceBetween(startMarker, endMarker) {
 
 const statusHelper = sliceBetween("  function statusText(", "  const fallbackFieldLabels");
 const qualityHelper = sliceBetween("  function qualityBlock(", "  function reasonLabel(");
+const timingHelper = sliceBetween("  function timingBlock(", "  function table(");
 const helpers = sliceBetween("  function reasonLabel(", "  async function showDetail(");
 const showDetail = sliceBetween("  async function showDetail(", "  function bindDiagnostics(");
 const refreshRun = sliceBetween("  async function refreshCurrentRun(", "  async function loadResults(");
@@ -115,11 +116,12 @@ vm.createContext(runContext);
 vm.runInContext(`
 ${statusHelper}
 ${qualityHelper}
+${timingHelper}
 ${helpers}
 function bindDiagnostics() {}
 ${showDetail}
 ${refreshRun}
-globalThis.testApi = {pageWorkbench, showDetail, refreshCurrentRun};
+globalThis.testApi = {pageWorkbench, showDetail, refreshCurrentRun, timingBlock};
 `, runContext);
 
 (async () => {
@@ -135,11 +137,17 @@ globalThis.testApi = {pageWorkbench, showDetail, refreshCurrentRun};
   const selectedHtml = $("detail").innerHTML;
   const reasonHtml = ["manual_split", "document_partial_failure", "insufficient_data"].map(reason =>
     runContext.testApi.pageWorkbench({...input.result, processing_reason:reason, documents:[]}, [], 0, ""));
+  const timingHtml = {
+    version2: runContext.testApi.timingBlock({orientation_ocr_seconds:1.25, complete_seconds:4.5}, 2, "計時測試"),
+    legacy: runContext.testApi.timingBlock({orientation_ocr_seconds:9, queue_seconds:1.25, complete_seconds:4.5}, null, "舊版計時測試"),
+    incomplete: runContext.testApi.timingBlock({complete_seconds:3.5, incomplete:true}, 2, "中斷計時測試"),
+  };
   await runContext.testApi.refreshCurrentRun();
   process.stdout.write(JSON.stringify({
     initialHtml,
     selectedHtml,
     reasonHtml,
+    timingHtml,
     initialCanvasTransform,
     zoomedCanvasTransform,
     statsHtml: $("stats").innerHTML,

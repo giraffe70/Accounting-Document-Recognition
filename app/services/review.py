@@ -13,6 +13,16 @@ from app.db.session import get_session
 from app.models.schemas import Voucher
 
 
+def _ocr_cache_directory(rec):
+    """An uploaded source keeps its scope after its document images are copied."""
+    import re
+    origin = (json.loads(rec.current_json).get("origin") or {})
+    token = origin.get("source_token")
+    if isinstance(token, str) and re.fullmatch(r"[a-f0-9]{32}", token):
+        return config.UPLOAD_DIR / "_pages" / token / "ocr_cache"
+    return config.DATA_DIR / "recognition" / str(rec.source_parent_id or rec.id) / "ocr_cache"
+
+
 def _period_of(date_str: str) -> str:
     """由 YYYY-MM-DD 取 YYYY-MM，供日記帳彙整。"""
     return date_str[:7] if date_str and len(date_str) >= 7 else ""
@@ -381,7 +391,7 @@ def split_voucher(rec_id: int, box):
     切走的區域會在原圖上塗白（見 _mask_region），原圖只留其餘憑證。
     供一頁多張憑證時手動分割。新紀錄以 prepared 落地，重新進入外觀確認漏斗。
     box 為 [x1,y1,x2,y2]，值域 0~1。"""
-    from app.core import doc_types, pipeline
+    from app.core import doc_types, pipeline, ocr_cache
     from app.models.schemas import Voucher
 
     p = _image_path_of(get_voucher(rec_id))
@@ -398,14 +408,17 @@ def split_voucher(rec_id: int, box):
         R, B = int(max(x1, x2) * w), int(max(y1, y2) * h)
         if R - L < 10 or B - T < 10:
             return None
-        pages = config.UPLOAD_DIR / "_pages"
+        import uuid
+        source_token = uuid.uuid4().hex
+        pages = config.UPLOAD_DIR / "_pages" / source_token
         pages.mkdir(parents=True, exist_ok=True)
-        tmp = pages / f"_split_{rec_id}.png"
+        tmp = pages / "document.png"
         im.crop((L, T, R, B)).save(tmp)
     except (OSError, ValueError, TypeError):
         return None
 
-    type_key = pipeline.prepare_image(str(tmp))     # 只判類型＋轉正，不萃取欄位
+    with ocr_cache.scope(pages / "ocr_cache"):
+        type_key = pipeline.prepare_image(str(tmp))     # 只判類型＋轉正，不萃取欄位
     v = Voucher.model_validate({
         "doc_type_key": type_key,
         "doc_type": doc_types.get(type_key)["label"],
@@ -416,6 +429,7 @@ def split_voucher(rec_id: int, box):
     if rec.record_role == "source_page":
         from app.core import page_layout
         v.origin = page_layout.origin(p, {"box": [round(x1*1000), round(y1*1000), round(x2*1000), round(y2*1000)], "rotate": 0}, json.loads(rec.current_json).get("origin", {}).get("page_no", 1))
+    v.origin["source_token"] = source_token
     new_rec = save_voucher(v, company=rec.company, status=ReviewStatus.prepared,
                            source_parent_id=rec.id if rec.record_role == "source_page" else rec.source_parent_id)
     # 新憑證已建立，才把該區從原圖抹掉（先建後抹：中途失敗不會兩邊都沒有）
@@ -457,10 +471,10 @@ def re_recognize(rec_id: int) -> Optional[VoucherRecord]:
         return None
     _check_model_write(rec)
     hint = "；".join(n for n in (rec.dev_note, rec.clerk_note, rec.accountant_note) if n)
-    from app.core import invocation_trace, model_invocation
+    from app.core import invocation_trace, model_invocation, ocr_cache
     import uuid
     trace_path = config.DATA_DIR / "recognition" / str(rec_id) / (uuid.uuid4().hex + ".json")
-    with invocation_trace.capture(trace_path):
+    with invocation_trace.capture(trace_path), ocr_cache.scope(_ocr_cache_directory(rec)):
         invocation_trace.add({"kind": "snapshot", "versions": model_invocation.source_versions(), "record_id": rec_id})
         converted, type_key = _route_unconfirmed_page(rec)
         if converted:
@@ -612,10 +626,10 @@ def recognize_record(rec_id: int) -> Optional[VoucherRecord]:
     hint = "；".join(n for n in (rec.dev_note, rec.clerk_note, rec.accountant_note) if n)
     confirmed = {path[7:]: cur.get("fields", {}).get(path[7:]) for path, records in cur.get("field_evidence", {}).items()
                  if path.startswith("fields.") and any(r.get("source") == "manual" and r.get("selected") for r in records)}
-    from app.core import invocation_trace, model_invocation
+    from app.core import invocation_trace, model_invocation, ocr_cache
     import uuid
     trace_path = config.DATA_DIR / "recognition" / str(rec_id) / (uuid.uuid4().hex + ".json")
-    with invocation_trace.capture(trace_path):
+    with invocation_trace.capture(trace_path), ocr_cache.scope(_ocr_cache_directory(rec)):
         invocation_trace.add({"kind": "snapshot", "versions": model_invocation.source_versions(), "record_id": rec_id})
         protected_paths = [p for p,records in cur.get("field_evidence", {}).items() if any(r.get("source") == "manual" and r.get("selected") for r in records)]
         v = pipeline.extract_for_type(str(config.UPLOAD_DIR / rec.image_path), type_key, hint=hint, company=rec.company, confirmed_fields=confirmed, confirmed_type=True, confirmed_paths=protected_paths)

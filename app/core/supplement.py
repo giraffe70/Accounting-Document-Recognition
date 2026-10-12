@@ -179,7 +179,9 @@ def apply(data, type_key, chat, image_path, *, mode, ocr_text, context, confirme
                 raise RuntimeError("VLM direct mode leaves OCR disabled")
             provider, _ = pipeline.settings_store.parse_setting(pipeline.settings_store.get_settings()["ocr"])
             ocr = pipeline.model_factory.get_ocr(provider)
-            lines = ocr.recognize(roi_path)
+            from app.core import ocr_cache
+            with ocr_cache.purpose("supplement_original"):
+                lines = ocr.recognize(roi_path)
             ocr_text = ocr.plain_text(lines)
             context["supplement_ocr_lines"] = lines
             from PIL import Image
@@ -189,7 +191,8 @@ def apply(data, type_key, chat, image_path, *, mode, ocr_text, context, confirme
             enhanced, info = image_evidence.enhancement(roi_path, lines, Path(roi_path).with_name(Path(roi_path).stem + "_enhanced.png"))
             invocation_trace.add({"kind":"image_enhancement", **info})
             if enhanced:
-                extra_lines = ocr.recognize(enhanced)
+                with ocr_cache.purpose("supplement_enhanced"):
+                    extra_lines = ocr.recognize(enhanced)
                 extra_text = ocr.plain_text(extra_lines)
                 invocation_trace.add({"kind":"enhanced_ocr", "lines":extra_lines, "text":extra_text})
                 context["enhanced_ocr_text"] = extra_text

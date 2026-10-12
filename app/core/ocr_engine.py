@@ -6,9 +6,27 @@
 import os
 import time
 from functools import lru_cache
+from importlib.metadata import version, PackageNotFoundError
+from app.core import ocr_cache
 
 # paddle 3.3 + paddleocr 3.7 在 Windows CPU 的 oneDNN 有相容性 bug，需停用
 os.environ.setdefault("FLAGS_use_mkldnn", "0")
+
+OPTIONS = {"enable_mkldnn": False, "use_doc_orientation_classify": False,
+           "use_doc_unwarping": False, "use_textline_orientation": True}
+
+
+def runtime_signature(lang="chinese_cht"):
+    """Package defaults are versioned too; never mistake the UI label for a model ID."""
+    dependencies = {}
+    for package in ("paddleocr", "paddlex", "paddlepaddle", "paddlepaddle-gpu", "Pillow"):
+        try:
+            dependencies[package] = version(package)
+        except PackageNotFoundError:
+            dependencies[package] = None
+    return {"provider": "paddle", "implementation_version": 2, "lang": lang,
+            "options": dict(OPTIONS), "dependencies": dependencies,
+            "device": "package_default", "FLAGS_use_mkldnn": os.environ.get("FLAGS_use_mkldnn")}
 
 
 class PaddleOCREngine:
@@ -16,9 +34,21 @@ class PaddleOCREngine:
         self.lang = lang
 
     def recognize(self, image_path: str) -> list[dict]:
+        metrics = {}
+        return ocr_cache.recognize(image_path, runtime_signature(self.lang),
+                                   lambda: self._recognize(image_path, metrics), metrics)
+
+    def _recognize(self, image_path, metrics):
         started = time.perf_counter()
-        ocr = _get_paddle(self.lang)
-        result = ocr.predict(image_path)
+        try:
+            ocr = _get_paddle(self.lang)
+        finally:
+            metrics["engine_init_seconds"] = time.perf_counter() - started
+        started = time.perf_counter()
+        try:
+            result = list(ocr.predict(image_path) or [])
+        finally:
+            metrics["predict_seconds"] = time.perf_counter() - started
         lines: list[dict] = []
         for r in result or []:
             texts = (r.get("rec_texts") if hasattr(r, "get") else None) or []
@@ -35,10 +65,6 @@ class PaddleOCREngine:
                     "text": text, "box": box,
                     "score": float(scores[i]) if i < len(scores) else 0.0,
                 })
-        from app.core import invocation_trace
-        invocation_trace.add({"kind": "ocr_result", "provider": "paddle",
-                              "image": str(image_path), "seconds": round(time.perf_counter() - started, 6),
-                              "lines": lines})
         return lines
 
     @staticmethod
@@ -58,8 +84,5 @@ def _get_paddle(lang: str):
     # 方向由本專案 _auto_orient_ocr 以實體旋轉影像處理。保留單行方向(180)校正。
     return PaddleOCR(
         lang=lang,
-        enable_mkldnn=False,
-        use_doc_orientation_classify=False,
-        use_doc_unwarping=False,
-        use_textline_orientation=True,
+        **OPTIONS,
     )

@@ -902,16 +902,16 @@ def _recognize_layout(payload):
 
 
 def _recognize(payload):
-    if payload.get("phase") == "layout":
-        return _recognize_layout(payload)
-    if payload.get("phase") == "document":
-        return _recognize_document(payload)
+    from app.core import ocr_cache
+    if payload.get("phase") in ("layout", "document"):
+        with ocr_cache.scope(payload.get("ocr_cache_dir")):
+            return _recognize_layout(payload) if payload["phase"] == "layout" else _recognize_document(payload)
     # Direct/offline callers use the same page orchestration without spawning children.
     return _run_page_child(payload, 600, runner=lambda p, timeout: {"ok": True, "data": _recognize(p)})["data"]
 
 
 def _run_page_child(payload, timeout, runner=None):
-    from app.core import page_layout, invocation_trace
+    from app.core import page_layout, invocation_trace, recognition_timing
     persist = runner is None
     if persist:
         _handshake(payload)
@@ -919,22 +919,38 @@ def _run_page_child(payload, timeout, runner=None):
             raise ValueError("驗證 schema 或執行版本未就緒")
     runner = runner or _run_child
     directory = RUNS / payload["run_id"] / payload["id"]
+    # The result ID already isolates model combination, repeat and attempt.
+    payload = {**payload, "ocr_cache_dir": str(directory / "ocr_cache")}
     saved_layout = directory / "layout.json"
+    saved_timing = directory / "layout_timing.json"
     layout_response = None
     if saved_layout.is_file():
         saved = json.loads(saved_layout.read_text(encoding="utf-8"))
         if saved.get("execution_version_sha256") == payload.get("execution_version_sha256"):
             layout_response = {"ok": True, "data": {**_recover_diagnostics(payload), "layout": saved}}
+            if saved_timing.is_file():
+                try:
+                    timing = json.loads(saved_timing.read_text(encoding="utf-8"))
+                    if timing.get("execution_version_sha256") == payload.get("execution_version_sha256"):
+                        layout_response["wall_seconds"] = timing.get("wall_seconds", 0)
+                except (OSError, ValueError):
+                    pass
     if layout_response is None:
         layout_response = runner({**payload, "phase": "layout"}, timeout)
     if not layout_response.get("ok"):
         return layout_response
     base = layout_response["data"]
+    layout_timings = recognition_timing.from_trace(base.get("trace", []))
+    try:
+        invocation_trace.atomic_json(saved_timing, {"wall_seconds": layout_response.get("wall_seconds", 0),
+                                                  "execution_version_sha256": payload.get("execution_version_sha256")})
+    except OSError as exc:
+        base.setdefault("trace", []).append({"kind": "timing_storage_error", "error": str(exc)})
     layout = base["layout"]
     base.update(documents=[], voucher={}, actual_path=payload["combo"]["mode"],
                 origin=page_layout.origin(payload["page_path"], {"box":[0,0,1000,1000]}, payload["page_no"]))
     base.update({k:layout.get(k) for k in ("coordinate_context","image_transforms","classification_evidence","recognition_diagnostics")})
-    base["timings"] = {"complete_seconds": float(layout_response.get("wall_seconds", 0)), "recognition_seconds": float(layout_response.get("wall_seconds", 0))}
+    base["timings"] = {**layout_timings, "complete_seconds": float(layout_response.get("wall_seconds", 0)), "recognition_seconds": float(layout_response.get("wall_seconds", 0))}
     if layout["content_kind"] in ("blank", "supporting", "non_voucher") and layout["auto_split"]:
         base.update(page_status="skipped", processing_reason="skipped", skip_reason=layout["content_kind"], quality={"version":1,"state":"usable","content_kind":layout["content_kind"],"issues":[]})
         return {"ok": True, "data": base}
@@ -948,6 +964,8 @@ def _run_page_child(payload, timeout, runner=None):
             with _connect() as con:
                 run = con.execute("SELECT status,cancel_requested FROM runs WHERE id=?", (payload["run_id"],)).fetchone()
             if run and (run["status"] != "running" or run["cancel_requested"]):
+                base["timings"] = {**recognition_timing.merge(layout_timings, *(d.get("timings", {}) for d in base["documents"])),
+                                   "complete_seconds": total_seconds, "recognition_seconds": total_seconds}
                 base["page_status"] = "partial"
                 base["processing_reason"] = "document_partial_failure"
                 base["quality"] = {"version":1, "state":"needs_review", "content_kind":layout["content_kind"],
@@ -959,6 +977,7 @@ def _run_page_child(payload, timeout, runner=None):
                 previous = next((d for d in _documents(con, payload["id"]) if d["document_index"] == index and d["status"] == "succeeded"), None)
         if previous:
             base["documents"].append(previous)
+            total_seconds += float(previous.get("timings", {}).get("child_wall_seconds", previous.get("timings", {}).get("complete_seconds", 0)))
             for kind, info in previous.get("artifacts", {}).items():
                 base.setdefault("artifacts", {})[f"document_{index}_{kind}"] = info
             continue
@@ -974,6 +993,10 @@ def _run_page_child(payload, timeout, runner=None):
             response = {"ok":False, "error":diagnostic[0]["error"], "data":{"trace":diagnostic,
                         "artifacts":{"trace_json":{"path":str(diagnostic_path),"media_type":"application/json"}}}}
         data = response.get("data") or {}
+        data["timings"] = {**(data.get("timings") or {}), **recognition_timing.from_trace(data.get("trace", [])),
+                           "child_wall_seconds": float(response.get("wall_seconds", 0))}
+        data["timings"].setdefault("complete_seconds", float(response.get("wall_seconds", 0)))
+        data["timings"].setdefault("recognition_seconds", float(response.get("wall_seconds", 0)))
         valid_document = _document_contract(data)
         if response.get("ok") and (not isinstance(data.get("voucher"), dict) or not data.get("voucher") or
                                    payload.get("worker_protocol") == WORKER_PROTOCOL and not valid_document):
@@ -1010,7 +1033,9 @@ def _run_page_child(payload, timeout, runner=None):
     if len(base["documents"]) == 1 and successful:
         base.update({k: successful[0][k] for k in ("voucher", "boxes", "ocr", "trace", "timings", "actual_path") if k in successful[0]})
         base.setdefault("artifacts", {}).update({k: info for k,info in successful[0].get("artifacts", {}).items() if k not in ("original", "trace_json")})
-    base["timings"] = {**(base.get("timings") or {}), "complete_seconds": total_seconds or sum(float(d.get("timings", {}).get("complete_seconds", 0)) for d in base["documents"]), "recognition_seconds": total_seconds or sum(float(d.get("timings", {}).get("recognition_seconds", 0)) for d in base["documents"])}
+    base["timings"] = {**(base.get("timings") or {}),
+                       **recognition_timing.merge(layout_timings, *(d.get("timings", {}) for d in base["documents"])),
+                       "complete_seconds": total_seconds or sum(float(d.get("timings", {}).get("complete_seconds", 0)) for d in base["documents"]), "recognition_seconds": total_seconds or sum(float(d.get("timings", {}).get("recognition_seconds", 0)) for d in base["documents"])}
     return {"ok": True, "data": base}
 
 
@@ -1042,7 +1067,7 @@ def _run_child(payload, timeout):
             process.join(5)
         else:
             process.terminate(); process.join(10)
-            response = {"ok": False, "timeout": True, "error": f"單張處理超過 {timeout} 秒"}
+            response = {"ok": False, "timeout": True, "error": f"{('版面' if payload.get('phase') == 'layout' else '單據')}子行程處理超過 {timeout} 秒"}
     except (EOFError, OSError) as exc:
         response = {"ok": False, "error": f"辨識子行程中斷：{exc}"}
     if response.get("ok") and (response.get("worker_protocol") != WORKER_PROTOCOL or response.get("parent_build") != LOADED_BUILD or
@@ -1149,7 +1174,8 @@ def _save_response(task, response):
     if not response.get("ok"):
         data["processing_reason"] = "input_budget_insufficient" if "context_budget_exhausted" in response.get("error", "") else "execution_failure"
     if not data.get("timings"):
-        data["timings"] = {"complete_seconds": response.get("wall_seconds", 0),
+        from app.core import recognition_timing
+        data["timings"] = {**recognition_timing.from_trace(data.get("trace", [])), "complete_seconds": response.get("wall_seconds", 0),
                            "recognition_seconds": response.get("wall_seconds", 0)}
     try:
         queued = datetime.fromisoformat(task["queued_at"])
@@ -1287,7 +1313,8 @@ def _recognize_document(payload):
             from app.core import image_evidence
             ocr_input = image_evidence.native_ocr(original, result_dir / "ocr_input.png")
             # Page routing has already rotated this native document.
-            with activity.stage("ocr", "paddle/pp-ocrv5"):
+            from app.core import ocr_cache
+            with activity.stage("ocr", "paddle/pp-ocrv5"), ocr_cache.purpose("extraction"):
                 native_lines = ocr.recognize(ocr_input)
             with Image.open(ocr_input) as native_image, Image.open(input_path) as model_image:
                 ocr_lines = image_evidence.map_lines(native_lines, native_image.size, model_image.size)
@@ -1315,14 +1342,10 @@ def _recognize_document(payload):
     invocation_trace.atomic_json(result_dir / "result.json", data)
     invocation_trace.atomic_json(result_dir / "ocr.json", ocr_lines)
     evidence = time.perf_counter() - evidence_started
-    stages = {"ocr_seconds": 0.0, "classification_seconds": 0.0, "extraction_seconds": 0.0}
-    for rec in trace:
-        if rec.get("kind") != "stage": continue
-        if rec["stage"] == "ocr": stages["ocr_seconds"] += rec["seconds"]
-        elif "判類型" in rec.get("note", ""): stages["classification_seconds"] += rec["seconds"]
-        elif rec["stage"] == "structure": stages["extraction_seconds"] += rec["seconds"]
+    from app.core import recognition_timing
+    stages = recognition_timing.from_trace(trace)
     complete = preprocess + recognition + evidence
-    timings = {"preprocess_seconds": round(preprocess, 6), **{k: round(v, 6) for k, v in stages.items()},
+    timings = {"preprocess_seconds": round(preprocess, 6), **stages,
                "postprocess_evidence_seconds": round(evidence, 6),
                "recognition_seconds": round(recognition, 6), "complete_seconds": round(complete, 6),
                "pdf_render_seconds": payload.get("render_seconds", 0)}
@@ -1410,6 +1433,7 @@ def _export_data(run_id, view="history"):
 
 
 def _csv_files(data):
+    from app.core import recognition_timing
     files = {}
     specs = {
       "vouchers.csv": ["result_id","source","page","combo","mode","actual_path","repeat","attempt","status","doc_type","voucher_id","date","total_amount","recognition_seconds","complete_seconds","error","field_evidence_json","validation_warnings_json","classification_meta_json","payment_state_json","document_id","parent_result_id","source_region","origin_json","quality_json","box_issues_json","sha256","is_latest","result_contract_version","integrity_ok","integrity_reason"],
@@ -1417,10 +1441,12 @@ def _csv_files(data):
       "items.csv": ["result_id","source","index","description","quantity","unit_price","amount","hs_code","origin_country","fee_code"],
       "entries.csv": ["result_id","source","index","description","amount","debit_account","debit_account_name","credit_account","credit_account_name","evidence_paths_json","amount_source"]}
     specs["vouchers.csv"] += ["processing_reason","coordinate_contract_version","coordinate_context_json","classification_evidence_json","recognition_diagnostics_json"]
+    specs["vouchers.csv"] += list(recognition_timing.CSV_FIELDS)
     buffers = {name: io.StringIO(newline="") for name in specs}
     writers = {name: csv.DictWriter(buffers[name], fieldnames=fields, extrasaction="ignore") for name, fields in specs.items()}
     for writer in writers.values(): writer.writeheader()
     specs["pages.csv"] = ["result_id","source","page","status","image_sha256","complete_seconds","document_count","combo","repeat","attempt","is_latest","result_contract_version","integrity_ok","integrity_reason","skip_reason","processing_reason","coordinate_contract_version","coordinate_context_json","classification_evidence_json","recognition_diagnostics_json"]
+    specs["pages.csv"] += list(recognition_timing.CSV_FIELDS)
     buffers["pages.csv"] = io.StringIO(newline="")
     writers["pages.csv"] = csv.DictWriter(buffers["pages.csv"], fieldnames=specs["pages.csv"])
     writers["pages.csv"].writeheader()
@@ -1432,7 +1458,7 @@ def _csv_files(data):
             source_art = next((a for a in data.get("artifacts", []) if a.get("result_id") == page["id"] and a.get("kind") == "original"), None)
             if source_art and Path(source_art["path"]).is_file():
                 image_sha = _sha(Path(source_art["path"]))
-        writers["pages.csv"].writerow({"result_id": page["id"], "source": _csv_safe(page["relative_path"]), "page": page["page_no"],
+        writers["pages.csv"].writerow({**recognition_timing.csv_values(page.get("timings")), "result_id": page["id"], "source": _csv_safe(page["relative_path"]), "page": page["page_no"],
             "status": page["status"], "image_sha256": image_sha or "", "complete_seconds": page.get("timings", {}).get("complete_seconds"), "document_count": len(documents),
             "combo":_csv_safe(page["combo_name"]), "repeat":page["repeat_no"], "attempt":page["attempt"], "is_latest":page.get("is_latest", False),
             "result_contract_version":page.get("result_contract_version"), "integrity_ok":page.get("integrity", {}).get("ok", False),
@@ -1446,7 +1472,7 @@ def _csv_files(data):
             flattened.append(page)
     for result in flattened:
         voucher, source = result.get("voucher") or {}, result["relative_path"]
-        writers["vouchers.csv"].writerow({"result_id": result["id"], "source": _csv_safe(source), "page": result["page_no"],
+        writers["vouchers.csv"].writerow({**recognition_timing.csv_values(result.get("timings")), "result_id": result["id"], "source": _csv_safe(source), "page": result["page_no"],
           "combo": _csv_safe(result["combo_name"]), "mode": result["mode"], "actual_path": result["actual_path"],
           "repeat": result["repeat_no"], "attempt": result["attempt"], "status": result["status"],
           "doc_type": _csv_safe(voucher.get("doc_type")), "voucher_id": _csv_safe(voucher.get("voucher_id")),

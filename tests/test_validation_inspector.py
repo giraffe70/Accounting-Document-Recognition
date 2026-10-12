@@ -168,6 +168,21 @@ class ValidationInspectorTests(unittest.TestCase):
         self.assertIn("排程 5", html)
         self.assertIn("擷取完成率（已處理非略過頁） 50.0%", html)
 
+    def test_production_timing_block_handles_current_legacy_and_incomplete_records(self):
+        cases = self.rendered["timingHtml"]
+        version2 = cases["version2"]
+        self.assertIn("方向判斷 OCR</th><td>1.25 秒</td>", version2)
+        self.assertIn("補讀 OCR</th><td>未記錄</td>", version2)
+
+        legacy = cases["legacy"]
+        self.assertIn("方向判斷 OCR</th><td>未記錄</td>", legacy)
+        self.assertIn("排隊</th><td>1.25 秒</td>", legacy)
+        self.assertIn("總耗時</th><td>4.50 秒</td>", legacy)
+
+        incomplete = cases["incomplete"]
+        self.assertIn("總耗時</th><td>3.50 秒</td>", incomplete)
+        self.assertIn("處理曾中斷，細項僅包含已完成的呼叫，耗時可能未完整記錄", incomplete)
+
 
 if __name__ == "__main__":
     unittest.main()

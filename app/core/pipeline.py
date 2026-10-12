@@ -9,7 +9,7 @@ import os
 from functools import lru_cache
 from pathlib import Path
 
-from app.core import activity, doc_router, doc_types, model_factory, settings_store
+from app.core import activity, doc_router, doc_types, model_factory, settings_store, ocr_cache
 from app.models.schemas import Voucher
 
 logger = logging.getLogger("pdf_scan.pipeline")
@@ -60,7 +60,7 @@ def prepare_pages(file_path: str) -> list[Voucher]:
         token = uuid.uuid4().hex
         folder = config.UPLOAD_DIR / "_pages" / token
         folder.mkdir(parents=True, exist_ok=True)
-        with invocation_trace.capture(folder / "trace.json"):
+        with invocation_trace.capture(folder / "trace.json"), ocr_cache.scope(folder / "ocr_cache"):
             invocation_trace.add({"kind": "snapshot", "versions": model_invocation.source_versions(), "settings": settings_store.get_settings()})
             input_path = page_layout.crop(source, {"box": [0,0,1000,1000]}, folder / "input.png", max_edge=1180)
             layout = page_layout.detect(input_path, native_path=source)
@@ -139,6 +139,7 @@ def prepare_image(image_path: str, hint: str = "", auto_rotate: bool = True) -> 
     return type_key
 
 
+@ocr_cache.scoped
 def extract_for_type(image_path: str, type_key: str, hint: str = "", company: str = "", *, confirmed_fields=None, native_path=None, confirmed_type=False, confirmed_paths=None) -> Voucher:
     """依「已確認的類型」在「已準備好的影像」上萃取欄位＋精準框。
     不再判類型／不再自動轉正（外觀確認階段已完成）。"""
@@ -161,7 +162,8 @@ def extract_for_type(image_path: str, type_key: str, hint: str = "", company: st
                 from app.core import image_evidence
                 from PIL import Image
                 ocr_input = image_evidence.native_ocr(native_path or image_path, Path(image_path).with_name(Path(image_path).stem + "_ocr.png"))
-                native_lines = ocr.recognize(ocr_input)
+                with ocr_cache.purpose("extraction"):
+                    native_lines = ocr.recognize(ocr_input)
                 _, image_conditions = image_evidence.enhancement(ocr_input, native_lines, None)
                 from app.core import invocation_trace
                 invocation_trace.add({"kind":"image_assessment", **image_conditions})
@@ -373,6 +375,7 @@ def recognize_image(image_path: str, hint: str = "", *, company: str = "") -> Vo
     return v
 
 
+@ocr_cache.scoped
 def _structure_image(image_path: str, source_file: str, page_idx: int, page_count: int,
                      auto_rotate: bool = True, hint: str = "", company: str = "") -> Voucher:
     """單張全流程：準備（判類型+轉正）＋內容萃取。供批次與重新辨識沿用。"""
@@ -783,14 +786,17 @@ def _auto_orient_ocr(image_path: str, ocr) -> tuple[str, int]:
     except OSError:
         return image_path, 0
     small = base.copy()
+    base.close()
     small.thumbnail((720, 720))
-    tmp = str(Path(image_path).with_name("_orient_tmp.png"))
+    import uuid
+    tmp = str(Path(image_path).with_name("_orient_" + uuid.uuid4().hex + ".png"))
     tp = {90: Image.Transpose.ROTATE_270, 180: Image.Transpose.ROTATE_180, 270: Image.Transpose.ROTATE_90}
 
     def _score(img):
         try:
             img.save(tmp)
-            lines = ocr.recognize(tmp)
+            with ocr_cache.purpose("orientation"):
+                lines = ocr.recognize(tmp)
             return sum(len(l["text"]) * max(l.get("score", 0), 0.1) for l in lines)
         except Exception:  # noqa: BLE001
             return 0.0

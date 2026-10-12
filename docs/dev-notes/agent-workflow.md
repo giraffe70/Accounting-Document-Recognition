@@ -19,6 +19,8 @@
 
 驗證輸出格式、辨識版本或單據切分契約有變時，建立新版本的驗證批次再檢查；已保存的舊批次不會補上 `documents[]`、`origin` 或 `quality`。可用合成輸入與模擬模型驗證 API、JSON/CSV 匯出和畫面，不把私人掃描檔、資料集或 gold 放進測試。`pages.csv` 每個輸入頁面只列一列；`vouchers.csv` 可依頁面所含文件展開多列，頁面耗時以 `pages.csv` 為準，避免按單據數重複加總。
 
+OCR 計時與快取驗收範圍：快取以每頁結果獨立保存，不跨模型組合、重複次數或執行嘗試共用；一般上傳沿用 `source_token`，原圖內容改變或 OCR 引擎簽章不同時會失效。離線契約測試只驗證欄位與呈現，不代表實測節省時間。部署含計時或快取的新版本時，完整重新啟動服務並建立新批次驗收；頁面總耗時不含排隊，`ocr_init_seconds` 是實際 OCR 時間的子集，不應再重複加總。
+
 前端離線檢查可執行 `node --check app/static/js/validation.js` 與 `python -m unittest tests.test_frontend_form`；驗證 API／匯出契約使用 `scripts\verify.bat -Scope validation`。這些檢查不啟動真實模型，也不替代獨立人工證據核對。
 
 Ollama 輸出上限使用 `ChatOllama` 模型副本的 `num_predict`，由套件轉為 SDK 的 `options.num_predict`；不可使用 `bind(num_predict=...)`，它會把參數傳到 `Client.chat()` 頂層並造成 `TypeError`。`tests/test_retry_contracts.py` 與 `tests/test_recognition_optimization.py` 以實際安裝的 `ChatOllama`、保留 SDK 方法簽名的網路替身驗證參數、Schema 降級與設定保留，避免只有寬鬆模擬模型通過卻在正式套件失敗。

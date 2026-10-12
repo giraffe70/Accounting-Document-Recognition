@@ -5,6 +5,7 @@ import time
 import json
 import os
 import re
+import uuid
 from pathlib import Path
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -35,7 +36,7 @@ def atomic_json(path, value):
     """Same-directory replacement leaves the last complete journal readable after termination."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + f".{os.getpid()}.tmp")
+    temporary = path.with_name(path.name + f".{os.getpid()}.{uuid.uuid4().hex}.tmp")
     with temporary.open("w", encoding="utf-8") as stream:
         json.dump(_safe(value), stream, ensure_ascii=False, default=str)
         stream.flush()
