@@ -38,7 +38,7 @@ def get_chat_model(provider: str, model: str, temperature: float = 0.0):
         return ChatOllama(
             model=model, base_url=llm.get("ollama_base_url") or config.OLLAMA_BASE_URL,
             temperature=temperature, seed=RUN_SEED,
-            num_ctx=config.OLLAMA_NUM_CTX,
+            num_ctx=config.get_ollama_context(),
         )
     if provider == "google":
         _require_key(llm.get("google_api_key"), "Google API Key")

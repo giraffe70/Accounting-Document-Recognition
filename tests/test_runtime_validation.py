@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch, Mock
-from app import validation
+from app import config, validation
 
 
 class RuntimeValidationTests(unittest.TestCase):
@@ -79,6 +79,55 @@ class RuntimeValidationTests(unittest.TestCase):
                 self.assertEqual(json.loads(rows[0]["recognition_diagnostics_json"]),diagnostic)
             stat = validation.get_run("run")["latest_statistics"][0]
             self.assertEqual(stat["failed"],0)
+
+    def test_runtime_context_limits_are_additive_without_claiming_hardware_ready(self):
+        from app.core import request_budget
+        for context in config.SUPPORTED_OLLAMA_CONTEXTS:
+            with self.subTest(context=context), patch.object(config, "OLLAMA_NUM_CTX", context), \
+                 patch.object(request_budget, "runtime_profile", return_value=({"profile_id":"offline"},None)):
+                runtime = validation.get_runtime_status()
+            self.assertTrue(runtime["ready"])
+            budget = runtime["token_budget"]
+            self.assertEqual(budget["configured_context"], context)
+            self.assertEqual(budget["supported_contexts"], list(config.SUPPORTED_OLLAMA_CONTEXTS))
+            self.assertEqual(budget["input_limits"]["extract"], context-4096-512)
+            self.assertEqual(budget["input_limits"]["layout"], context-2048-512)
+            self.assertEqual(budget["policy_version"], 2)
+            self.assertFalse(budget["hardware_verified"])
+
+    def test_context_changed_blocks_resume_retry_and_keeps_history_unchanged(self):
+        self.result("previous",1,"failed")
+        with validation._connect() as con:
+            before = [tuple(row) for row in con.execute("SELECT * FROM results WHERE run_id='run'")]
+            run_before = tuple(con.execute("SELECT * FROM runs WHERE id='run'").fetchone())
+        different = next(value for value in config.SUPPORTED_OLLAMA_CONTEXTS if value != config.OLLAMA_NUM_CTX)
+        with patch.object(config, "OLLAMA_NUM_CTX", different):
+            for action in (validation.resume_run, validation.retry_run):
+                response = action("run")
+                self.assertEqual(response.status_code, 409)
+                self.assertIn("新驗證批次", json.loads(response.body)["detail"])
+        with validation._connect() as con:
+            self.assertEqual([tuple(row) for row in con.execute("SELECT * FROM results WHERE run_id='run'")],before)
+            self.assertEqual(tuple(con.execute("SELECT * FROM runs WHERE id='run'").fetchone()),run_before)
+
+    def test_failed_document_csv_keeps_actual_context_diagnostics_without_voucher(self):
+        self.result("budget-rejected",1,"succeeded")
+        diagnostic = {"version":1,"issues":[{"code":"context_budget_exhausted","stage":"extract",
+            "details":{"candidates":[{"context_limit":16384,"policy_version":2,"fits":False}]}}]}
+        with validation._connect() as con:
+            page = json.loads(con.execute("SELECT page_json FROM results WHERE id='budget-rejected'").fetchone()[0])
+            page["recognition_diagnostics"] = diagnostic
+            con.execute("UPDATE results SET status='partial',page_json=? WHERE id='budget-rejected'",(json.dumps(page),))
+            con.execute("UPDATE document_results SET status='failed',data_json=?,error='context_budget_exhausted' WHERE id='budget-rejected-doc'",
+                        (json.dumps({"recognition_diagnostics":diagnostic,"processing_reason":"input_budget_insufficient"}),))
+        for view in ("latest","history"):
+            files = validation._csv_files(validation._export_data("run",view))
+            for name in ("vouchers.csv","pages.csv"):
+                rows = list(csv.DictReader(files[name].lstrip("\ufeff").splitlines()))
+                self.assertEqual(json.loads(rows[0]["recognition_diagnostics_json"]),diagnostic)
+            document = list(csv.DictReader(files["vouchers.csv"].lstrip("\ufeff").splitlines()))[0]
+            self.assertEqual(document["status"],"failed")
+            self.assertEqual(document["total_amount"],"")
 
     def test_handshake_blocks_missing_old_parent_and_changed_batch_before_model(self):
         pipe = Mock()

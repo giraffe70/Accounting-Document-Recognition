@@ -37,6 +37,9 @@ class RequestBudgetTests(unittest.TestCase):
     TEST_TMP_DIR = config.DATA_DIR / "test-tmp-plan"
 
     def setUp(self) -> None:
+        context = patch.object(config, "OLLAMA_NUM_CTX", 8192)
+        context.start()
+        self.addCleanup(context.stop)
         self.TEST_TMP_DIR.mkdir(parents=True, exist_ok=True)
         self.profile = {
             "profile_id": "offline-profile",
@@ -168,7 +171,7 @@ class RequestBudgetTests(unittest.TestCase):
         with self._runtime() as runtime_profile, self.assertRaises(request_budget.BudgetError) as caught:
             request_budget.preflight(chat, messages, None, 2048)
 
-        runtime_profile.assert_called_once_with(chat)
+        runtime_profile.assert_not_called()
         self.assertEqual(caught.exception.code, "budget_profile_not_ready")
 
 

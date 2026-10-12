@@ -257,10 +257,12 @@ def source_versions() -> dict:
     def digest(value):
         return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
     prompt_sources = {key: sources[key] for key in ("core/prompts.py", "core/doc_types.py", "core/doc_router.py")}
-    parameters = {"ollama_num_ctx": config.OLLAMA_NUM_CTX, "output_limits": OUTPUT_LIMITS, "repair_char_limit": REPAIR_CHAR_LIMIT}
+    parameters = {"ollama_num_ctx": config.get_ollama_context(), "output_limits": OUTPUT_LIMITS, "repair_char_limit": REPAIR_CHAR_LIMIT}
     from app.core import model_coordinates
     parameters.update(coordinate_profiles_sha256=model_coordinates.registry_digest(), layout_version=3, page_ocr_version=1)
     parameters.update(request_budget_version=request_budget.VERSION, tokenizer_profile_sha256=request_budget.registry_digest(),
+                      tokenizer_profile_version=request_budget.PROFILE_VERSION,
+                      supported_ollama_contexts=config.SUPPORTED_OLLAMA_CONTEXTS,
                       budget_safety=request_budget.SAFETY, budget_edges=request_budget.EDGES, evidence_version=1)
     return {"hash_version": 3, "source_sha256": sources, "runtime_sha256": runtime, "dependencies": dependencies,
             "recognition_contract": {"version": 3, "coordinates": "normalized_1000", "model_coordinates":"explicit_calibrated_profile", "router_stages":["page","regions_if_multiple"], "max_regions": 16, "split_iou_max": .1, "supplement_tasks": 1, "supplement_max_edge": 2400, "output_limits": OUTPUT_LIMITS, "repair_char_limit": REPAIR_CHAR_LIMIT},

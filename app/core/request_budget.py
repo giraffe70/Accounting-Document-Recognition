@@ -16,7 +16,9 @@ from PIL import Image
 from app import config
 from app.core import invocation_trace, model_coordinates
 
-VERSION = 1
+# Budget policy can change independently of the pinned tokenizer assets.
+VERSION = 2
+PROFILE_VERSION = 1
 REVISION = "cc594898137f460bfe9f0759e9844b3ce807cfb5"
 REPOSITORY = "Qwen/Qwen2.5-VL-7B-Instruct"
 TOKENIZERS_VERSION = "0.22.2"
@@ -131,7 +133,7 @@ def prepare_profile(model, backend_url=None, asset_dir=None):
     if template.strip() != QWEN_TEMPLATE.strip():
         raise BudgetError("budget_profile_not_ready", "chat template not supported by reviewed renderer")
     proof = verify_vocabulary(json.loads((folder / "tokenizer.json").read_text(encoding="utf-8")), info)
-    profile = {**identity, "version":VERSION, "tokenizers_version":TOKENIZERS_VERSION, "repository":REPOSITORY,
+    profile = {**identity, "version":PROFILE_VERSION, "tokenizers_version":TOKENIZERS_VERSION, "repository":REPOSITORY,
                "revision":REVISION, "files":files, "vocabulary_proof":proof, "template":template,
                "template_sha256":_sha(template), "default_system":show.get("system", ""),
                "processor":processor, "input_preprocessing":model_coordinates.INPUT_PREPROCESSING,
@@ -150,7 +152,7 @@ def runtime_profile(chat):
         profile = json.loads((folder / "manifest.json").read_text(encoding="utf-8"))
         if "ollama" not in type(underlying).__module__.lower():
             raise ValueError("no reviewed tokenizer/processor profile for this backend")
-        if (profile["version"] != VERSION or tokenizers.__version__ != TOKENIZERS_VERSION or profile["tokenizers_version"] != TOKENIZERS_VERSION or profile["revision"] != REVISION or
+        if (profile["version"] != PROFILE_VERSION or tokenizers.__version__ != TOKENIZERS_VERSION or profile["tokenizers_version"] != TOKENIZERS_VERSION or profile["revision"] != REVISION or
                 profile["repository"] != REPOSITORY or set(profile["files"]) != {"tokenizer.json","tokenizer_config.json"}):
             raise ValueError("profile/tokenizer version mismatch")
         if profile.get("profile_id") != _sha(json.dumps({k:v for k,v in profile.items() if k!="profile_id"}, sort_keys=True)):
@@ -176,13 +178,57 @@ def runtime_profile(chat):
         raise BudgetError("budget_profile_not_ready", str(exc)) from exc
 
 
+def resolve_context(chat):
+    """The service, adapter and explicit SDK options must agree before sending."""
+    underlying = getattr(chat, "bound", chat)
+    model_context = getattr(underlying, "num_ctx", None)
+    try:
+        configured = config.get_ollama_context()
+        config.validate_ollama_context(model_context)
+        bound_options = getattr(chat, "kwargs", {}) or {}
+        if any(key in bound_options for key in ("num_ctx", "num_predict")):
+            raise ValueError("Ollama num_ctx／num_predict 不可放在 SDK 頂層參數")
+        options = bound_options.get("options")
+        if options is not None:
+            if hasattr(options, "model_dump"):
+                options = options.model_dump(exclude_none=True)
+            if not isinstance(options, dict):
+                raise ValueError("Ollama options must be an object")
+        effective = (options or {}).get("num_ctx", model_context)
+        config.validate_ollama_context(effective)
+        if model_context != configured or effective != configured:
+            raise ValueError("模型及 options.num_ctx 必須與 OLLAMA_NUM_CTX 一致")
+        return configured
+    except ValueError as exc:
+        raise BudgetError("budget_profile_not_ready", str(exc), {
+            "configured_context":config.OLLAMA_NUM_CTX, "model_context":model_context,
+            "supported_contexts":list(config.SUPPORTED_OLLAMA_CONTEXTS),
+        }) from exc
+
+
+def policy_summary():
+    from app.core.model_invocation import OUTPUT_LIMITS
+    context = config.get_ollama_context()
+    return {"configured_context":context, "supported_contexts":list(config.SUPPORTED_OLLAMA_CONTEXTS),
+            "policy_version":VERSION, "profile_version":PROFILE_VERSION, "safety_tokens":SAFETY,
+            "output_limits":dict(OUTPUT_LIMITS),
+            "input_limits":{task:context-limit-SAFETY for task,limit in OUTPUT_LIMITS.items()},
+            "hardware_verified":False}
+
+
 def status():
+    summary = {"configured_context":config.OLLAMA_NUM_CTX,
+               "supported_contexts":list(config.SUPPORTED_OLLAMA_CONTEXTS),
+               "policy_version":VERSION, "profile_version":PROFILE_VERSION, "hardware_verified":False}
     try:
         from app.core.model_factory import get_chat_model
-        profile, _ = runtime_profile(get_chat_model("ollama", "qwen2.5vl:7b"))
-        return {"ready":True, "profile_id":profile["profile_id"], "coordinate_boxes_enabled":False}
+        summary.update(policy_summary())
+        chat = get_chat_model("ollama", "qwen2.5vl:7b")
+        resolve_context(chat)
+        profile, _ = runtime_profile(chat)
+        return {**summary, "ready":True, "profile_id":profile["profile_id"], "coordinate_boxes_enabled":False}
     except Exception as exc:
-        return {"ready":False, "reason":str(exc)}
+        return {**summary, "ready":False, "reason":str(exc)}
 
 
 def image_part(context):
@@ -196,6 +242,7 @@ def _text(message):
 
 
 def count(messages, schema, sizes, profile, tokenizer, output_limit, context):
+    config.validate_ollama_context(context)
     system = "\n".join(_text(m) for m in messages if m["role"] == "system") or profile.get("default_system", "")
     rendered = f"<|im_start|>system\n{system}<|im_end|>\n" if system else ""
     for message in messages:
@@ -211,7 +258,9 @@ def count(messages, schema, sizes, profile, tokenizer, output_limit, context):
     visual = sum(f["visual_size"][0] * f["visual_size"][1] // profile["processor"]["factor"]**2 for f in frames)
     specials = profile.get("template_extra_tokens", 64) + len(sizes)*profile.get("image_special_tokens", 16)
     total = text + schema_tokens + visual + specials
-    return {"version":VERSION, "profile_id":profile["profile_id"], "text_tokens":text, "schema_tokens":schema_tokens,
+    return {"version":VERSION, "policy_version":VERSION, "profile_version":PROFILE_VERSION,
+            "supported_contexts":list(config.SUPPORTED_OLLAMA_CONTEXTS),
+            "profile_id":profile["profile_id"], "text_tokens":text, "schema_tokens":schema_tokens,
             "visual_tokens":visual, "template_special_reserve":specials, "estimated_input_tokens":total,
             "output_limit":output_limit, "safety_tokens":SAFETY, "context_limit":context,
             "fits":total + output_limit + SAFETY <= context, "input_sizes":[list(s) for s in sizes],
@@ -228,15 +277,8 @@ def preflight(chat, messages, schema, output_limit, *, task="extract"):
                 for part in message["content"]:
                     part.pop("_final_sha256", None)
         return result, {"version":VERSION,"test_double":True}
+    context = resolve_context(chat)
     profile, tokenizer = runtime_profile(chat)
-    context = getattr(underlying, "num_ctx", None)
-    options = (getattr(chat,"kwargs",{}) or {}).get("options")
-    if options is not None:
-        if hasattr(options,"model_dump"):
-            options = options.model_dump(exclude_none=True)
-        context = options.get("num_ctx", context)
-    if context != 8192:
-        raise BudgetError("budget_profile_not_ready", "reviewed context must remain 8192")
     images = []
     for message in messages:
         content = message.get("content", "")

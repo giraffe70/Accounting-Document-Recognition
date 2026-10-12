@@ -107,6 +107,7 @@ class InvocationTests(unittest.TestCase):
         retry = json.loads(requests[1][-1]["content"])
         self.assertEqual(retry["previous_output_raw"], '{"ok": "wrong"}')
 
+    @patch("app.config.OLLAMA_NUM_CTX", 8192)
     @patch("app.core.request_budget.runtime_profile", return_value=({"profile_id":"offline", "processor":{}},
         type("OfflineTokenizer",(),{"encode":lambda self,text,**kw:type("Encoding",(),{"ids":list(text)})()})()))
     def test_ollama_format_rejection_falls_back_but_generic_error_does_not(self, _profile):

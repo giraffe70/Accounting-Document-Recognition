@@ -33,8 +33,26 @@ PORT = int(os.getenv("PORT", "8090"))
 
 # ── 端點 / 金鑰 ──
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-# 圖像與欄位提示可能超過服務預設的 4096 tokens；保留回覆空間。
-OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "8192"))
+# 圖片、完整 OCR 與欄位契約共用 context；所有階段使用同一設定。
+SUPPORTED_OLLAMA_CONTEXTS = (8192, 12288, 16384)
+
+
+def validate_ollama_context(value):
+    if type(value) is not int or value not in SUPPORTED_OLLAMA_CONTEXTS:
+        raise ValueError("OLLAMA_NUM_CTX 必須為 8192、12288 或 16384")
+    return value
+
+
+try:
+    OLLAMA_NUM_CTX = validate_ollama_context(int(os.getenv("OLLAMA_NUM_CTX", "16384")))
+except ValueError as exc:
+    raise ValueError("OLLAMA_NUM_CTX 必須為 8192、12288 或 16384") from exc
+
+
+def get_ollama_context():
+    return validate_ollama_context(OLLAMA_NUM_CTX)
+
+
 # 自架 H200 vLLM 推論伺服器（OpenAI 相容 API；規格見 C:\Dev\H200\docs\api-usage-prompt.md）
 # 過渡期經 SSH 橋接走 127.0.0.1:18000，防火牆開通後改 192.168.10.105:22003（皆需 VPN）
 # 同一端點同時提供 qwen3-32b（分類）與 qwen2.5-vl-7b（結構化），不需拆雙端點

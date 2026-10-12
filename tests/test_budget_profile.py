@@ -58,7 +58,7 @@ class BudgetProfileTests(unittest.TestCase):
         show = self._show()
         profile = {
             **self._identity(),
-            "version": request_budget.VERSION,
+            "version": request_budget.PROFILE_VERSION,
             "tokenizers_version": request_budget.TOKENIZERS_VERSION,
             "repository": request_budget.REPOSITORY,
             "revision": request_budget.REVISION,
@@ -227,6 +227,25 @@ class BudgetProfileTests(unittest.TestCase):
                     _OllamaChat(num_ctx=1024), [{"role": "user", "content": "synthetic"}], None, 2048
                 )
         self.assertEqual(caught.exception.code, "budget_profile_not_ready")
+
+    def test_version_one_assets_remain_unchanged_across_context_policy_upgrade(self):
+        with tempfile.TemporaryDirectory(dir=self.TEST_TMP_DIR) as temporary:
+            folder = Path(temporary)
+            old = self._write_manifest(folder)
+            original = {path.name:path.read_bytes() for path in folder.iterdir()}
+            self._runtime(folder)
+            self.assertEqual(old["version"], 1)
+            self.assertEqual(request_budget.PROFILE_VERSION, 1)
+            self.assertEqual(request_budget.VERSION, 2)
+            with patch("requests.get", side_effect=AssertionError("must not download")) as download:
+                for context in config.SUPPORTED_OLLAMA_CONTEXTS:
+                    with self.subTest(context=context), patch.object(config, "OLLAMA_NUM_CTX", context):
+                        chat = _OllamaChat(num_ctx=context)
+                        self.assertEqual(request_budget.resolve_context(chat), context)
+                        loaded, _ = request_budget.runtime_profile(chat)
+                        self.assertEqual(loaded["profile_id"], old["profile_id"])
+                download.assert_not_called()
+            self.assertEqual({path.name:path.read_bytes() for path in folder.iterdir()}, original)
 
     def test_oversized_second_round_repair_fragment_is_omitted_but_original_stays(self) -> None:
         chat = _OllamaChat()

@@ -7,10 +7,15 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.core import invocation_trace, model_invocation
-from app import validation
+from app import config, validation
 
 
 class StructuredRetryContractTests(unittest.TestCase):
+    def setUp(self):
+        context = patch.object(config, "OLLAMA_NUM_CTX", 8192)
+        context.start()
+        self.addCleanup(context.stop)
+
     def test_large_first_response_is_bounded_in_repair_and_kept_in_trace(self):
         requests = []
         oversized = '{"bad":"' + ("x" * 8000) + '"}'

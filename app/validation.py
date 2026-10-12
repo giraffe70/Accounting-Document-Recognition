@@ -421,7 +421,7 @@ def create_run(payload: dict):
                     "warmup": bool(payload.get("warmup", False)), "timeout_seconds": timeout,
                     "max_edge": max_edge, "concurrency": 1,
                     **model_invocation.source_versions(),
-                    "model_parameters": {"temperature": 0, "seed": 42, "num_ctx":config.OLLAMA_NUM_CTX, "output_limits":model_invocation.OUTPUT_LIMITS},
+                    "model_parameters": {"temperature": 0, "seed": 42, "num_ctx":config.get_ollama_context(), "output_limits":model_invocation.OUTPUT_LIMITS},
                     "environment": {"python": platform.python_version(), "platform": platform.platform(),
                                     "processor": platform.processor()}}
         tasks = []
@@ -1461,7 +1461,7 @@ def _csv_files(data):
           "source_region": json.dumps((result.get("origin") or voucher.get("origin") or {}).get("region")),
           "origin_json": json.dumps(result.get("origin") or voucher.get("origin") or {}, ensure_ascii=False),
           "quality_json": json.dumps(voucher.get("quality") or {}, ensure_ascii=False),
-          "recognition_diagnostics_json":json.dumps(voucher.get("recognition_diagnostics") or {},ensure_ascii=False),
+          "recognition_diagnostics_json":json.dumps(voucher.get("recognition_diagnostics") or result.get("recognition_diagnostics") or {},ensure_ascii=False),
           "box_issues_json": json.dumps(voucher.get("box_issues") or [], ensure_ascii=False),
           "sha256": (result.get("origin") or voucher.get("origin") or {}).get("image_sha256", ""),
           "is_latest":result.get("is_latest", False), "result_contract_version":result.get("result_contract_version"),

@@ -14,6 +14,9 @@ from app.core import invocation_trace, model_coordinates, model_invocation, pipe
 
 class BudgetIntegrationTests(unittest.TestCase):
     def setUp(self):
+        context = patch.object(config, "OLLAMA_NUM_CTX", 8192)
+        context.start()
+        self.addCleanup(context.stop)
         self.tmp = tempfile.TemporaryDirectory(dir=config.DATA_DIR / "test-tmp-plan")
         self.addCleanup(self.tmp.cleanup)
         self.folder = Path(self.tmp.name)
