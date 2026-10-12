@@ -277,7 +277,8 @@ def enhancement(source, lines, target):
     skew = .5 <= abs(angle) <= 7 and sum(abs(a-angle) < .5 for a in angles) >= 3
     low = bool(contrasts) and float(np.median(contrasts)) < 45
     blur = bool(sharpness) and float(np.median(sharpness)) < 20
-    info = {"source_size": [w,h], "low_text_contrast": low, "skew_degrees": angle if skew else 0,
+    info = {"source_size": [w,h], "low_text_contrast": low, "text_contrast": float(np.median(contrasts)) if contrasts else None,
+            "skew_degrees": angle if skew else 0,
             "blur_warning": blur, "matrix": [[1,0,0],[0,1,0]], "applied": False}
     if target is None or not low and not skew:
         return None, info

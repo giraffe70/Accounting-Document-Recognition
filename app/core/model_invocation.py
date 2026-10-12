@@ -259,10 +259,12 @@ def source_versions() -> dict:
     prompt_sources = {key: sources[key] for key in ("core/prompts.py", "core/doc_types.py", "core/doc_router.py")}
     parameters = {"ollama_num_ctx": config.get_ollama_context(), "output_limits": OUTPUT_LIMITS, "repair_char_limit": REPAIR_CHAR_LIMIT}
     from app.core import model_coordinates
-    from app.core import page_ocr, ocr_cache, ocr_engine, recognition_timing
+    from app.core import page_ocr, ocr_cache, ocr_engine, recognition_timing, supplement, supplement_roi, prompt_evidence
     parameters.update(coordinate_profiles_sha256=model_coordinates.registry_digest(), layout_version=3,
                       page_ocr_version=page_ocr.VERSION, ocr_cache_version=ocr_cache.VERSION,
                       ocr_engine_signature=ocr_engine.runtime_signature(), timings_version=recognition_timing.VERSION)
+    parameters.update(supplement_policy_version=supplement.POLICY_VERSION, supplement_roi_version=supplement_roi.VERSION,
+                      prompt_evidence_version=prompt_evidence.VERSION)
     parameters.update(request_budget_version=request_budget.VERSION, tokenizer_profile_sha256=request_budget.registry_digest(),
                       tokenizer_profile_version=request_budget.PROFILE_VERSION,
                       supported_ollama_contexts=config.SUPPORTED_OLLAMA_CONTEXTS,

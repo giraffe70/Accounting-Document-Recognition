@@ -78,17 +78,14 @@ class SupplementContractV3Tests(unittest.TestCase):
         self.assertTrue(evidence["selected"])
         self.assertTrue(evidence["independent_evidence"])
 
-    def test_entries_without_original_text_and_position_evidence_remain_unadopted(self):
+    def test_empty_journal_without_debit_credit_headers_and_rows_does_not_trigger_reread(self):
         data = _data("journal_voucher", {"voucher_id": "A911", "date": "2026/10/11"})
-        candidate = {"account_name": "辦公用品", "debit": 1000, "credit": None}
-        with patch("app.core.pipeline.reread_document", return_value={"fields": {}, "entries": [candidate]}) as reread, \
+        with patch("app.core.pipeline.reread_document") as reread, \
                 invocation_trace.capture():
             supplement.apply(data, "journal_voucher", None, "synthetic.png", mode="ocr_text",
-                             ocr_text="會計傳票", context={})
-        reread.assert_called_once()
+                             ocr_text="會計傳票 借方 辦公用品 100", context={})
+        reread.assert_not_called()
         self.assertEqual(data["entries"], [])
-        self.assertFalse(data["field_evidence"]["entries[0]"][0]["selected"])
-        self.assertTrue(any("entries" in warning and "待人工確認" in warning for warning in data["validation_warnings"]))
 
     def test_items_are_reread_and_only_adopted_with_matching_row_text(self):
         data = _data("invoice", {"voucher_id": "AB12345678", "date": "2026/10/11",

@@ -21,6 +21,8 @@
 
 OCR 計時與快取驗收範圍：快取以每頁結果獨立保存，不跨模型組合、重複次數或執行嘗試共用；一般上傳沿用 `source_token`，原圖內容改變或 OCR 引擎簽章不同時會失效。離線契約測試只驗證欄位與呈現，不代表實測節省時間。部署含計時或快取的新版本時，完整重新啟動服務並建立新批次驗收；頁面總耗時不含排隊，`ocr_init_seconds` 是實際 OCR 時間的子集，不應再重複加總。
 
+補讀先按類型、已印標籤、格式及明確衝突決定目標；整頁低對比或傾斜只留下品質提示。發票與收據的核心缺值及有完整表頭／資料列的明細、分錄採保守白名單，其他可空欄位不因空值重讀。補讀區域先映射已有 OCR；新裁切只有在目標文字不清且可獲得原生細節或局部改善時才增加 OCR，增強副本不得取代原圖獨立證據。trace 的 `supplement_decision`、`supplement_region`、`supplement_ocr_decision`、`supplement_result` 可核對跳過原因、座標來源、新 OCR 請求與未採用原因。新策略需用新批次與人工覆核基準比較準確率和端到端耗時。
+
 前端離線檢查可執行 `node --check app/static/js/validation.js` 與 `python -m unittest tests.test_frontend_form`；驗證 API／匯出契約使用 `scripts\verify.bat -Scope validation`。這些檢查不啟動真實模型，也不替代獨立人工證據核對。
 
 Ollama 輸出上限使用 `ChatOllama` 模型副本的 `num_predict`，由套件轉為 SDK 的 `options.num_predict`；不可使用 `bind(num_predict=...)`，它會把參數傳到 `Client.chat()` 頂層並造成 `TypeError`。`tests/test_retry_contracts.py` 與 `tests/test_recognition_optimization.py` 以實際安裝的 `ChatOllama`、保留 SDK 方法簽名的網路替身驗證參數、Schema 降級與設定保留，避免只有寬鬆模擬模型通過卻在正式套件失敗。

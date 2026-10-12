@@ -2,16 +2,17 @@
 from __future__ import annotations
 from PIL import Image
 
-VERSION = 1
+VERSION = 2
 
 
 def assemble(ocr_text="", evidence=None, image_path=None):
     evidence = evidence or {}
     # Reread positions belong to the ROI, not the original page. Keep copies apart.
+    supplemental = "supplement_prompt_lines" in evidence or "supplement_ocr_lines" in evidence
     lines = evidence.get("supplement_prompt_lines") if "supplement_prompt_lines" in evidence else evidence.get("supplement_ocr_lines") if "supplement_ocr_lines" in evidence else evidence.get("ocr_lines")
     result = {k:evidence[k] for k in ("company", "company_name", "qr") if k in evidence}
     if lines:
-        size = evidence.get("supplement_ocr_size") if "supplement_ocr_lines" in evidence else evidence.get("ocr_size")
+        size = evidence.get("supplement_ocr_size") if supplemental else evidence.get("ocr_size")
         if size:
             w, h = size
         else:
@@ -26,7 +27,10 @@ def assemble(ocr_text="", evidence=None, image_path=None):
             normalized = [round(box[i]*1000/(w if i%2==0 else h)) for i in range(4)] if box and len(box)==4 else None
             compact.append({"id":index,"text":line.get("text", ""),"box":normalized})
         result["ocr_lines"] = compact
-        result["ocr_frame"] = "supplement_roi_normalized_1000" if "supplement_ocr_lines" in evidence else "document_normalized_1000"
+        result["ocr_frame"] = "supplement_roi_normalized_1000" if supplemental else "document_normalized_1000"
+        if supplemental:
+            result["ocr_source"] = evidence.get("supplement_prompt_source", evidence.get("supplement_ocr_source", "unknown"))
+            result["document_region"] = evidence.get("supplement_region")
         if evidence.get("ocr_copy_conflict"):
             result["ocr_copy_conflict"] = True
     else:

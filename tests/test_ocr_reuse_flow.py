@@ -86,7 +86,7 @@ class PipelineReuseIntegrationTests(unittest.TestCase):
                      "dt_polys": [[[10, y], [300, y], [300, y+20], [10, y+20]]
                                   for y in (10, 50, 90, 140)]}]
 
-    def test_upload_layout_then_review_copy_and_supplement_reuse_original_ocr(self):
+    def test_upload_review_copy_reuses_layout_ocr_for_invalid_tax_id_target(self):
         # Exercise the real upload/preparation and extraction pipeline; only the
         # Paddle runtime and chat are fakes. Human review would copy the PNG in
         # save_voucher, so this test performs the identical byte-preserving copy.
@@ -116,10 +116,10 @@ class PipelineReuseIntegrationTests(unittest.TestCase):
             self.assertEqual(fake.sizes.count((1000, 800)), 1)
             self.assertEqual(fake.sizes.count((720, 576)), 1)
             reread.assert_called_once()
+            self.assertEqual(reread.call_args.args[3], ["tax_id"])
             events = [event for event in trace if event.get("kind") == "ocr_result"]
-            self.assertEqual([event["purpose"] for event in events], ["extraction", "supplement_original"])
-            self.assertTrue(all(event["cache_hit"] for event in events))
-            self.assertEqual(events[0]["result_source"], events[1]["result_source"])
+            self.assertEqual([event["purpose"] for event in events], ["extraction"])
+            self.assertTrue(events[0]["cache_hit"])
             self.assertEqual(result.total_amount, 100)
 
     def test_real_batch_phases_share_raw_ocr_but_new_attempt_is_cold(self):
@@ -143,7 +143,7 @@ class PipelineReuseIntegrationTests(unittest.TestCase):
                 validation._recognize({**payload, "id": "attempt-2"})
             self.assertEqual(fake.sizes.count((1000, 800)), 2)
             self.assertEqual(fake.sizes.count((720, 576)), 2)
-            self.assertEqual(result["timings"]["ocr_cache_hits"], 2)
+            self.assertEqual(result["timings"]["ocr_cache_hits"], 1)
             self.assertEqual(result["timings"]["ocr_cache_misses"], 2)
             self.assertEqual(result["timings"]["supplement_ocr_seconds"], 0)
 
@@ -185,32 +185,18 @@ class PipelineReuseIntegrationTests(unittest.TestCase):
                 loader.assert_not_called()
             self.assertEqual(fake.sizes.count((1000, 800)), 1)
 
-    def test_cached_native_evidence_and_enhancement_conflict_stay_separate(self):
+    def test_generic_sum_and_page_skew_do_not_trigger_low_yield_reocr(self):
         from app.core.ocr_engine import PaddleOCREngine
         with _test_tempdir() as temporary:
             root = Path(temporary)
             source = root / "source.png"
             Image.new("RGB", (1000, 800), "white").save(source)
             fake = self.FakePaddle()
-            predict = fake.predict
-
-            def changed_predict(path):
-                result = predict(path)
-                if "enhanced" in Path(path).stem:
-                    result[0]["rec_texts"][-1] = "合計 新臺幣 200 元"
-                return result
-
-            def enhance(path, _lines, target):
-                with Image.open(path) as image:
-                    image.convert("L").point(lambda p: p // 2).save(target)
-                return str(target), {"applied": True}
-
             data = {"fields": {"tax_id": None, "total_amount": 50, "currency": "TWD"},
                     "items": [{"description": "文具"}], "field_evidence": {}, "validation_warnings": []}
             context = {"ocr_enabled": True, "image_conditions": {"skew_degrees": 1}}
             with patch("app.core.ocr_engine._get_paddle", return_value=fake), \
-                 patch.object(fake, "predict", side_effect=changed_predict), \
-                 patch("app.core.image_evidence.enhancement", side_effect=enhance), \
+                 patch("app.core.image_evidence.enhancement") as enhance, \
                  patch("app.core.pipeline.reread_fields", return_value={"total_amount": 100}), \
                  settings_store.isolated_settings({"ocr": "paddle/pp-ocrv5"}), \
                  ocr_cache.scope(root / "cache"), invocation_trace.capture() as trace:
@@ -218,10 +204,10 @@ class PipelineReuseIntegrationTests(unittest.TestCase):
                 supplement.apply(data, "receipt", object(), str(source), mode="image",
                                  ocr_text=PaddleOCREngine.plain_text(lines), context=context)
             events = [event for event in trace if event.get("kind") == "ocr_result"]
-            self.assertEqual([event["cache_hit"] for event in events], [False, True, False])
-            self.assertTrue(context["ocr_copy_conflict"])
+            self.assertEqual([event["cache_hit"] for event in events], [False])
+            enhance.assert_not_called()
+            self.assertNotIn("ocr_copy_conflict", context)
             self.assertEqual(data["fields"]["total_amount"], 50)
-            self.assertFalse(data["field_evidence"]["fields.total_amount"][-1]["selected"])
 
 
 class PageChildTimingAndScopeTests(unittest.TestCase):
