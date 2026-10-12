@@ -276,6 +276,92 @@
     toast(`已合併（主頁 #${primary}，${d.attachments} 附頁）`); loadList(); openReview(primary);
   });
 
+  // ── 刪除 ──
+  function isAdminUser() { return !!currentUser && currentUser.role === "admin"; }
+  function deleteScopeText(p) {
+    const parts = [];
+    if (p.voucher_count) parts.push(`${p.voucher_count} 張單據`);
+    if (p.source_page_count) parts.push(`${p.source_page_count} 個原始掃描頁`);
+    const extra = [];
+    if (p.attachment_count) extra.push(`含 ${p.attachment_count} 張附頁`);
+    if (p.confirmed_count) extra.push(`其中 ${p.confirmed_count} 張已確認`);
+    return parts.join("、") + (extra.length ? `（${extra.join("，")}）` : "");
+  }
+  // 由後端預覽組出可選範圍；「整份上傳檔」只在確實比「此單據」多時才提供
+  function deleteChoices(data) {
+    const previews = (data && data.previews) || {};
+    const can = (data && data.can_delete) || {};
+    const choices = [];
+    const add = (scope, label, preview) => {
+      const allowed = can[scope] === true;
+      const warning = !preview.confirmed_count ? ""
+        : allowed ? "含已確認的憑證：刪除後日記帳與報表將不再包含它們。"
+          : "含已確認的憑證，只有管理員可以刪除。";
+      choices.push({ scope, label, summary: deleteScopeText(preview), allowed, warning });
+    };
+    if (previews.record) add("record", "只刪除此單據", previews.record);
+    if (previews.upload && previews.record && previews.upload.ids.length > previews.record.ids.length) {
+      add("upload", "刪除整份上傳檔", previews.upload);
+    }
+    return choices;
+  }
+  let deleteTargetId = null;
+  let deleteChoiceList = [];
+  function closeDeleteModal() { $("deleteModal").classList.add("hidden"); deleteTargetId = null; deleteChoiceList = []; }
+  function selectedDeleteChoice() {
+    const radio = document.querySelector('input[name="deleteScope"]:checked');
+    return deleteChoiceList.find((c) => radio && c.scope === radio.value) || null;
+  }
+  function updateDeleteConfirm() {
+    const choice = selectedDeleteChoice();
+    $("deleteConfirm").disabled = !choice || !choice.allowed;
+  }
+  async function openDelete() {
+    if (!currentId || editBusy) return;
+    const id = currentId;
+    $("deleteLoading").classList.remove("hidden"); $("deleteBody").classList.add("hidden");
+    $("deleteConfirm").disabled = true;
+    $("deleteModal").classList.remove("hidden");
+    try {
+      const resp = await fetch(`/api/vouchers/${id}/delete-preview`);
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(errText(data, "無法取得刪除範圍"));
+      if (data.busy) throw new Error("匯入或提取進行中，請稍後再刪除");
+      deleteTargetId = id;
+      deleteChoiceList = deleteChoices(data);
+      $("deleteChoices").innerHTML = deleteChoiceList.map((c, i) => `
+        <label class="del-opt"><input type="radio" name="deleteScope" value="${c.scope}" ${i === 0 ? "checked" : ""} ${c.allowed ? "" : "disabled"}>
+          <span><b>${esc(c.label)}</b><br>${esc(c.summary)}${c.warning ? `<br><span class="del-warn">${esc(c.warning)}</span>` : ""}</span></label>`).join("");
+      document.querySelectorAll('input[name="deleteScope"]').forEach((r) => r.addEventListener("change", updateDeleteConfirm));
+      // 預設選取第一個可用範圍
+      const firstAllowed = deleteChoiceList.findIndex((c) => c.allowed);
+      const radios = document.querySelectorAll('input[name="deleteScope"]');
+      if (firstAllowed >= 0 && radios[firstAllowed]) radios[firstAllowed].checked = true;
+      $("deleteLoading").classList.add("hidden"); $("deleteBody").classList.remove("hidden");
+      updateDeleteConfirm();
+    } catch (err) { closeDeleteModal(); alert(err.message || "無法取得刪除範圍"); }
+  }
+  async function confirmDelete() {
+    const choice = selectedDeleteChoice();
+    const id = deleteTargetId;
+    if (!choice || !choice.allowed || id == null) return;
+    $("deleteConfirm").disabled = true;
+    let resp, d = {};
+    try {
+      resp = await fetch(`/api/vouchers/${id}?scope=${encodeURIComponent(choice.scope)}`, { method: "DELETE" });
+      d = await resp.json().catch(() => ({}));
+    } catch (err) { updateDeleteConfirm(); alert("刪除失敗：" + err.message); return; }
+    if (!resp.ok || d.ok === false) { updateDeleteConfirm(); alert(errText(d, "刪除失敗")); return; }   // 失敗時保留目前畫面
+    closeDeleteModal();
+    if (currentId != null && (d.deleted_ids || []).includes(currentId)) clearReview();
+    toast(`已刪除：${choice.summary}`);
+    loadList(); refreshStats();
+    if (d.cleanup_failed && d.cleanup_failed.length) alert("資料已刪除，但部分檔案未能清理（可稍後手動處理）：\n" + d.cleanup_failed.join("\n"));
+  }
+  $("btnDelete").addEventListener("click", openDelete);
+  $("deleteConfirm").addEventListener("click", confirmDelete);
+  $("deleteCancel").addEventListener("click", closeDeleteModal);
+
   // ── 審核編輯 ──
   async function openReview(id) {
     if (editBusy) return;
@@ -391,6 +477,8 @@
     $("btnReturnImport").classList.toggle("hidden", !editable);
     $("btnConfirm").classList.toggle("hidden", !editable);
     $("btnConfirm").textContent = status === "confirmed" ? "✅ 已確認（修改後可重新確認）" : "✅ 確認完成";
+    // 已確認的憑證只有管理員可刪除（後端同樣強制）
+    $("btnDelete").classList.toggle("hidden", status === "confirmed" && !isAdminUser());
   }
 
   function applyRecordStatus(record) {

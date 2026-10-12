@@ -49,6 +49,23 @@ def analyze_pages(file_path: str) -> list[Voucher]:
     return out
 
 
+def managed_upload_name(file_path: str) -> str:
+    """Name of an upload this app saved directly under UPLOAD_DIR, else "".
+
+    Only such files may be deleted with their records; files imported from an
+    external scan directory belong to the user and are never recorded."""
+    import re
+
+    from app import config
+    try:
+        path = Path(file_path).resolve()
+        if path.parent == config.UPLOAD_DIR.resolve() and re.fullmatch(r"[a-f0-9]{32}\.[a-z0-9]+", path.name):
+            return path.name
+    except OSError:
+        pass
+    return ""
+
+
 def prepare_pages(file_path: str) -> list[Voucher]:
     """Route immutable native pages and prepare separate documents for appearance review."""
     from app.core import page_layout, invocation_trace, model_invocation
@@ -56,6 +73,10 @@ def prepare_pages(file_path: str) -> list[Voucher]:
     import uuid
     images = render_to_images(file_path)
     out = []
+    # One id per uploaded file ties its source pages and documents together for deletion.
+    group = {"source_group_id": uuid.uuid4().hex}
+    if managed_upload_name(file_path):
+        group["upload_file"] = managed_upload_name(file_path)
     for index, source in enumerate(images):
         token = uuid.uuid4().hex
         folder = config.UPLOAD_DIR / "_pages" / token
@@ -65,7 +86,7 @@ def prepare_pages(file_path: str) -> list[Voucher]:
             input_path = page_layout.crop(source, {"box": [0,0,1000,1000]}, folder / "input.png", max_edge=1180)
             layout = page_layout.detect(input_path, native_path=source)
             source_origin = {**page_layout.origin(source, {"box": [0,0,1000,1000]}, index+1),
-                             "record_role": "source_page", "source_token": token, "layout": layout}
+                             "record_role": "source_page", "source_token": token, "layout": layout, **group}
             parent = Voucher.model_validate({"doc_type_key": layout["type"], "origin": source_origin,
                 "quality": {"version": 1, "state": "needs_review" if not layout["auto_split"] else "usable", "content_kind": layout["content_kind"], "issues": layout["issues"]}})
             parent.source_file = f"{Path(file_path).name} p{index+1}"
@@ -76,7 +97,7 @@ def prepare_pages(file_path: str) -> list[Voucher]:
             for document_index, region in enumerate(layout["regions"]):
                 crop_path = page_layout.crop(source, region, folder / f"document_{document_index}.png")
                 child = Voucher.model_validate({"doc_type_key": region["type"], "doc_type": doc_types.get(region["type"])["label"],
-                    "origin": {**page_layout.origin(source, region, index+1), "source_token": token, "document_index": document_index, "layout_fallback":layout.get("fallback_reason")},
+                    "origin": {**page_layout.origin(source, region, index+1), "source_token": token, "document_index": document_index, "layout_fallback":layout.get("fallback_reason"), **group},
                     "quality": {"version": 1, "state": "unassessed", "content_kind": layout["content_kind"], "issues": []}})
                 child.source_file = parent.source_file
                 child.source_image = crop_path

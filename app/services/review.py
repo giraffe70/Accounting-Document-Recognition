@@ -454,6 +454,11 @@ def split_voucher(rec_id: int, box):
         from app.core import page_layout
         v.origin = page_layout.origin(p, {"box": [round(x1*1000), round(y1*1000), round(x2*1000), round(y2*1000)], "rotate": 0}, json.loads(rec.current_json).get("origin", {}).get("page_no", 1))
     v.origin["source_token"] = source_token
+    # Keep the upload group so "delete whole upload" also reaches manually split documents.
+    parent_origin = json.loads(rec.current_json).get("origin") or {}
+    for key in ("source_group_id", "upload_file"):
+        if parent_origin.get(key):
+            v.origin[key] = parent_origin[key]
     new_rec = save_voucher(v, company=rec.company, status=ReviewStatus.prepared,
                            source_parent_id=rec.id if rec.record_role == "source_page" else rec.source_parent_id)
     # 新憑證已建立，才把該區從原圖抹掉（先建後抹：中途失敗不會兩邊都沒有）
@@ -730,3 +735,196 @@ def alignment_pairs():
             pairs.append({"id": rec.id, "ai": json.loads(rec.ai_json),
                           "corrected": json.loads(rec.current_json)})
     return pairs
+
+
+# ── 刪除 ──────────────────────────────────────────────────────────
+class DeleteForbidden(PermissionError):
+    """目前使用者不得刪除（例如非管理員刪除已確認憑證）。"""
+
+
+DELETE_SCOPES = ("record", "upload")
+
+
+def _origin_of(rec) -> dict:
+    try:
+        return json.loads(rec.current_json).get("origin") or {}
+    except (TypeError, ValueError):
+        return {}
+
+
+def _child_records(session, parent_ids):
+    if not parent_ids:
+        return []
+    return session.exec(select(VoucherRecord).where(VoucherRecord.source_parent_id.in_(list(parent_ids)))).all()
+
+
+def _delete_targets(session, rec, scope: str) -> dict:
+    """刪除 rec 時一併移除的紀錄。
+
+    record：目前單據；若為來源頁則連同其子單據；若刪的是最後一張子單據，
+    且來源頁已自動分割（前端不顯示），一併移除，避免留下看不見的孤兒。
+    upload：同一個上傳檔（source_group_id）的所有來源頁與單據；舊資料沒有
+    source_group_id 時，退回同一來源頁及其子單據，不以檔名猜測群組。"""
+    if scope not in DELETE_SCOPES:
+        raise ValueError("刪除範圍不合法")
+    found = {rec.id: rec}
+    if scope == "upload":
+        root_id = rec.id if rec.record_role == "source_page" else rec.source_parent_id
+        root = session.get(VoucherRecord, root_id) if root_id is not None else None
+        if root:
+            found[root.id] = root
+        group = _origin_of(rec).get("source_group_id")
+        if group:
+            for other in session.exec(select(VoucherRecord).where(VoucherRecord.current_json.contains(group))).all():
+                if _origin_of(other).get("source_group_id") == group:
+                    found[other.id] = other
+    for child in _child_records(session, [r.id for r in found.values() if r.record_role == "source_page"]):
+        found[child.id] = child
+    # 最後一張子單據被刪後，已自動分割（隱藏）的來源頁沒有用途，一併移除。
+    for parent_id in {r.source_parent_id for r in found.values() if r.source_parent_id is not None} - set(found):
+        parent = session.get(VoucherRecord, parent_id)
+        if not parent or parent.record_role != "source_page":
+            continue
+        layout = _origin_of(parent).get("layout") or {}
+        if layout.get("auto_split") is True and not [c for c in _child_records(session, [parent_id]) if c.id not in found]:
+            found[parent.id] = parent
+    return found
+
+
+def _delete_summary(targets: dict, scope: str, rec) -> dict:
+    records = list(targets.values())
+    confirmed = [r for r in records if r.status == ReviewStatus.confirmed]
+    return {
+        "scope": scope, "record_id": rec.id, "ids": sorted(targets),
+        "voucher_count": len([r for r in records if r.record_role != "source_page"]),
+        "source_page_count": len([r for r in records if r.record_role == "source_page"]),
+        "confirmed_count": len(confirmed),
+        "attachment_count": sum(len(json.loads(r.attachments or "[]")) for r in records),
+        "requires_admin": bool(confirmed),
+    }
+
+
+def delete_preview(rec_id: int, scope: str) -> Optional[dict]:
+    """刪除前預覽影響範圍；不改動任何資料。"""
+    with get_session() as s:
+        rec = s.get(VoucherRecord, rec_id)
+        if not rec:
+            return None
+        return _delete_summary(_delete_targets(s, rec, scope), scope, rec)
+
+
+def _still_referenced(session, needle: str) -> bool:
+    return session.exec(select(VoucherRecord.id).where(VoucherRecord.current_json.contains(needle)).limit(1)).first() is not None
+
+
+def _cleanup_deleted_files(deleted: list) -> tuple:
+    """刪除紀錄後清理應用程式自己管理的檔案；失敗只回報，不中斷。
+
+    只動 uploads/pages、uploads/_pages、data/recognition 內的路徑，以及 uploads/
+    頂層由本系統存下的上傳檔（32 位 hex 檔名）；外部掃描來源目錄永不處理。
+    其他紀錄仍引用的 token／上傳檔會保留。"""
+    import re
+    from pathlib import Path
+
+    upload_dir = config.UPLOAD_DIR.resolve()
+    roots = [upload_dir / "pages", upload_dir / "_pages", (config.DATA_DIR / "recognition").resolve()]
+    removed, failed = 0, []
+
+    def remove(path):
+        nonlocal removed
+        try:
+            target = Path(path).resolve()
+            if not any(target != root and target.is_relative_to(root) for root in roots):
+                failed.append(f"{path}: 不在可清理範圍")
+                return
+            if target.is_dir():
+                shutil.rmtree(target)
+            elif target.exists():
+                target.unlink()
+            else:
+                return
+            removed += 1
+        except OSError as exc:
+            failed.append(f"{path}: {exc}")
+
+    ids = {item["id"] for item in deleted}
+    pages = upload_dir / "pages"
+    names = [p.name for p in pages.iterdir()] if pages.is_dir() else []
+    for item in deleted:
+        for rel in [item["image_path"], *item["attachments"]]:
+            if rel:
+                remove(upload_dir / rel)
+        prefix = re.compile(rf"^{item['id']}(?=[._])")
+        for name in names:
+            if prefix.match(name):
+                remove(pages / name)
+        remove(upload_dir / "_pages" / f"source_{item['id']}")
+
+    tokens = {item["origin"].get("source_token") for item in deleted}
+    uploads = {item["origin"].get("upload_file") for item in deleted}
+    with get_session() as s:
+        for rec_id in ids:
+            if not _child_records(s, [rec_id]):
+                remove(config.DATA_DIR / "recognition" / str(rec_id))
+        for token in tokens:
+            if isinstance(token, str) and re.fullmatch(r"[a-f0-9]{32}", token) and not _still_referenced(s, token):
+                remove(upload_dir / "_pages" / token)
+        for name in uploads:
+            if not (isinstance(name, str) and re.fullmatch(r"[a-f0-9]{32}\.[a-z0-9]+", name)) or _still_referenced(s, name):
+                continue
+            source = upload_dir / name
+            try:
+                if source.is_file() and source.parent == upload_dir:
+                    source.unlink()
+                    removed += 1
+            except OSError as exc:
+                failed.append(f"{source}: {exc}")
+            rendered = re.compile(rf"^{re.escape(Path(name).stem)}_p\d+\.png$")
+            render_dir = upload_dir / "_pages"
+            for page in (render_dir.iterdir() if render_dir.is_dir() else []):
+                if page.is_file() and rendered.match(page.name):
+                    remove(page)
+    return removed, failed
+
+
+def _write_delete_audit(actor: str, scope: str, requested_id: int, deleted: list) -> None:
+    """只記錄誰、何時、刪了哪些紀錄與狀態；不保留影像或欄位內容。"""
+    entry = {"time": datetime.now().isoformat(timespec="seconds"), "actor": actor, "scope": scope,
+             "requested_id": requested_id,
+             "records": [{"id": d["id"], "role": d["role"], "status": d["status"]} for d in deleted]}
+    try:
+        config.LOG_DIR.mkdir(parents=True, exist_ok=True)
+        with open(config.LOG_DIR / "deletions.jsonl", "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
+def delete_vouchers(rec_id: int, scope: str, *, is_admin: bool = False, actor: str = "") -> Optional[dict]:
+    """刪除紀錄並清理其檔案。已確認憑證僅管理員可刪（DeleteForbidden）。"""
+    import logging
+    with get_session() as s:
+        rec = s.get(VoucherRecord, rec_id)
+        if not rec:
+            return None
+        targets = _delete_targets(s, rec, scope)
+        if not is_admin and any(t.status == ReviewStatus.confirmed for t in targets.values()):
+            raise DeleteForbidden("範圍內含已確認的憑證，只有管理員可以刪除")
+        deleted = [{"id": t.id, "role": t.record_role, "status": t.status.value, "image_path": t.image_path,
+                    "attachments": json.loads(t.attachments or "[]"), "origin": _origin_of(t)}
+                   for t in targets.values()]
+        # 不在刪除範圍內卻指向被刪來源頁的紀錄：解除關聯，避免懸空外鍵。
+        for orphan in _child_records(s, list(targets)):
+            if orphan.id not in targets:
+                orphan.source_parent_id = None
+                s.add(orphan)
+        for target in targets.values():
+            s.delete(target)
+        s.commit()
+    removed, failed = _cleanup_deleted_files(deleted)
+    _write_delete_audit(actor, scope, rec_id, deleted)
+    log = logging.getLogger("pdf_scan.review")
+    log.info("刪除憑證 %s（範圍 %s，操作者 %s），清理 %d 個檔案", sorted(targets), scope, actor or "-", removed)
+    if failed:
+        log.warning("刪除後檔案清理失敗：%s", failed)
+    return {"ok": True, "deleted_ids": sorted(targets), "files_removed": removed, "cleanup_failed": failed}

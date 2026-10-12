@@ -96,6 +96,12 @@ table.items th, table.items td { border: 1px solid var(--border); padding: 4px 8
 .btn.btn-sm { padding: 3px 9px; font-size: 12px; }
 .btn.danger { color: var(--red); border-color: var(--red); }
 .btn.danger:hover { background: #fdecec; }
+.btn.danger:disabled { opacity: .5; cursor: not-allowed; background: transparent; }
+/* 刪除確認：範圍選項 */
+.del-opt { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; padding: 8px 10px;
+  border: 1px solid var(--border); border-radius: 8px; margin: 8px 0; cursor: pointer; }
+.del-opt input { margin-top: 4px; }
+.del-warn { color: var(--red); font-size: 12px; }
 .select-sm { width: auto; padding: 5px 8px; font-size: 13px; }
 
 /* 憑證清單 */

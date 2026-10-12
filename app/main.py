@@ -458,6 +458,41 @@ def api_get(rec_id: int):
     return _rec_to_dict(rec, full=True)
 
 
+def _delete_busy() -> bool:
+    """匯入或批次提取進行中時不刪除，避免與背景寫檔／辨識互相踩踏。"""
+    return _job["status"] == "running" or _ejob["status"] == "running"
+
+
+@app.get("/api/vouchers/{rec_id}/delete-preview")
+def api_delete_preview(request: Request, rec_id: int, scope: str = ""):
+    """刪除前預覽影響範圍（scope 省略時回傳 record 與 upload 兩種）。"""
+    scopes = [scope] if scope else list(review.DELETE_SCOPES)
+    if any(item not in review.DELETE_SCOPES for item in scopes):
+        return JSONResponse({"detail": "刪除範圍不合法"}, status_code=422)
+    previews = {item: review.delete_preview(rec_id, item) for item in scopes}
+    if any(preview is None for preview in previews.values()):
+        return JSONResponse({"detail": "查無此紀錄"}, status_code=404)
+    is_admin = (auth.get_user_by_token(request.cookies.get("session")) or {}).get("role") == "admin"
+    return {"ok": True, "is_admin": is_admin, "busy": _delete_busy(), "previews": previews,
+            "can_delete": {item: is_admin or not preview["requires_admin"] for item, preview in previews.items()}}
+
+
+@app.delete("/api/vouchers/{rec_id}")
+def api_delete(request: Request, rec_id: int, scope: str = "record"):
+    """刪除單據（record）或整份上傳檔（upload）。已確認憑證僅管理員可刪。"""
+    if scope not in review.DELETE_SCOPES:
+        return JSONResponse({"detail": "刪除範圍不合法"}, status_code=422)
+    if _delete_busy():
+        return JSONResponse({"ok": False, "detail": "匯入或提取進行中，請稍後再刪除"}, status_code=409)
+    user = auth.get_user_by_token(request.cookies.get("session")) or {}
+    try:
+        result = review.delete_vouchers(rec_id, scope, is_admin=user.get("role") == "admin",
+                                        actor=user.get("username", ""))
+    except review.DeleteForbidden as exc:
+        return JSONResponse({"ok": False, "detail": str(exc)}, status_code=403)
+    return result or JSONResponse({"detail": "查無此紀錄"}, status_code=404)
+
+
 @app.put("/api/vouchers/{rec_id}")
 def api_update(rec_id: int, voucher: dict = Body(...)):
     rec = review.update_current(rec_id, voucher)

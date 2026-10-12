@@ -129,6 +129,7 @@
           <button id="btnCropOk" class="btn btn-sm primary hidden">✓ 確認</button>
           <button id="btnCropCancel" class="btn btn-sm hidden">取消</button>
           <button id="btnReRecognize" class="btn btn-sm">🔄 重新辨識</button>
+          <button id="btnDelete" class="btn btn-sm danger" title="刪除此憑證，或連同整份上傳檔一併刪除">🗑 刪除</button>
         </div>
         <!-- 地端推論進度（重新辨識／分類／確認辨識共用）-->
         <div id="revProgress" class="progress hidden">
@@ -289,6 +290,22 @@
         <label class="cfg-full">備註<input id="cfg-cloud_note" class="select"></label>
       </div>
       <div class="modal-actions" style="justify-content:flex-start;"><button class="btn primary cfg-save" data-section="cloud_deploy">儲存雲端部署</button></div>
+    </div>
+  </div>
+
+  <!-- 刪除確認 modal -->
+  <div id="deleteModal" class="modal hidden">
+    <div class="modal-box">
+      <h3>刪除憑證</h3>
+      <div id="deleteLoading" class="hint">正在確認影響範圍…</div>
+      <div id="deleteBody" class="hidden">
+        <div id="deleteChoices"></div>
+        <p class="hint">影像與辨識資料會一併移除，無法復原。</p>
+      </div>
+      <div class="modal-actions">
+        <button id="deleteConfirm" class="btn danger" disabled>🗑 確認刪除</button>
+        <button id="deleteCancel" class="btn">取消</button>
+      </div>
     </div>
   </div>
 

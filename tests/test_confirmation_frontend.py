@@ -120,6 +120,62 @@ process.stdout.write(JSON.stringify(out));
 """
 
 
+DELETE_HARNESS = r"""
+const fs = require('fs');
+const vm = require('vm');
+const input = JSON.parse(fs.readFileSync(0, 'utf8'));
+const source = input.source;
+const start = source.indexOf('  function isAdminUser()');
+const end = source.indexOf('  $("btnDelete").addEventListener', start);
+if (start < 0 || end < 0) throw new Error('could not locate delete functions');
+const events = [], requests = [];
+const classes = {};
+const node = (id) => (classes[id] = classes[id] || {
+  id, innerHTML: '', disabled: false,
+  classList: { _set: new Set(['hidden']), add(c) { this._set.add(c); }, remove(c) { this._set.delete(c); }, contains(c) { return this._set.has(c); } },
+});
+const checked = { value: 'record' };
+const document = {
+  querySelector: () => (input.scope ? { value: input.scope } : checked),
+  querySelectorAll: () => [],
+};
+let currentId = 12, editBusy = false;
+const currentUser = { role: 'admin' };
+const esc = (s) => (s == null ? '' : String(s));
+const errText = (d, fallback) => (d && d.detail) || fallback;
+const $ = (id) => node(id);
+function alert(message) { events.push({ type: 'alert', message }); }
+function toast(message) { events.push({ type: 'toast', message }); }
+function clearReview() { events.push({ type: 'clearReview' }); currentId = null; }
+function loadList() { events.push({ type: 'loadList' }); }
+function refreshStats() { events.push({ type: 'refreshStats' }); }
+async function fetch(url, options = {}) {
+  requests.push({ url, method: options.method || 'GET' });
+  if (options.method === 'DELETE') {
+    const status = input.deleteStatus || 200;
+    return { ok: status < 300, status, json: async () => input.deleteBody || { ok: true, deleted_ids: [12] } };
+  }
+  return { ok: true, status: 200, json: async () => input.data };
+}
+const context = { events, requests, document, $, esc, errText, alert, toast, clearReview, loadList, refreshStats, fetch, input,
+  get currentId() { return currentId; }, set currentId(v) { currentId = v; }, editBusy, currentUser, console };
+vm.createContext(context);
+vm.runInContext(source.slice(start, end) + '\nglobalThis.api = { deleteChoices, openDelete, confirmDelete, closeDeleteModal };', context);
+(async () => {
+  const out = {};
+  if (input.action === 'choices') out.choices = context.api.deleteChoices(input.data);
+  else {
+    await context.api.openDelete();
+    if (input.action === 'cancel') context.api.closeDeleteModal();
+    if (input.action === 'confirm') await context.api.confirmDelete();
+  }
+  out.events = events; out.requests = requests;
+  out.modalOpen = !node('deleteModal').classList.contains('hidden');
+  process.stdout.write(JSON.stringify(out));
+})().catch((e) => { console.error(e.stack || e); process.exit(1); });
+"""
+
+
 class WorkflowMarkupParser(HTMLParser):
     def __init__(self):
         super().__init__()
@@ -296,6 +352,89 @@ class ConfirmationFrontendTests(unittest.TestCase):
 
         hint = self.run_trace(None, hint={"row": self.source_row(3, "document", False), "autoSplit": False})["hint"]
         self.assertIn("裁切為新憑證", hint)
+
+    def run_delete(self, action, **scenario):
+        payload = {"source": self.source, "action": action, **scenario}
+        completed = subprocess.run(
+            [str(NODE), "-e", DELETE_HARNESS],
+            input=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            capture_output=True, check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr.decode("utf-8", errors="replace"))
+        return json.loads(completed.stdout.decode("utf-8"))
+
+    @staticmethod
+    def preview(ids, **counts):
+        return {"ids": ids, "voucher_count": counts.get("vouchers", len(ids)), "source_page_count": counts.get("sources", 0),
+                "confirmed_count": counts.get("confirmed", 0), "attachment_count": counts.get("attachments", 0),
+                "requires_admin": bool(counts.get("confirmed", 0))}
+
+    def test_delete_choices_describe_scope_and_hide_upload_when_identical(self):
+        record = self.preview([5])
+        upload = self.preview([3, 4, 5], vouchers=2, sources=1, attachments=1)
+        data = {"previews": {"record": record, "upload": upload}, "can_delete": {"record": True, "upload": True}}
+        choices = self.run_delete("choices", data=data)["choices"]
+        self.assertEqual([c["scope"] for c in choices], ["record", "upload"])
+        self.assertEqual(choices[0]["summary"], "1 張單據")
+        self.assertEqual(choices[1]["summary"], "2 張單據、1 個原始掃描頁（含 1 張附頁）")
+        self.assertTrue(all(c["allowed"] and not c["warning"] for c in choices))
+
+        same = {"previews": {"record": record, "upload": self.preview([5])}, "can_delete": {"record": True, "upload": True}}
+        self.assertEqual([c["scope"] for c in self.run_delete("choices", data=same)["choices"]], ["record"])
+
+    def test_delete_choices_warn_about_confirmed_and_block_non_admins(self):
+        record = self.preview([5])
+        upload = self.preview([3, 5], confirmed=1)
+        clerk = {"previews": {"record": record, "upload": upload}, "can_delete": {"record": True, "upload": False}}
+        choices = self.run_delete("choices", data=clerk)["choices"]
+        self.assertTrue(choices[0]["allowed"])
+        self.assertFalse(choices[1]["allowed"])
+        self.assertIn("只有管理員", choices[1]["warning"])
+        self.assertIn("其中 1 張已確認", choices[1]["summary"])
+
+        admin = {"previews": {"record": record, "upload": upload}, "can_delete": {"record": True, "upload": True}}
+        warning = self.run_delete("choices", data=admin)["choices"][1]["warning"]
+        self.assertIn("日記帳與報表", warning)
+
+    def test_delete_flow_cancel_failure_and_success(self):
+        data = {"previews": {"record": self.preview([12]), "upload": self.preview([11, 12], sources=1)},
+                "can_delete": {"record": True, "upload": True}, "busy": False, "ok": True}
+        opened = self.run_delete("open", data=data)
+        self.assertEqual([r["method"] for r in opened["requests"]], ["GET"])
+        self.assertTrue(opened["modalOpen"])
+
+        cancelled = self.run_delete("cancel", data=data)
+        self.assertFalse(cancelled["modalOpen"])
+        self.assertFalse(any(r["method"] == "DELETE" for r in cancelled["requests"]))
+
+        busy = self.run_delete("open", data={**data, "busy": True})
+        self.assertFalse(busy["modalOpen"])
+        self.assertTrue(any("進行中" in e["message"] for e in busy["events"] if e["type"] == "alert"))
+
+        failed = self.run_delete("confirm", data=data, deleteStatus=403, deleteBody={"ok": False, "detail": "只有管理員"})
+        self.assertEqual([r["method"] for r in failed["requests"]], ["GET", "DELETE"])
+        self.assertEqual(failed["requests"][-1]["url"], "/api/vouchers/12?scope=record")
+        self.assertTrue(any(e["type"] == "alert" and "只有管理員" in e["message"] for e in failed["events"]))
+        self.assertFalse(any(e["type"] in {"clearReview", "loadList", "toast"} for e in failed["events"]))
+        self.assertTrue(failed["modalOpen"])
+
+        done = self.run_delete("confirm", data=data, scope="upload",
+                               deleteBody={"ok": True, "deleted_ids": [11, 12], "cleanup_failed": ["locked"]})
+        self.assertEqual(done["requests"][-1]["url"], "/api/vouchers/12?scope=upload")
+        types = [e["type"] for e in done["events"]]
+        self.assertIn("clearReview", types)
+        self.assertIn("loadList", types)
+        self.assertIn("toast", types)
+        self.assertTrue(any(e["type"] == "alert" and "locked" in e["message"] for e in done["events"]))
+        self.assertFalse(done["modalOpen"])
+
+    def test_delete_button_and_modal_markup_exist(self):
+        html = APP_HTML.read_text(encoding="utf-8")
+        for marker in ('id="btnDelete"', 'id="deleteModal"', 'id="deleteChoices"', 'id="deleteConfirm"'):
+            self.assertIn(marker, html)
+        tag_start = html.index('id="btnDelete"')
+        self.assertIn('class="btn btn-sm danger"', html[tag_start:html.index(">", tag_start)])
+        self.assertIn('status === "confirmed" && !isAdminUser()', self.source)
 
     def test_source_pages_are_not_rendered_as_a_separate_frontend_area(self):
         html = APP_HTML.read_text(encoding="utf-8")

@@ -70,6 +70,28 @@ class PageRoleTests(unittest.TestCase):
             self.assertIsNone(vouchers[0].total_amount)
             self.assertEqual(image.read_bytes(),original)
 
+    def test_prepared_pages_share_group_id_and_record_only_managed_uploads(self):
+        region = {"type":"receipt","rotate":0,"reason":"synthetic","confidence":"high","box":[0,0,1000,1000]}
+        layout = {"type":"receipt","content_kind":"document","auto_split":True,"regions":[region],"issues":[]}
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1]/"app/data/test-tmp-plan") as temp:
+            uploads = Path(temp)/"uploads"
+            uploads.mkdir()
+            managed = uploads/("a"*32+".png")
+            external = Path(temp)/"scan-source.png"
+            for path in (managed, external):
+                Image.new("RGB",(600,800),"white").save(path)
+            with patch.object(config,"UPLOAD_DIR",uploads), patch.object(page_layout,"detect",return_value=layout):
+                kept = pipeline.prepare_pages(str(managed))
+                outside = pipeline.prepare_pages(str(external))
+            groups = {v.origin["source_group_id"] for v in kept}
+            self.assertEqual(len(kept),2)
+            self.assertEqual(len(groups),1)
+            self.assertTrue(all(v.origin["upload_file"] == managed.name for v in kept))
+            self.assertEqual(len({v.origin["source_group_id"] for v in outside}),1)
+            self.assertNotEqual({v.origin["source_group_id"] for v in outside},groups)
+            self.assertTrue(all("upload_file" not in v.origin for v in outside))
+            self.assertEqual(pipeline.managed_upload_name(str(external)),"")
+
     def test_single_region_cannot_swallow_three_independent_frames(self):
         region = {"type":"cheque","rotate":0,"reason":"single","confidence":"high","box":[0,0,1000,1000]}
         raw = {"type":"cheque","rotate":0,"reason":"single","content_kind":"document","layout_kind":"single","regions":[region]}

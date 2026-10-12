@@ -342,5 +342,251 @@ class ConfirmationApiContractTests(unittest.TestCase):
         review_stub.set_notes.assert_called_once_with(7, correction_note="人工修正")
 
 
+class VoucherDeleteTests(unittest.TestCase):
+    """Deleting records removes only app-managed files that no other record still uses."""
+
+    def setUp(self):
+        import uuid
+        self.uuid = uuid
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.upload, self.data = self.root / "uploads", self.root / "data"
+        for folder in (self.upload / "pages", self.upload / "_pages", self.data / "logs"):
+            folder.mkdir(parents=True)
+        self.engine = create_engine(f"sqlite:///{self.root / 'review.db'}", connect_args={"check_same_thread": False})
+        SQLModel.metadata.create_all(self.engine)
+        self.addCleanup(self.engine.dispose)
+        for patcher in (
+            patch.object(review, "get_session", side_effect=lambda: Session(self.engine, expire_on_commit=False)),
+            patch.object(review.config, "UPLOAD_DIR", self.upload),
+            patch.object(review.config, "DATA_DIR", self.data),
+            patch.object(review.config, "LOG_DIR", self.data / "logs"),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        from PIL import Image
+        self.source = self.root / "scan.png"
+        Image.new("RGB", (20, 20), "white").save(self.source)
+
+    def make_upload(self):
+        """A managed upload plus its rendered page; returns (group, upload file name, token)."""
+        name = self.uuid.uuid4().hex + ".pdf"
+        (self.upload / name).write_bytes(b"%PDF")
+        (self.upload / "_pages" / f"{Path(name).stem}_p0.png").write_bytes(b"png")
+        token = self.uuid.uuid4().hex
+        (self.upload / "_pages" / token / "ocr_cache").mkdir(parents=True)
+        (self.upload / "_pages" / token / "input.png").write_bytes(b"png")
+        return self.uuid.uuid4().hex, name, token
+
+    def record(self, upload=None, *, role="voucher", status=ReviewStatus.pending, parent=None, auto_split=True):
+        origin = {"record_role": role, "layout": {"auto_split": auto_split}}
+        if upload:
+            group, name, token = upload
+            origin.update(source_group_id=group, upload_file=name, source_token=token)
+        voucher = Voucher.model_validate({"doc_type_key": "receipt", "doc_type": "收據", "origin": origin,
+                                          "source_file": "scan.pdf p1"})
+        voucher.source_image = str(self.source)
+        rec = review.save_voucher(voucher, status=status, source_parent_id=parent.id if parent else None)
+        pages = self.upload / "pages"
+        for name in (f"{rec.id}.orig.png", f"{rec.id}_att1.png", f"{rec.id}_model_input.png",
+                     f"{rec.id}0.png"):          # the last one belongs to another record id
+            (pages / name).write_bytes(b"png")
+        (pages / f"{rec.id}_page_ocr").mkdir()
+        (pages / f"{rec.id}_page_ocr" / "ocr.json").write_text("{}")
+        (self.data / "recognition" / str(rec.id)).mkdir(parents=True)
+        return rec
+
+    def exists(self, *parts):
+        return self.upload.joinpath(*parts).exists()
+
+    def ids(self):
+        return sorted(r.id for r in review.list_vouchers(include_sources=True))
+
+    def family(self, upload, children=2, **child_kwargs):
+        parent = self.record(upload, role="source_page")
+        return parent, [self.record(upload, parent=parent, **child_kwargs) for _ in range(children)]
+
+    def test_deleting_one_document_keeps_siblings_source_and_shared_files(self):
+        upload = self.make_upload()
+        parent, (first, second) = self.family(upload)
+
+        result = review.delete_vouchers(first.id, "record")
+
+        self.assertEqual(result["deleted_ids"], [first.id])
+        self.assertEqual(self.ids(), [parent.id, second.id])
+        for name in (f"{first.id}.png", f"{first.id}.orig.png", f"{first.id}_att1.png",
+                     f"{first.id}_model_input.png", f"{first.id}_page_ocr"):
+            self.assertFalse(self.exists("pages", name), name)
+        self.assertFalse((self.data / "recognition" / str(first.id)).exists())
+        self.assertTrue(self.exists("pages", f"{first.id}0.png"), "id prefix must not match other ids")
+        self.assertTrue(self.exists("pages", f"{second.id}.png"))
+        self.assertTrue(self.exists("pages", f"{parent.id}.png"))
+        self.assertTrue(self.exists("_pages", upload[2]), "token still used by the source page")
+        self.assertTrue(self.exists(upload[1]))
+
+    def test_deleting_last_document_removes_hidden_source_and_unreferenced_upload(self):
+        upload = self.make_upload()
+        other = self.make_upload()
+        other_parent, (other_child,) = self.family(other, children=1)
+        parent, (only,) = self.family(upload, children=1)
+
+        result = review.delete_vouchers(only.id, "record")
+
+        self.assertEqual(sorted(result["deleted_ids"]), [parent.id, only.id])
+        self.assertEqual(self.ids(), [other_parent.id, other_child.id])
+        self.assertFalse(self.exists("_pages", upload[2]))
+        self.assertFalse(self.exists(upload[1]))
+        self.assertFalse(self.exists("_pages", f"{Path(upload[1]).stem}_p0.png"))
+        self.assertTrue(self.exists(other[1]) and self.exists("_pages", other[2]))
+        self.assertTrue(self.exists("pages", f"{other_child.id}.png"))
+
+    def test_source_page_waiting_for_manual_split_is_kept_after_last_document_is_deleted(self):
+        upload = self.make_upload()
+        parent = self.record(upload, role="source_page", auto_split=False)
+        child = self.record(upload, parent=parent)
+
+        review.delete_vouchers(child.id, "record")
+
+        self.assertEqual(self.ids(), [parent.id])
+        self.assertTrue(self.exists("pages", f"{parent.id}.png"))
+        self.assertTrue(self.exists(upload[1]))
+
+    def test_upload_scope_deletes_the_whole_group_and_nothing_else(self):
+        upload, other = self.make_upload(), self.make_upload()
+        parent, (first, second) = self.family(upload)
+        split_token = self.uuid.uuid4().hex
+        (self.upload / "_pages" / split_token).mkdir()
+        manual = self.record((upload[0], upload[1], split_token), parent=parent)
+        other_parent, (other_child,) = self.family(other, children=1)
+
+        preview = review.delete_preview(first.id, "upload")
+        self.assertEqual((preview["voucher_count"], preview["source_page_count"]), (3, 1))
+        self.assertEqual(review.delete_preview(first.id, "record")["ids"], [first.id])
+        result = review.delete_vouchers(first.id, "upload")
+
+        self.assertEqual(result["deleted_ids"], sorted([parent.id, first.id, second.id, manual.id]))
+        self.assertEqual(self.ids(), [other_parent.id, other_child.id])
+        for token in (upload[2], split_token):
+            self.assertFalse(self.exists("_pages", token))
+        self.assertFalse(self.exists(upload[1]))
+        self.assertTrue(self.exists(other[1]) and self.exists("_pages", other[2]))
+
+    def test_upload_scope_without_group_id_falls_back_to_source_page_and_children(self):
+        parent, (child, sibling) = self.family(None)
+        other_parent, (other_child,) = self.family(None, children=1)
+
+        result = review.delete_vouchers(child.id, "upload")
+
+        self.assertEqual(result["deleted_ids"], sorted([parent.id, child.id, sibling.id]))
+        self.assertEqual(self.ids(), [other_parent.id, other_child.id])
+
+    def test_deleting_a_source_page_takes_its_documents_with_it(self):
+        upload = self.make_upload()
+        parent, (first, second) = self.family(upload)
+
+        result = review.delete_vouchers(parent.id, "record")
+
+        self.assertEqual(result["deleted_ids"], sorted([parent.id, first.id, second.id]))
+        self.assertEqual(self.ids(), [])
+
+    def test_confirmed_records_are_admin_only_and_audited_without_content(self):
+        upload = self.make_upload()
+        parent, _ = self.family(upload, children=0)
+        pending = self.record(upload, parent=parent)
+        confirmed = self.record(upload, parent=parent, status=ReviewStatus.confirmed)
+
+        self.assertTrue(review.delete_preview(confirmed.id, "record")["requires_admin"])
+        self.assertTrue(review.delete_preview(pending.id, "upload")["requires_admin"])
+        self.assertFalse(review.delete_preview(pending.id, "record")["requires_admin"])
+        for rec_id, scope in ((confirmed.id, "record"), (pending.id, "upload")):
+            with self.assertRaises(review.DeleteForbidden):
+                review.delete_vouchers(rec_id, scope, is_admin=False)
+        self.assertIn(confirmed.id, self.ids())
+        self.assertTrue(self.exists("pages", f"{confirmed.id}.png"))
+
+        review.delete_vouchers(pending.id, "record", is_admin=False, actor="clerk")
+        review.delete_vouchers(confirmed.id, "record", is_admin=True, actor="admin")
+        lines = [json.loads(line) for line in (self.data / "logs" / "deletions.jsonl").read_text(encoding="utf-8").splitlines()]
+        self.assertEqual([entry["actor"] for entry in lines], ["clerk", "admin"])
+        self.assertEqual(lines[1]["records"][0], {"id": confirmed.id, "role": "voucher", "status": "confirmed"})
+        self.assertNotIn("fields", json.dumps(lines))
+
+    def test_paths_outside_managed_folders_are_never_removed(self):
+        outside = self.root / "scan-source" / "keep.png"
+        outside.parent.mkdir()
+        outside.write_bytes(b"png")
+        rec = self.record(None)
+        with review.get_session() as session:
+            row = session.get(VoucherRecord, rec.id)
+            row.image_path = str(outside)
+            row.attachments = json.dumps(["../../scan-source/keep.png"])
+            session.add(row)
+            session.commit()
+
+        result = review.delete_vouchers(rec.id, "record")
+
+        self.assertTrue(outside.exists())
+        self.assertEqual(len(result["cleanup_failed"]), 2)
+        self.assertEqual(self.ids(), [])
+
+    def test_cleanup_failure_is_reported_without_failing_the_delete(self):
+        upload = self.make_upload()
+        parent, (child,) = self.family(upload, children=1)
+
+        with patch.object(review.shutil, "rmtree", side_effect=PermissionError("locked")):
+            result = review.delete_vouchers(child.id, "upload")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(self.ids(), [])
+        self.assertTrue(result["cleanup_failed"])
+        self.assertTrue(any("locked" in item for item in result["cleanup_failed"]))
+
+    def test_missing_record_and_invalid_scope(self):
+        self.assertIsNone(review.delete_vouchers(999, "record"))
+        self.assertIsNone(review.delete_preview(999, "upload"))
+        rec = self.record(None)
+        with self.assertRaises(ValueError):
+            review.delete_vouchers(rec.id, "everything")
+        self.assertEqual(self.ids(), [rec.id])
+
+    def test_delete_endpoints_enforce_scope_busy_and_role(self):
+        from fastapi.responses import JSONResponse
+
+        users = {"admin-token": {"role": "admin", "username": "admin"}, "clerk-token": {"role": "clerk", "username": "clerk"}}
+        auth = SimpleNamespace(get_user_by_token=lambda token: users.get(token))
+        state = {"_job": {"status": "idle"}, "_ejob": {"status": "idle"}}
+        busy = _load_endpoint("_delete_busy", dict(state))
+        namespace = {"review": review, "auth": auth, "JSONResponse": JSONResponse, "_delete_busy": busy, **state}
+        delete = _load_endpoint("api_delete", dict(namespace))
+        preview = _load_endpoint("api_delete_preview", dict(namespace))
+        request = lambda token: SimpleNamespace(cookies={"session": token})
+        upload = self.make_upload()
+        parent, (pending,) = self.family(upload, children=1)
+        confirmed = self.record(upload, parent=parent, status=ReviewStatus.confirmed)
+
+        self.assertEqual(delete(request("clerk-token"), pending.id, "bogus").status_code, 422)
+        self.assertEqual(preview(request("clerk-token"), pending.id, "bogus").status_code, 422)
+        self.assertEqual(delete(request("clerk-token"), 999, "record").status_code, 404)
+        self.assertEqual(preview(request("clerk-token"), 999, "").status_code, 404)
+
+        data = preview(request("clerk-token"), pending.id, "")
+        self.assertEqual(data["can_delete"], {"record": True, "upload": False})
+        self.assertEqual(preview(request("admin-token"), pending.id, "")["can_delete"], {"record": True, "upload": True})
+        self.assertEqual(delete(request("clerk-token"), pending.id, "upload").status_code, 403)
+        self.assertEqual(delete(request("clerk-token"), confirmed.id, "record").status_code, 403)
+
+        state["_job"]["status"] = "running"
+        busy_delete = _load_endpoint("api_delete", {**namespace, "_delete_busy": _load_endpoint("_delete_busy", dict(state))})
+        self.assertEqual(busy_delete(request("admin-token"), pending.id, "record").status_code, 409)
+        self.assertIn(pending.id, self.ids())
+        state["_job"]["status"] = "idle"
+
+        self.assertEqual(delete(request("clerk-token"), pending.id, "record")["deleted_ids"], [pending.id])
+        self.assertEqual(delete(request("admin-token"), confirmed.id, "upload")["deleted_ids"],
+                         sorted([parent.id, confirmed.id]))
+        self.assertEqual(delete(request("admin-token"), confirmed.id, "record").status_code, 404)
+
+
 if __name__ == "__main__":
     unittest.main()
