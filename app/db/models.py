@@ -30,7 +30,7 @@ class ReviewStatus(str, Enum):
     prepared = "prepared"                  # 待外觀確認（已判類型/轉正，尚未萃取欄位）
     queued = "queued"                      # 掃描清單／待內容提取（外觀已確認）
     pending = "pending"                    # 待確認（內容辨識已完成）
-    confirmed = "confirmed"                # 人工確認完成，可納入日記帳
+    confirmed = "confirmed"                # 辨識內容人工確認完成
 
 
 class UserAccount(SQLModel, table=True):
@@ -65,6 +65,12 @@ class VoucherRecord(SQLModel, table=True):
 
     correction_note: str = ""
     confirmed_at: Optional[datetime] = None
+    entries_status: str = Field(default="none", index=True)
+    entries_confirmed_at: Optional[datetime] = None
+    entries_confirmed_by: Optional[int] = Field(default=None, foreign_key="users.id")
+    entries_confirmed_by_name: str = ""
+    entries_proposal_json: str = "{}"
+    entries_history: str = "[]"
 
     # 手寫／字跡潦草等 AI 讀不可靠、欄位由人工鍵入者，由審核者勾記。
     # 用途：① 清單一眼看出哪些不是機器讀的 ② 重新辨識前擋下覆蓋 ③ 統計自動化涵蓋率

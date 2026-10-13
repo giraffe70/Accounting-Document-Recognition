@@ -6,7 +6,7 @@ import json
 
 from app.db.models import ReviewStatus
 from app.core import doc_types
-from app.services import review
+from app.services import review, entry_workflow
 
 
 def periods(company: str = "") -> list[str]:
@@ -21,11 +21,16 @@ def build_journal(period: str, company: str = "") -> dict:
     recs = review.list_vouchers(status=ReviewStatus.confirmed,
                                 company=company, period=period)
     rows = []
+    excluded_count, included_count = 0, 0
     complete = True
     for rec in recs:
         cur = json.loads(rec.current_json)
         if doc_types.is_supporting(cur.get("doc_type_key", "")):
             continue
+        if not entry_workflow.is_ready(rec):
+            excluded_count += 1
+            continue
+        included_count += 1
         date = cur.get("date", "")
         vid = cur.get("voucher_id", "")
         for e in cur.get("entries", []):
@@ -55,7 +60,8 @@ def build_journal(period: str, company: str = "") -> dict:
         "period": period,
         "company": company,
         "rows": rows,
-        "count": len(recs),
+        "count": included_count,
+        "excluded_count": excluded_count,
         "debit_total": debit_total,
         "credit_total": credit_total,
         "balance_check": bool(rows) and complete and abs(debit_total - credit_total) < 0.01,

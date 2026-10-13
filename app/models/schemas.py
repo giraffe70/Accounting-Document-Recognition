@@ -116,6 +116,9 @@ class JournalEntry(_StrCoerceModel):
     offset_code: str = ""     # 立沖帳目：往來對象代號，如 047 聯邦快遞（傳票）
     evidence_paths: list[str] = Field(default_factory=list)
     amount_source: Optional[str] = None  # 主要金額來源
+    entry_id: str = ""
+    entry_origin: str = ""
+    source_entry_index: Optional[int] = None
     model_config = ConfigDict(extra="allow")
 
 

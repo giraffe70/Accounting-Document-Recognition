@@ -89,9 +89,9 @@ flowchart TD
 | 資料表 | 主要內容 |
 |---|---|
 | `users` | 帳號、密碼雜湊與 salt、角色、顯示名稱、建立時間 |
-| `voucher_records` | 來源檔名、公司、期別、審核狀態、信心度、AI 與目前憑證內容、審核備註／時間、模型資訊、影像路徑與附頁清單 |
+| `voucher_records` | 來源檔名、公司、期別、辨識狀態、分錄狀態與確認資訊、AI 與目前憑證內容、審核備註／時間、模型資訊、影像路徑與附頁清單 |
 
-`voucher_records.ai_json` 與 `current_json` 都是 JSON 文字欄位，包含結構化憑證與分錄。新版契約可在 `Voucher` 保存 `field_evidence`、`validation_warnings`、`classification_meta`，並在 `JournalEntry` 保存 `evidence_paths`；舊 JSON 仍可讀，API 可追加 metadata，不要求回填舊記錄。人工編輯只更新 `current_json`，可與 AI 輸出比較；重新辨識／內容提取會重新寫入兩者，因此 `ai_json` 並非永久不可變的歷史版本。審核備註與時間保存在同筆紀錄，目前沒有獨立的逐次操作稽核表。
+`voucher_records.ai_json` 與 `current_json` 都是 JSON 文字欄位，包含結構化憑證與分錄。新版契約可在 `Voucher` 保存 `field_evidence`、`validation_warnings`、`classification_meta`，並在 `JournalEntry` 保存 `evidence_paths`；舊 JSON 仍可讀，API 可追加 metadata，不要求回填舊記錄。人工編輯只更新 `current_json`，可與 AI 輸出比較；重新辨識／內容提取會重新寫入兩者，因此 `ai_json` 並非永久不可變的歷史版本。辨識審核狀態與分錄確認狀態分開保存；分錄確認時間為 UTC，既有建立時間仍沿用原本時間欄位慣例。審核備註與時間保存在同筆紀錄，目前沒有獨立的逐次操作稽核表。
 
 ### 4.3 資料存放位置
 
@@ -118,17 +118,21 @@ flowchart TD
 2. `pipeline.prepare_pages()` 進行頁面準備、類型判定與轉正；`review.save_voucher()` 將每筆憑證存入 SQLite，狀態為 `prepared`，並保存對照影像。
 3. 使用者確認外觀與文件類型後，紀錄轉為 `queued`，等待內容提取。
 4. 單筆或批次內容提取依文件類型使用 OCR／VLM，完成結構化及欄位清理，再將結果存回紀錄；`prepared`／`queued` 紀錄轉為 `pending`。
-5. 使用者修改欄位並保存草稿；另按「確認」完成憑證確認。`correction_note` 為修正備註。修正辨識結果、內容、公司或影像會讓憑證回到待確認；僅修改備註不改變狀態。確認時間記錄於 `confirmed_at`。
-6. 日記帳、會計傳票與配對只讀取已確認憑證。確認入口 `POST /api/vouchers/{rec_id}/confirm` 接受 `expected_updated_at`，所有已登入角色皆可使用；保存草稿不會加入帳務。
+5. 使用者修改欄位並保存草稿；另按「確認」完成辨識確認。`correction_note` 為修正備註。修正辨識結果、內容、公司或影像會讓辨識確認失效；僅修改備註不改變狀態。確認時間記錄於 `confirmed_at`。辨識確認不要求已有完整分錄或借貸平衡；明細類型以憑證類型或實際明細判定，分錄生成不會因單據含明細而跳過。
+6. 分錄另行編輯與確認。分錄可手動增刪改，科目可手填或採用公司專屬建議；建議不會修改公司科目表。草稿可保留缺漏欄位及有效的零金額，空白分錄列不可確認。AI 僅為一般非日記帳、非附件單據提供候選分錄；候選須先預覽，再整組採用或捨棄，採用前會與目前草稿比對，來源內容變更後不得採用舊候選。編輯分錄會使原分錄確認失效；辨識欄位、公司、明細或影像變更會同時使兩種確認失效。
+7. 日記帳與正式傳票只納入辨識已確認且分錄已確認的憑證，並顯示排除數；報表摘要仍依原有辨識確認條件統計。分錄須有公司、完整科目代碼與名稱、金額及借貸方向，且借貸差額絕對值小於 0.01，才可確認。未完成或待核對科目不阻止辨識確認，但不發布品名科目規則。舊憑證的既有分錄遷移為草稿，須人工確認後才能納入帳務。
 
 ```mermaid
 flowchart LR
     A[prepared：待外觀確認] --> B[queued：待內容提取]
     B --> C[pending：待確認]
     C -->|修正辨識／內容／公司／影像| C
-    C -->|確認| D[confirmed：已確認]
-    D -->|重新辨識／內容／公司／影像變更| C
-    D --> E[日記帳／傳票／配對]
+    C -->|辨識確認| D[confirmed：辨識已確認]
+    D -->|辨識內容／公司／明細／影像變更| C
+    D --> E[分錄草稿／人工編輯]
+    E -->|人工確認且完整平衡| F[分錄可供入帳]
+    D --> G[報表摘要]
+    F --> H[日記帳／正式傳票]
 ```
 
 舊審核欄位（`clerk_note`、`accountant_note`、`dev_note`、`clerk_reviewed_at`、`accountant_approved_at`）已於啟動遷移（`app/db/session.py`）轉入 `correction_note`、`confirmed_at` 與新狀態後移除，`dev_note` 內容直接捨棄。遷移時舊狀態映射仍保留：`accountant_approved` 映射為 `confirmed`；`clerk_reviewed` 與 `rejected` 映射為 `pending`。以上圖示表達預期操作流程；服務中的狀態更新並非完整的狀態機轉移驗證。

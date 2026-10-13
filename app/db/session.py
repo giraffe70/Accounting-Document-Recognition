@@ -23,6 +23,7 @@ def init_db():
     SQLModel.metadata.create_all(_engine)
     _migrate()
     _migrate_account_mappings()
+    _migrate_entries()
 
 
 # 已由 correction_note、confirmed_at 與新狀態取代的舊審核欄位（遷移後移除）。
@@ -49,6 +50,12 @@ def _migrate():
         "correction_note": ("VARCHAR", "''"),
         "confirmed_at": ("DATETIME", "NULL"),
         "company_id": ("INTEGER", "NULL"),
+        "entries_status": ("VARCHAR", "'none'"),
+        "entries_confirmed_at": ("DATETIME", "NULL"),
+        "entries_confirmed_by": ("INTEGER", "NULL"),
+        "entries_confirmed_by_name": ("VARCHAR", "''"),
+        "entries_proposal_json": ("VARCHAR", "'{}'"),
+        "entries_history": ("VARCHAR", "'[]'"),
     }
     with _engine.begin() as conn:
         info = list(conn.exec_driver_sql("PRAGMA table_info(voucher_records)"))
@@ -88,6 +95,7 @@ def _migrate():
             if col in cols:
                 conn.exec_driver_sql(f"ALTER TABLE voucher_records DROP COLUMN {col}")
         conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_voucher_records_company_id ON voucher_records(company_id)")
+        conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_voucher_records_entries_status ON voucher_records(entries_status)")
 
 
 def _migrate_account_mappings():
@@ -133,3 +141,31 @@ def _migrate_account_mappings():
 
 def get_session() -> Session:
     return Session(_engine)
+
+
+def _migrate_entries():
+    from app.db.models import VoucherRecord
+    from app.core import doc_types
+    from app.services import entry_workflow as entries
+    from sqlmodel import select
+    with Session(_engine) as session:
+        for rec in session.exec(select(VoucherRecord)).all():
+            try:
+                data = json.loads(rec.current_json)
+                rows = data.get("entries") or []
+            except (ValueError, AttributeError):
+                continue
+            if not isinstance(rows, list) or any(not isinstance(r, dict) for r in rows):
+                continue
+            if rows and all(r.get("entry_id") and r.get("entry_origin") for r in rows):
+                continue  # A second startup never resets a new human approval.
+            origin = "observed" if doc_types.get(data.get("doc_type_key", "")).get("has_entries") else "manual"
+            cleaned = [{k: v for k, v in r.items() if k not in entries.ENTRY_META} for r in rows]
+            data["entries"] = entries.normalize_entries(cleaned, origin=origin, split_legacy=True)
+            entries.recompute(data)
+            rec.current_json = json.dumps(data, ensure_ascii=False)
+            rec.entries_status = "draft" if rows else "none"
+            rec.entries_confirmed_at = rec.entries_confirmed_by = None
+            rec.entries_confirmed_by_name = ""
+            session.add(rec)
+        session.commit()

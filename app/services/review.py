@@ -5,6 +5,7 @@ import shutil
 from datetime import datetime
 from typing import Optional
 from contextlib import nullcontext
+from copy import deepcopy
 
 from sqlmodel import select
 from sqlalchemy import update, delete
@@ -13,7 +14,8 @@ from app import config
 from app.db.models import ReviewStatus, VoucherRecord, ItemAccountMapping, MappingHistory
 from app.db.session import get_session
 from app.models.schemas import Voucher
-from app.services import companies, item_account_mapping as mapping
+from app.core import doc_types
+from app.services import companies, item_account_mapping as mapping, entry_workflow as entry_flow
 
 _UNSET = object()
 
@@ -51,6 +53,8 @@ def save_voucher(voucher: Voucher, company: str = "",
     """辨識完成後落地紀錄。ai_json 與 current_json 初始相同。
     status 預設 pending（已辨識待確認）；匯入外觀確認階段傳 prepared（僅判類型/轉正）。"""
     payload = mapping.strip_accounting(voucher.model_dump())
+    raw_entries = [{k: v for k, v in row.items() if k not in entry_flow.ENTRY_META} for row in payload.get("entries", [])]
+    payload["entries"] = raw_entries
     blob = json.dumps(mapping.strip_accounting(payload), ensure_ascii=False)
     rec = VoucherRecord(
         source_file=voucher.source_file,
@@ -69,6 +73,10 @@ def save_voucher(voucher: Voucher, company: str = "",
         registered = companies.resolve(s, company)
         rec.company_id = registered.id if registered else None
         mapping.prepare_items(s, payload, rec.company_id, model_result=True)
+        payload["entries"] = entry_flow.normalize_entries(raw_entries, origin="observed" if
+            doc_types.get(voucher.doc_type_key).get("has_entries") else "manual", split_legacy=True)
+        entry_flow.recompute(payload)
+        rec.entries_status = "draft" if payload["entries"] else "none"
         rec.current_json = json.dumps(payload, ensure_ascii=False)
         s.add(rec)
         s.commit()
@@ -135,6 +143,7 @@ def _invalidate_confirmation(rec):
     if getattr(rec, "status", None) == ReviewStatus.confirmed:
         rec.status = ReviewStatus.pending
         rec.confirmed_at = None
+    entry_flow.invalidate(rec, "來源單據已修改")
 
 
 def _preserve_source_image(rec_id):
@@ -155,6 +164,7 @@ def _save_recognition(rec_id, voucher):
         if selected_manual_type and previous.get("doc_type_key") != voucher.doc_type_key:
             raise RecognitionProtected("單據類型已有人工確認，新模型結果類型不同，請重新載入")
         data = mapping.strip_accounting(voucher.model_dump())
+        data["entries"] = [{k: v for k, v in row.items() if k not in entry_flow.ENTRY_META} for row in data.get("entries", [])]
         if any(row.get("account_source") == "manual" and
                (row.get("account_code") or row.get("account_name")) for row in previous.get("items", [])):
             data["items"] = deepcopy(previous["items"])
@@ -181,6 +191,12 @@ def _save_recognition(rec_id, voucher):
         data["origin"] = previous.get("origin", {})
         data["source_file"] = rec.source_file
         data = pipeline.canonicalize_voucher(data)
+        protected_entries = any(r.get("source") == "manual" and r.get("selected")
+                                for r in evidence.get("entries", [])) or rec.manual_entry
+        data["entries"] = entry_flow.normalize_entries(data.get("entries") or [],
+            previous=previous.get("entries") if protected_entries else None,
+            origin="observed" if pipeline.doc_types.get(voucher.doc_type_key).get("has_entries") else "manual")
+        entry_flow.recompute(data)
         mapping.prepare_items(session, data, rec.company_id, previous=previous,
                               previous_company_id=rec.company_id, model_result=True, rec_id=rec.id)
         history = json.loads(rec.recognition_history or "[]")
@@ -189,6 +205,7 @@ def _save_recognition(rec_id, voucher):
         if rec.status in (ReviewStatus.prepared, ReviewStatus.queued) and not (json.loads(rec.ai_json).get("fields") or {}):
             rec.ai_json = json.dumps(mapping.strip_accounting(voucher.model_dump()), ensure_ascii=False)
         rec.current_json = json.dumps(data, ensure_ascii=False)
+        entry_flow.invalidate(rec, "重新辨識來源單據")
         rec.confidence, rec.structure_model, rec.ocr_provider = str(voucher.confidence or ""), voucher.structure_model, voucher.ocr_provider
         rec.period = _period_of(data.get("date", "")) or rec.period
         rec.status = ReviewStatus.pending
@@ -220,6 +237,10 @@ def update_current(rec_id: int, voucher_dict: dict, *, mark_manual: bool = True,
         previous["items"] = [mapping.defaults(row) for row in previous.get("items") or []]
         old_fields = previous.get("fields") or {}
         voucher_dict = {**previous, **voucher_dict}
+        previous_entries = previous.get("entries") or []
+        voucher_dict["entries"] = entry_flow.normalize_entries(voucher_dict.get("entries") or [], previous_entries)
+        if getattr(rec, "id", None):
+            entry_flow.ensure_ownership(s, rec.id, voucher_dict["entries"], previous_entries)
         old_company_id = getattr(rec, "company_id", None)
         selected_company = old_company_id if _company_id is _UNSET else _company_id
         mapping.prepare_items(s, voucher_dict, selected_company, previous=previous,
@@ -266,7 +287,7 @@ def update_current(rec_id: int, voucher_dict: dict, *, mark_manual: bool = True,
                         for item in evidence.get(path, []):
                             item["selected"] = False
                         evidence.setdefault(path, []).append({"source": "manual", "value": value, "selected": True})
-            for key in ("entries", "note", "doc_type_key", "doc_type"):
+            for key in ("note", "doc_type_key", "doc_type"):
                 if voucher_dict.get(key) != previous.get(key):
                     changed = True
                     for item in evidence.get(key, []):
@@ -281,12 +302,27 @@ def update_current(rec_id: int, voucher_dict: dict, *, mark_manual: bool = True,
                 meta.update(status="candidate", stale=True)
                 meta["warnings"] = list(dict.fromkeys([*(meta.get("warnings") or []), "資料已人工修改，原分錄待重新確認"]))
         voucher_dict = pipeline.canonicalize_voucher(voucher_dict)
+        summary = entry_flow.recompute(voucher_dict)
         if _actor is not None:
             mapping.audit_items(s, voucher_dict, previous, _actor)
         previous_normalized = pipeline.canonicalize_voucher(deepcopy(previous))
-        if not mark_manual or voucher_dict != previous_normalized:
+        source_changed = entry_flow.source_payload(voucher_dict) != entry_flow.source_payload(previous_normalized)
+        entries_changed = voucher_dict["entries"] != previous_entries
+        if source_changed:
             _invalidate_confirmation(rec)
         rec.current_json = json.dumps(voucher_dict, ensure_ascii=False)
+        identity = entry_flow.user_identity(s, _actor) if _actor else None
+        if source_changed or entry_flow.source_payload(voucher_dict, accounting=True) != entry_flow.source_payload(previous_normalized, accounting=True):
+            entry_flow.invalidate(rec, "來源內容或明細科目已修改", identity, previous_entries)
+        if entries_changed:
+            entry_flow.event(rec, "draft_saved", previous_entries, voucher_dict["entries"], identity)
+            entry_flow.invalidate(rec, "分錄草稿已修改", identity, previous_entries, stale_proposal=False)
+            if mark_manual:
+                evidence = voucher_dict.setdefault("field_evidence", {})
+                for item in evidence.get("entries", []):
+                    item["selected"] = False
+                evidence.setdefault("entries", []).append({"source": "manual", "value": deepcopy(voucher_dict["entries"]), "selected": True})
+                rec.current_json = json.dumps(voucher_dict, ensure_ascii=False)
         rec.period = _period_of(voucher_dict.get("date", "")) or rec.period
         rec.updated_at = datetime.now()
         s.add(rec)
@@ -342,7 +378,7 @@ def save_current(rec_id, payload, actor):
         old_company_id = rec.company_id
         previous = json.loads(rec.current_json)
         rec = update_current(rec_id, payload.get("voucher") or {}, _session=session,
-                             _company_id=selected_id, _reviewed=payload.get("reviewed_items"))
+                             _company_id=selected_id, _reviewed=payload.get("reviewed_items"), _actor=actor)
         if old_company_id != selected_id:
             _invalidate_confirmation(rec)
         rec.company_id = selected_id
@@ -355,8 +391,6 @@ def save_current(rec_id, payload, actor):
                 setattr(rec, key, payload[key])
         data = json.loads(rec.current_json)
         mapping.audit_items(session, data, previous, actor)
-        if action == "confirm":
-            _check_item_confirmation(data, rec.company_id)
         skipped = mapping.publish(session, rec, data, actor, payload.get("mapping_choices")) if action != "temporary" else []
         rec.current_json = json.dumps(data, ensure_ascii=False)
         if action == "confirm":
@@ -366,6 +400,117 @@ def save_current(rec_id, payload, actor):
         session.commit()
         session.refresh(rec)
         return rec, skipped
+
+
+def _entry_record(session, rec_id, expected):
+    session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+    rec = session.get(VoucherRecord, rec_id)
+    if not rec:
+        return None
+    if rec.record_role == "source_page" or rec.status not in (ReviewStatus.pending, ReviewStatus.confirmed):
+        raise RecognitionProtected("請先完成內容辨識，再編輯或確認分錄")
+    if rec.updated_at.isoformat() != expected:
+        raise entry_flow.EntryConflict("單據已被修改，請重新載入後操作分錄", latest={
+            "updated_at": rec.updated_at.isoformat(), "current": json.loads(rec.current_json), "company_id": rec.company_id})
+    return rec
+
+
+def save_entry_proposal(rec_id, model_voucher, actor, source_fingerprint):
+    """Model generation is read-only until its unchanged source is checked here."""
+    with get_session() as session:
+        session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+        rec = session.get(VoucherRecord, rec_id)
+        if not rec:
+            return None
+        _check_model_write(rec)
+        data = json.loads(rec.current_json)
+        if rec.status not in (ReviewStatus.pending, ReviewStatus.confirmed) or doc_types.get(data.get("doc_type_key", "")).get("has_entries") or doc_types.is_supporting(data.get("doc_type_key", "")):
+            raise RecognitionProtected("此類型不產生 AI 分錄建議，請直接核對來源分錄")
+        if entry_flow.source_fingerprint(rec) != source_fingerprint:
+            raise entry_flow.EntryConflict("產生建議期間來源已修改，請重新產生建議")
+        identity = entry_flow.user_identity(session, actor)
+        from uuid import uuid4
+        rows = [{k: v for k, v in row.items() if k not in entry_flow.ENTRY_META} for row in model_voucher.model_dump()["entries"]]
+        proposal = {"id": str(uuid4()), "status": "pending", "source_fingerprint": source_fingerprint,
+                    "created_at": entry_flow.utc_now().isoformat() + "Z", "created_by": identity[0], "created_by_name": identity[1],
+                    "entries": entry_flow.normalize_entries(rows, origin="generated"),
+                    "classification_meta": model_voucher.classification_meta,
+                    "validation_warnings": model_voucher.validation_warnings, "payment_state": model_voucher.payment_state}
+        proposal["checks"] = entry_flow.checks(proposal)
+        previous = json.loads(rec.entries_proposal_json or "{}")
+        entry_flow.event(rec, "proposal_generated", previous, proposal, identity)
+        rec.entries_proposal_json = json.dumps(proposal, ensure_ascii=False)
+        rec.updated_at = datetime.now()
+        session.add(rec)
+        session.commit()
+        session.refresh(rec)
+        return rec
+
+
+def manage_entries(rec_id, action, expected_updated_at, actor, proposal_id=None, replace_existing=False):
+    if action not in ("confirm", "adopt", "discard"):
+        raise ValueError("分錄操作不合法")
+    with get_session() as session:
+        rec = _entry_record(session, rec_id, expected_updated_at)
+        if not rec:
+            return None
+        identity = entry_flow.user_identity(session, actor)
+        data = json.loads(rec.current_json)
+        if action == "confirm":
+            if rec.status != ReviewStatus.confirmed:
+                raise RecognitionProtected("請先確認辨識內容")
+            if not rec.company_id:
+                raise RecognitionProtected("請先指定歸屬公司")
+            if doc_types.is_supporting(data.get("doc_type_key", "")):
+                raise RecognitionProtected("佐證附頁不獨立確認入帳分錄")
+            summary = entry_flow.recompute(data)
+            issues = summary["issues"]
+            if not data.get("entries"):
+                issues = ["尚無分錄"]
+            if any(r.get("account_needs_review") for r in data.get("items", [])):
+                issues = [*issues, "明細科目尚待核對"]
+            if not summary["balance_check"] or issues:
+                raise RecognitionProtected("分錄尚不可供入帳：" + "；".join(issues))
+            if rec.entries_status != "ready":
+                rec.entries_status = "ready"
+                rec.entries_confirmed_at = entry_flow.utc_now()
+                rec.entries_confirmed_by, rec.entries_confirmed_by_name = identity
+                entry_flow.event(rec, "confirmed", "draft", data["entries"], identity)
+        else:
+            proposal = json.loads(rec.entries_proposal_json or "{}")
+            if not proposal or proposal.get("id") != proposal_id:
+                raise entry_flow.EntryConflict("分錄建議已變更，請重新載入")
+            if action == "adopt":
+                if proposal.get("status") != "pending" or proposal.get("source_fingerprint") != entry_flow.source_fingerprint(rec):
+                    raise entry_flow.EntryConflict("來源已變更，請重新產生分錄建議")
+                if data.get("entries") and not replace_existing:
+                    raise entry_flow.EntryConflict("請先比對並確認替換既有分錄草稿")
+                before = deepcopy(data.get("entries") or [])
+                data["entries"] = entry_flow.normalize_entries(proposal["entries"], origin="generated")
+                data["classification_meta"] = deepcopy(proposal.get("classification_meta") or {})
+                data["payment_state"] = deepcopy(proposal.get("payment_state") or {})
+                entry_flow.recompute(data)
+                proposal["status"] = "adopted"
+                entry_flow.event(rec, "proposal_adopted", before, data["entries"], identity)
+                rec.current_json = json.dumps(data, ensure_ascii=False)
+                entry_flow.invalidate(rec, "已採用新的分錄草稿", identity, before, stale_proposal=False)
+                evidence = data.setdefault("field_evidence", {})
+                for item in evidence.get("entries", []):
+                    item["selected"] = False
+                evidence.setdefault("entries", []).append({"source": "manual", "selected": True,
+                                                            "reason": "採用 AI 建議", "value": deepcopy(data["entries"])})
+            else:
+                if proposal.get("status") not in ("pending", "stale"):
+                    raise entry_flow.EntryConflict("此建議已處理")
+                entry_flow.event(rec, "proposal_discarded", proposal, None, identity)
+                proposal["status"] = "discarded"
+            rec.entries_proposal_json = json.dumps(proposal, ensure_ascii=False)
+        rec.current_json = json.dumps(data, ensure_ascii=False)
+        rec.updated_at = datetime.now()
+        session.add(rec)
+        session.commit()
+        session.refresh(rec)
+        return rec
 
 
 def confirm_record(rec_id: int, expected_updated_at: str) -> Optional[VoucherRecord]:
@@ -380,7 +525,6 @@ def confirm_record(rec_id: int, expected_updated_at: str) -> Optional[VoucherRec
             raise RecognitionProtected("請先完成內容辨識，再確認憑證")
         if not rec.updated_at or rec.updated_at.isoformat() != expected_updated_at:
             raise RecognitionProtected("資料已被修改，請重新載入後確認")
-        _check_item_confirmation(json.loads(rec.current_json), rec.company_id)
         if rec.status == ReviewStatus.confirmed:
             return rec
         now = datetime.now()
@@ -841,8 +985,8 @@ def alignment_pairs():
     """已確認紀錄中，AI 原始值與人工修正值不同者 → 模型對齊/微調訊號。"""
     pairs = []
     for rec in list_vouchers(status=ReviewStatus.confirmed):
-        ai = mapping.strip_accounting(json.loads(rec.ai_json))
-        corrected = mapping.strip_accounting(json.loads(rec.current_json))
+        ai = entry_flow.alignment_payload(json.loads(rec.ai_json))
+        corrected = entry_flow.alignment_payload(json.loads(rec.current_json))
         if ai != corrected:
             pairs.append({"id": rec.id, "ai": ai, "corrected": corrected})
     return pairs
