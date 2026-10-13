@@ -300,7 +300,7 @@ def set_company(rec_id: int, company: str) -> Optional[VoucherRecord]:
 def set_notes(rec_id: int, **notes) -> Optional[VoucherRecord]:
     """只更新備註欄與人工輸入標記，不動狀態與 current_json。
     備註會成為下次辨識的人工修正提示，故必須能單獨儲存。"""
-    allowed = {"correction_note", "dev_note", "manual_entry"}
+    allowed = {"correction_note", "manual_entry"}
     with get_session() as s:
         rec = s.get(VoucherRecord, rec_id)
         if not rec:
@@ -494,14 +494,14 @@ def crop_image(rec_id: int, box):
 
 
 def re_recognize(rec_id: int) -> Optional[VoucherRecord]:
-    """對既有影像重新辨識，以修正備註與開發者備註作為提示。"""
+    """對既有影像重新辨識，以修正備註作為提示。"""
     from app.core import pipeline
 
     rec = get_voucher(rec_id)
     if not rec or not rec.image_path:
         return None
     _check_model_write(rec)
-    hint = "；".join(n for n in (rec.dev_note, rec.correction_note) if n)
+    hint = rec.correction_note or ""
     from app.core import invocation_trace, model_invocation, ocr_cache
     import uuid
     trace_path = config.DATA_DIR / "recognition" / str(rec_id) / (uuid.uuid4().hex + ".json")
@@ -528,8 +528,7 @@ def _route_unconfirmed_page(rec):
     from app.core import page_layout, invocation_trace
     current = json.loads(rec.current_json)
     manual = any(r.get("source") == "manual" and r.get("selected") for records in current.get("field_evidence", {}).values() for r in records)
-    if (rec.source_parent_id or rec.manual_entry or manual or rec.status == ReviewStatus.confirmed
-            or rec.clerk_reviewed_at or rec.accountant_approved_at):
+    if rec.source_parent_id or rec.manual_entry or manual or rec.status == ReviewStatus.confirmed:
         return None, None
     source = config.UPLOAD_DIR / rec.image_path
     layout = page_layout.detect(str(source))
@@ -679,7 +678,7 @@ def recognize_record(rec_id: int) -> Optional[VoucherRecord]:
     cur = json.loads(rec.current_json)
     type_key = cur.get("doc_type_key") or "other"
     _check_model_write(rec)
-    hint = "；".join(n for n in (rec.dev_note, rec.correction_note) if n)
+    hint = rec.correction_note or ""
     confirmed = {path[7:]: cur.get("fields", {}).get(path[7:]) for path, records in cur.get("field_evidence", {}).items()
                  if path.startswith("fields.") and any(r.get("source") == "manual" and r.get("selected") for r in records)}
     from app.core import invocation_trace, model_invocation, ocr_cache
@@ -694,27 +693,12 @@ def recognize_record(rec_id: int) -> Optional[VoucherRecord]:
     return _save_recognition(rec_id, v)
 
 
-def set_dev_note(rec_id: int, note: str) -> Optional[VoucherRecord]:
-    """開發者備註（管理員專屬）：紀錄辨識錯誤供修正回饋。"""
-    with get_session() as s:
-        rec = s.get(VoucherRecord, rec_id)
-        if not rec:
-            return None
-        rec.dev_note = note
-        rec.updated_at = datetime.now()
-        s.add(rec)
-        s.commit()
-        s.refresh(rec)
-        return rec
-
-
 def feedback_log():
     """匯集有任何備註或經人工修正的紀錄，作為修正回饋清單。"""
     out = []
     for rec in list_vouchers():
         changed = rec.ai_json != rec.current_json
-        notes = (rec.correction_note, rec.dev_note)
-        if not any(notes) and not changed and not rec.manual_entry:
+        if not rec.correction_note and not changed and not rec.manual_entry:
             continue
         cur = json.loads(rec.current_json)
         out.append({
@@ -722,7 +706,7 @@ def feedback_log():
             "doc_type": cur.get("doc_type", ""), "doc_type_key": cur.get("doc_type_key", ""),
             "voucher_id": cur.get("voucher_id", ""), "status": rec.status, "changed": changed,
             "manual_entry": bool(rec.manual_entry),
-            "correction_note": rec.correction_note, "dev_note": rec.dev_note,
+            "correction_note": rec.correction_note,
         })
     return out
 

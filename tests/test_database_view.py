@@ -122,7 +122,11 @@ class DatabaseViewTests(unittest.TestCase):
         for table in tables:
             columns = self.rows(table=table["name"]).json()["columns"]
             self.assertTrue(all(c["label"] for c in columns))
-        self.assertEqual(sum(len(meta["columns"]) for meta in database_view.TABLE_META.values()), 94)
+        self.assertEqual(sum(len(meta["columns"]) for meta in database_view.TABLE_META.values()), 89)
+        voucher_labels = database_view.TABLE_META[("app", "voucher_records")]["columns"]
+        for legacy in ("clerk_note", "accountant_note", "dev_note",
+                       "clerk_reviewed_at", "accountant_approved_at"):
+            self.assertNotIn(legacy, voucher_labels)
         self.assertEqual(len(database_view.TABLE_META), 8)
 
     def test_voucher_date_status_and_keyword_are_combined(self):

@@ -50,12 +50,6 @@ class VoucherRecord(SQLModel, table=True):
 
     correction_note: str = ""
     confirmed_at: Optional[datetime] = None
-    # 舊流程欄位只保留歷史資料，正式流程不再寫入。
-    clerk_note: str = ""
-    accountant_note: str = ""
-    dev_note: str = ""               # 開發者備註（管理員專屬）：紀錄辨識錯誤供修正回饋
-    clerk_reviewed_at: Optional[datetime] = None
-    accountant_approved_at: Optional[datetime] = None
 
     # 手寫／字跡潦草等 AI 讀不可靠、欄位由人工鍵入者，由審核者勾記。
     # 用途：① 清單一眼看出哪些不是機器讀的 ② 重新辨識前擋下覆蓋 ③ 統計自動化涵蓋率

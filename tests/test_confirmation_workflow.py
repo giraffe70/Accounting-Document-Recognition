@@ -134,11 +134,11 @@ class ConfirmationServiceTests(unittest.TestCase):
         same_company = review.set_company(record.id, "Synthetic Co")
         self.assertEqual(same_company.status, ReviewStatus.confirmed)
         self.assertEqual(same_company.confirmed_at, confirmed_at)
-        noted = review.set_notes(record.id, correction_note="核對品名", dev_note="synthetic", manual_entry=True)
+        noted = review.set_notes(record.id, correction_note="核對品名", dev_note="ignored", manual_entry=True)
         self.assertEqual(noted.status, ReviewStatus.confirmed)
         self.assertEqual(noted.confirmed_at, confirmed_at)
         self.assertEqual(noted.correction_note, "核對品名")
-        self.assertEqual(noted.dev_note, "synthetic")
+        self.assertFalse(hasattr(noted, "dev_note"))
 
         changed = review.set_company(record.id, "Another Co")
         self.assertEqual(changed.status, ReviewStatus.pending)
@@ -165,6 +165,14 @@ class ConfirmationServiceTests(unittest.TestCase):
         self.assertIsNone(updated.confirmed_at)
         self.assertEqual(json.loads(updated.current_json)["fields"]["total_amount"], 125)
         self.assertEqual(json.loads(updated.ai_json)["fields"]["total_amount"], 100)
+
+    def test_feedback_log_uses_correction_notes_without_dev_note(self):
+        record = self.save(status=ReviewStatus.pending)
+        review.set_notes(record.id, correction_note="核對品名")
+        items = review.feedback_log()
+        self.assertEqual([item["id"] for item in items], [record.id])
+        self.assertEqual(items[0]["correction_note"], "核對品名")
+        self.assertNotIn("dev_note", items[0])
 
     def test_alignment_pairs_queries_confirmed_records_only(self):
         confirmed = self.save(status=ReviewStatus.confirmed)
@@ -203,9 +211,9 @@ class ReviewMigrationTests(unittest.TestCase):
                     attachments TEXT DEFAULT '[]', source_parent_id INTEGER, created_at DATETIME
                 )""")
                 conn.exec_driver_sql("""INSERT INTO voucher_records
-                    (id,status,clerk_note,accountant_note,accountant_approved_at,updated_at)
+                    (id,status,clerk_note,accountant_note,accountant_approved_at,updated_at,dev_note)
                     VALUES (1,'accountant_approved','記帳士修正','會計師核定',
-                            '2026-09-30 12:00:00','2026-10-01 12:00:00')""")
+                            '2026-09-30 12:00:00','2026-10-01 12:00:00','開發備註將捨棄')""")
                 conn.exec_driver_sql("INSERT INTO voucher_records (id,status) VALUES (2,'clerk_reviewed')")
                 conn.exec_driver_sql("INSERT INTO voucher_records (id,status) VALUES (3,'rejected')")
 
@@ -222,12 +230,41 @@ class ReviewMigrationTests(unittest.TestCase):
                         "SELECT status FROM voucher_records WHERE id=2").scalar_one(), "pending")
                     self.assertEqual(conn.exec_driver_sql(
                         "SELECT status FROM voucher_records WHERE id=3").scalar_one(), "pending")
+                    columns = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(voucher_records)")}
+                    self.assertFalse(columns & set(db_session._LEGACY_COLUMNS))
+                    self.assertNotIn("開發備註將捨棄", confirmed[2])
                     conn.exec_driver_sql("UPDATE voucher_records SET correction_note='人工後續編修' WHERE id=1")
                     conn.commit()
                 db_session._migrate()
                 with engine.connect() as conn:
                     self.assertEqual(conn.exec_driver_sql(
                         "SELECT correction_note FROM voucher_records WHERE id=1").scalar_one(), "人工後續編修")
+                with Session(engine) as session:
+                    self.assertEqual(session.get(VoucherRecord, 1).status, ReviewStatus.confirmed)
+            engine.dispose()
+
+    def test_partial_legacy_schema_and_current_schema_migrate_idempotently(self):
+        from app.db import session as db_session
+
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = create_engine(f"sqlite:///{Path(tmp) / 'partial.db'}")
+            SQLModel.metadata.create_all(engine)
+            with engine.begin() as conn:
+                conn.exec_driver_sql("ALTER TABLE voucher_records ADD COLUMN dev_note VARCHAR DEFAULT ''")
+                conn.exec_driver_sql("""INSERT INTO voucher_records
+                    (id,source_file,record_role,recognition_history,company,period,status,confidence,
+                     ai_json,current_json,correction_note,manual_entry,ocr_provider,structure_model,
+                     image_path,attachments,created_at,updated_at,dev_note)
+                    VALUES (1,'','voucher','[]','','','pending','','{}','{}','',0,'','','','[]',
+                            '2026-10-01 00:00:00','2026-10-01 00:00:00','x')""")
+            with patch.object(db_session, "_engine", engine):
+                db_session._migrate()
+                db_session._migrate()
+                with engine.connect() as conn:
+                    columns = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(voucher_records)")}
+                    self.assertFalse(columns & set(db_session._LEGACY_COLUMNS))
+                    self.assertIn("correction_note", columns)
+                    self.assertEqual(conn.exec_driver_sql("SELECT COUNT(*) FROM voucher_records").scalar_one(), 1)
             engine.dispose()
 
 
@@ -329,17 +366,30 @@ class ConfirmationApiContractTests(unittest.TestCase):
         self.assertEqual(endpoint("pending,unknown").status_code, 422)
 
     def test_notes_api_accepts_correction_note(self):
-        from fastapi import Body, Request
+        import ast
+        import inspect
+        from fastapi import Body
 
-        auth = SimpleNamespace(get_user_by_token=Mock(return_value={"role": "clerk"}))
         review_stub = SimpleNamespace(set_notes=Mock(return_value=SimpleNamespace(id=7)))
         endpoint = _load_endpoint("api_notes", {
-            "auth": auth, "review": review_stub, "JSONResponse": Mock(), "Body": Body, "Request": Request,
+            "review": review_stub, "JSONResponse": Mock(), "Body": Body,
             "_rec_to_dict": lambda value: {"id": value.id},
         })
-        request = SimpleNamespace(cookies={"session": "offline"})
-        endpoint(request, 7, correction_note="人工修正", dev_note=None, manual_entry=None)
+        endpoint(7, correction_note="人工修正", manual_entry=None)
         review_stub.set_notes.assert_called_once_with(7, correction_note="人工修正")
+        self.assertEqual(list(inspect.signature(endpoint).parameters),
+                         ["rec_id", "correction_note", "manual_entry"])
+
+        source = (ROOT / "app" / "main.py").read_text(encoding="utf-8")
+        routes = {
+            decorator.args[0].value
+            for node in ast.parse(source).body if isinstance(node, ast.FunctionDef)
+            for decorator in node.decorator_list
+            if isinstance(decorator, ast.Call) and decorator.args and isinstance(decorator.args[0], ast.Constant)
+        }
+        self.assertNotIn("/api/vouchers/{rec_id}/dev-note", routes)
+        self.assertIn("/api/feedback", routes)
+        self.assertNotIn("dev_note", source)
 
 
 class VoucherDeleteTests(unittest.TestCase):

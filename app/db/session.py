@@ -17,6 +17,13 @@ def init_db():
     _migrate()
 
 
+# 已由 correction_note、confirmed_at 與新狀態取代的舊審核欄位（遷移後移除）。
+_LEGACY_COLUMNS = (
+    "clerk_note", "accountant_note", "dev_note",
+    "clerk_reviewed_at", "accountant_approved_at",
+)
+
+
 def _migrate():
     """輕量遷移：對既有 DB 補上新欄位（SQLite create_all 不會自動加欄位）。
 
@@ -26,7 +33,6 @@ def _migrate():
     # col -> (SQL 型別, 預設值)
     added = {
         "image_path": ("VARCHAR", "''"),
-        "dev_note": ("VARCHAR", "''"),
         "attachments": ("VARCHAR", "'[]'"),
         "manual_entry": ("INTEGER", "0"),
         "record_role": ("VARCHAR", "'voucher'"),
@@ -67,6 +73,11 @@ def _migrate():
             UPDATE voucher_records SET status = 'pending', confirmed_at = NULL
             WHERE status IN ('clerk_reviewed', 'rejected')
         """)
+        # 舊欄位的資料已在上方轉入新欄位／新狀態；dev_note 依決議直接捨棄。
+        # 必須排在轉換之後再刪，且逐欄檢查存在性以維持冪等。
+        for col in _LEGACY_COLUMNS:
+            if col in cols:
+                conn.exec_driver_sql(f"ALTER TABLE voucher_records DROP COLUMN {col}")
 
 
 def get_session() -> Session:

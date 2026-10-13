@@ -458,7 +458,7 @@ flowchart TB
   <!-- ░░░ API ░░░ -->
   <section class="doc" id="api">
     <h2><span class="ic">🔌</span>API／介面說明</h2>
-    <p class="lead">除 <code>/api/login · /api/logout · /api/me · /api/health</code> 外，所有 <code>/api</code> 需登入（cookie）。所有登入角色皆可確認憑證；開發者備註、科目表及備份限管理員。</p>
+    <p class="lead">除 <code>/api/login · /api/logout · /api/me · /api/health</code> 外，所有 <code>/api</code> 需登入（cookie）。所有登入角色皆可確認憑證；科目表及備份限管理員。</p>
 
     <h3>登入與辨識</h3>
     <table>
@@ -477,7 +477,7 @@ flowchart TB
       <tr><td><code>POST /api/vouchers/{id}/confirm-appearance</code></td><td>完成外觀確認，可傳入 <code>doc_type_key</code>，再加入內容提取</td></tr>
       <tr><td><code>POST /api/vouchers/{id}/confirm</code></td><td>完成內容人工確認；body 傳入 <code>expected_updated_at</code>，所有登入角色可用</td></tr>
       <tr><td><code>POST /api/vouchers/{id}/company</code></td><td>補填／更正歸屬公司（匯入時漏選者，清單與報表分公司彙整都靠它）</td></tr>
-      <tr><td><code>POST /api/vouchers/{id}/notes</code></td><td>保存合併舊有兩欄的 <code>correction_note</code> 修正備註及管理員限定的 <code>dev_note</code>；備註不改變確認狀態</td></tr>
+      <tr><td><code>POST /api/vouchers/{id}/notes</code></td><td>保存合併舊有兩欄的 <code>correction_note</code> 修正備註及人工輸入標記；備註不改變確認狀態</td></tr>
       <tr><td><code>POST /api/vouchers/{id}/classify</code></td><td>自動分類會計科目</td></tr>
       <tr><td><code>GET /api/journal</code> · <code>/api/journal/periods</code></td><td>單月日記帳彙整</td></tr>
       <tr><td><code>GET /api/report</code> · <code>/api/report/templates</code></td><td>產製報表（HTML，可列印/另存 PDF）</td></tr>
@@ -1017,7 +1017,7 @@ start_webui.bat   # http://127.0.0.1:8090</pre></div>
       <tr><th>角色</th><th>可做</th></tr>
       <tr><td>記帳士 clerk</td><td>上傳、辨識、修改欄位、保存修正草稿及<strong>確認憑證</strong></td></tr>
       <tr><td>會計師 accountant</td><td>記帳士全部 + 保存修正草稿及<strong>確認憑證</strong></td></tr>
-      <tr><td>管理員 admin</td><td>全部 + <strong>開發者備註、客製科目表 / 地端備份</strong></td></tr>
+      <tr><td>管理員 admin</td><td>全部 + <strong>客製科目表 / 地端備份</strong></td></tr>
     </table>
     <div class="diagram">
       <div class="mermaid">

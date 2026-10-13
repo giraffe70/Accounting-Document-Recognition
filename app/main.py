@@ -62,7 +62,7 @@ async def auth_guard(request: Request, call_next):
                 return JSONResponse({"detail": "需管理員權限"}, status_code=403)
             elif path.startswith("/api/sysconfig"):
                 return JSONResponse({"detail": "需管理員權限"}, status_code=403)
-            elif path.endswith("/dev-note") or path == "/api/feedback":
+            elif path == "/api/feedback":
                 return JSONResponse({"detail": "需管理員權限"}, status_code=403)
     return await call_next(request)
 
@@ -412,7 +412,7 @@ def _rec_to_dict(rec: VoucherRecord, full: bool = False) -> dict:
         "structure_model": rec.structure_model, "ocr_provider": rec.ocr_provider,
         "correction_note": rec.correction_note,
         "confirmed_at": rec.confirmed_at.isoformat() if rec.confirmed_at else "",
-        "dev_note": rec.dev_note, "manual_entry": bool(rec.manual_entry),
+        "manual_entry": bool(rec.manual_entry),
         # 人工是否動過欄位：重新辨識會覆蓋 current_json，前端據此先問過使用者
         "edited": rec.ai_json != rec.current_json,
         "created_at": rec.created_at.isoformat() if rec.created_at else "",
@@ -515,17 +515,12 @@ def api_set_company(rec_id: int, company: str = Body("", embed=True)):
 
 
 @app.post("/api/vouchers/{rec_id}/notes")
-def api_notes(request: Request, rec_id: int, correction_note: str = Body(None, embed=True),
-              dev_note: str = Body(None, embed=True),
+def api_notes(rec_id: int, correction_note: str = Body(None, embed=True),
               manual_entry: bool = Body(None, embed=True)):
-    """保存修正備註及人工輸入標記，不轉狀態；開發者備註限管理員。"""
-    user = auth.get_user_by_token(request.cookies.get("session")) or {}
-    role = user.get("role", "")
+    """保存修正備註及人工輸入標記，不轉狀態。"""
     patch = {}
     if correction_note is not None:
         patch["correction_note"] = correction_note
-    if dev_note is not None and role == "admin":
-        patch["dev_note"] = dev_note
     if manual_entry is not None:
         patch["manual_entry"] = manual_entry
     rec = review.set_notes(rec_id, **patch)
@@ -707,16 +702,9 @@ def api_classify(rec_id: int):
         return JSONResponse({"ok": False, "detail": f"分類失敗：{exc}"}, status_code=500)
 
 
-@app.post("/api/vouchers/{rec_id}/dev-note")
-def api_dev_note(rec_id: int, note: str = Body("", embed=True)):
-    """開發者備註（管理員專屬）。"""
-    rec = review.set_dev_note(rec_id, note)
-    return {"ok": bool(rec)} if rec else JSONResponse({"detail": "查無此紀錄"}, status_code=404)
-
-
 @app.get("/api/feedback")
 def api_feedback():
-    """修正回饋清單（有備註或經修正的紀錄；管理員專屬）。"""
+    """修正回饋清單（有修正備註、人工輸入或經修正的紀錄；管理員專屬）。"""
     return {"items": review.feedback_log()}
 
 

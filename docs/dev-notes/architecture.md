@@ -118,7 +118,7 @@ flowchart TD
 2. `pipeline.prepare_pages()` 進行頁面準備、類型判定與轉正；`review.save_voucher()` 將每筆憑證存入 SQLite，狀態為 `prepared`，並保存對照影像。
 3. 使用者確認外觀與文件類型後，紀錄轉為 `queued`，等待內容提取。
 4. 單筆或批次內容提取依文件類型使用 OCR／VLM，完成結構化及欄位清理，再將結果存回紀錄；`prepared`／`queued` 紀錄轉為 `pending`。
-5. 使用者修改欄位並保存草稿；另按「確認」完成憑證確認。`correction_note` 為修正備註，`dev_note` 僅管理員可用。修正辨識結果、內容、公司或影像會讓憑證回到待確認；僅修改備註不改變狀態。確認時間記錄於 `confirmed_at`。
+5. 使用者修改欄位並保存草稿；另按「確認」完成憑證確認。`correction_note` 為修正備註。修正辨識結果、內容、公司或影像會讓憑證回到待確認；僅修改備註不改變狀態。確認時間記錄於 `confirmed_at`。
 6. 日記帳、會計傳票與配對只讀取已確認憑證。確認入口 `POST /api/vouchers/{rec_id}/confirm` 接受 `expected_updated_at`，所有已登入角色皆可使用；保存草稿不會加入帳務。
 
 ```mermaid
@@ -131,7 +131,7 @@ flowchart LR
     D --> E[日記帳／傳票／配對]
 ```
 
-歷史角色欄位保留供舊資料追溯：`accountant_approved` 映射為 `confirmed`；`clerk_reviewed` 與 `rejected` 映射為 `pending`。以上圖示表達預期操作流程；服務中的狀態更新並非完整的狀態機轉移驗證。
+舊審核欄位（`clerk_note`、`accountant_note`、`dev_note`、`clerk_reviewed_at`、`accountant_approved_at`）已於啟動遷移（`app/db/session.py`）轉入 `correction_note`、`confirmed_at` 與新狀態後移除，`dev_note` 內容直接捨棄。遷移時舊狀態映射仍保留：`accountant_approved` 映射為 `confirmed`；`clerk_reviewed` 與 `rejected` 映射為 `pending`。以上圖示表達預期操作流程；服務中的狀態更新並非完整的狀態機轉移驗證。
 
 ### 5.1 正式辨識流程與入口
 
@@ -280,7 +280,7 @@ OCR 本身不直接解析一般單據的語意欄位，主要內容仍由 VLM �
 
 ## 6. 主要 API
 
-除登入、登出、目前使用者與健康檢查等公開入口外，`/api/` 路由由 middleware 檢查登入。`/api/me` 本身仍會驗證 session。憑證確認允許所有登入角色；`dev_note`、科目表寫入、備份、系統組態與開發者回饋等另有管理員限制，詳細條件見 `auth_guard()` 與個別路由。
+除登入、登出、目前使用者與健康檢查等公開入口外，`/api/` 路由由 middleware 檢查登入。`/api/me` 本身仍會驗證 session。憑證確認允許所有登入角色；科目表寫入、備份、系統組態與開發者回饋等另有管理員限制，詳細條件見 `auth_guard()` 與個別路由。
 
 | 方法與路徑 | 用途 |
 |---|---|
