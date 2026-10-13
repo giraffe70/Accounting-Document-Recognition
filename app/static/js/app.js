@@ -761,7 +761,7 @@
     const list = $("itemAccountCodes");
     if (list) list.innerHTML = "";
     if (company == null) return;
-    const response = await fetch(`/api/accounts?company_id=${company}&strict=true`);
+    const response = await fetch(`/api/accounts?company_id=${company}`);
     if (company !== selectedCompanyId() || !response.ok) return;
     const chart = (await response.json()).accounts || [];
     if (company !== selectedCompanyId()) return;
@@ -1329,6 +1329,9 @@
     // 顯示的是不是這家公司自己的表——沒講清楚會誤以為在改 A 公司卻改到通用表
     $("accCompany").title = company && !own
       ? `${company} 尚未自訂科目表，目前顯示的是通用表；儲存後即成為 ${company} 專屬` : "";
+    $("accChartSource").textContent = company && !own
+      ? `${company} 尚未自訂科目表，目前使用通用科目表；明細科目核對亦使用此表。`
+      : company ? `目前使用 ${company} 的公司專屬科目表。` : "目前使用通用科目表。";
   }
   function accRow(a) {
     return `<tr>
@@ -1352,6 +1355,8 @@
     if (!r.ok) { alert(`科目表儲存失敗（HTTP ${r.status}，需管理員權限）`); return; }
     $("accountsModal").classList.add("hidden");
     toast(`${company || "通用"}科目表已儲存（${accounts.length} 個科目）`);
+    await loadItemAccountChart();
+    await refreshCurrentStatus();
   }
 
   // ── 模型設定 modal ──

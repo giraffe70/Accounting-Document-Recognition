@@ -136,6 +136,26 @@ class RecognitionReviewTests(unittest.TestCase):
             "review": review, "json": json, "config": SimpleNamespace(UPLOAD_DIR=Path(self.tmp.name))})
         self.assertEqual(route(rec.id, expected_updated_at="old-version").status_code, 409)
 
+    def test_account_validation_uses_default_only_when_company_has_no_own_chart(self):
+        from app.services import accounts
+        rec = self.record()
+        data = {"doc_type_key": "receipt", "items": [{"account_code": "6050", "account_name": "運費"}]}
+        default = [{"code": "6050", "name": "運費"}]
+        with patch.object(accounts, "_company_key", side_effect=lambda value: value), \
+             patch.object(accounts, "_load_all", return_value={"_default": default}):
+            self.assertEqual(review.recognition_account_warnings(rec, data), [])
+        own = [{"code": "6205", "name": "運費"}]
+        with patch.object(accounts, "_company_key", side_effect=lambda value: value), \
+             patch.object(accounts, "_load_all", return_value={"_default": default, "synthetic": own}):
+            self.assertEqual(review.recognition_account_warnings(rec, data), ["第 1 列：科目 6050 未列於公司科目表"])
+            data["items"][0]["account_code"] = "6205"
+            self.assertEqual(review.recognition_account_warnings(rec, data), [])
+
+    def test_missing_company_is_distinguished_from_missing_account(self):
+        rec = SimpleNamespace(company_id=None)
+        data = {"items": [{"account_code": "6050", "account_name": "運費"}]}
+        self.assertEqual(review.recognition_account_warnings(rec, data), ["尚未指定歸屬公司，無法核對明細科目"])
+
 
 class EntryGeometryTests(unittest.TestCase):
     @staticmethod
