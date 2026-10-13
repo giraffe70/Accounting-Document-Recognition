@@ -91,7 +91,11 @@ class LineItem(_StrCoerceModel):
     mapping_version: Optional[int] = None
     account_source: str = ""
     account_needs_review: bool = False
-    remember_mapping: bool = True
+    remember_mapping: bool = False
+    source_entry_id: str = ""
+    source_direction: str = ""
+    original_account_code: str = ""
+    original_account_name: str = ""
     account_company_id: Optional[int] = None
     account_item_key: str = ""
     account_updated_by: Optional[int] = None
@@ -119,6 +123,7 @@ class JournalEntry(_StrCoerceModel):
     entry_id: str = ""
     entry_origin: str = ""
     source_entry_index: Optional[int] = None
+    source_direction: str = ""
     model_config = ConfigDict(extra="allow")
 
 
@@ -132,6 +137,7 @@ class Voucher(_StrCoerceModel):
     buyer: Party = Field(default_factory=Party)
     seller: Party = Field(default_factory=Party)
     items: list[LineItem] = Field(default_factory=list)
+    details_version: int = 0
 
     subtotal: Optional[float] = None  # 未稅小計
     tax_amount: Optional[float] = None  # 營業稅額

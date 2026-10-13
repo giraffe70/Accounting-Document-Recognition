@@ -205,25 +205,40 @@ table.list th:nth-child(4) { text-align: right; }
 .callout.warn { border-color: #d4a72c; background: #fff8e5; color: #6f5500; }
 /* 外觀確認模式：隱藏審核區塊，只留影像＋工具列＋類型確認 */
 #revForm.prepared .prep-hide { display: none !important; }
-.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; margin: 14px 0; }
+.grid2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px 14px; margin: 14px 0; }
 .grid2 label, label.full { position: relative; display: flex; flex-direction: column; font-size: 12px; color: var(--muted); gap: 3px; }
 .fld-badge { position: absolute; top: 0; right: 0; color: #fff; font-size: 10px; font-weight: 700;
   width: 15px; height: 15px; border-radius: 50%; display: grid; place-items: center; }
 label.full { margin: 8px 0; }
 .grid2 input, label.full input, label.full textarea {
+  width: 100%; min-width: 0;
   padding: 7px 9px; border: 1px solid var(--border); border-radius: 7px; font-size: 14px; color: var(--text); font-family: inherit; }
 input[readonly] { background: #f6f8fa; color: var(--muted); }
 
 table.items-edit { width: 100%; border-collapse: collapse; margin: 8px 0; font-size: 12.5px; }
-table.items-edit th, table.items-edit td { border: 1px solid var(--border); padding: 3px; }
-table.items-edit input { width: 100%; border: none; padding: 5px 6px; font-size: 12.5px; background: transparent; }
-table.items-edit input:focus { outline: 1px solid var(--blue); border-radius: 4px; }
-
-table.entries { width: 100%; border-collapse: collapse; margin: 8px 0; font-size: 12.5px; }
-table.entries th, table.entries td { border: 1px solid var(--border); padding: 5px 8px; text-align: left; }
-table.entries td.num { text-align: right; font-variant-numeric: tabular-nums; }
-#balanceInfo .ok { color: var(--green); font-weight: 600; }
-#balanceInfo .bad { color: var(--red); font-weight: 600; }
+table.items-edit { table-layout: fixed; }
+table.items-edit th, table.items-edit td { border: 1px solid var(--border); padding: 4px 6px; }
+table.items-edit th { text-align: left; }
+table.items-edit th:nth-child(1) { width: 11%; }
+table.items-edit th:nth-child(2) { width: 15%; }
+table.items-edit th:nth-child(3) { width: 31%; }
+table.items-edit th:nth-child(4) { width: 8%; }
+table.items-edit th:nth-child(5) { width: 11%; }
+table.items-edit th:nth-child(6) { width: 12%; }
+table.items-edit th:nth-child(7) { width: 8%; }
+table.items-edit th:nth-child(8) { width: 4%; }
+table.items-edit input, table.items-edit textarea, table.items-edit select {
+  width: 100%; min-width: 0; border: 1px solid transparent; border-radius: 4px;
+  padding: 5px 6px; font: inherit; color: var(--text); background: transparent;
+}
+table.items-edit textarea { min-height: 38px; resize: vertical; white-space: pre-wrap; overflow-wrap: anywhere; }
+table.items-edit input:focus, table.items-edit textarea:focus, table.items-edit select:focus {
+  outline: 1px solid var(--blue); border-color: var(--blue); background: var(--panel);
+}
+table.items-edit td:nth-child(n+4) input { text-align: right; font-variant-numeric: tabular-nums; }
+table.items-edit .item-extras { margin-top: 5px; padding-top: 5px; border-top: 1px dashed var(--border); }
+table.items-edit .item-extras summary { color: var(--muted); font-size: 11.5px; cursor: pointer; }
+table.items-edit .item-extras label { display: block; margin: 5px 0; font-size: 11.5px; color: var(--muted); }
 
 .userchip { font-size: 13px; color: var(--text); background: var(--bg3); border: 1px solid var(--border); padding: 5px 10px; border-radius: 20px; }
 .login-overlay { position: fixed; inset: 0; background: linear-gradient(135deg,#eef2f7,#e6ecf5); display: grid; place-items: center; z-index: 100; }
@@ -267,11 +282,8 @@ table.journal tfoot td { font-weight: 700; background: var(--bg3); }
 /* 科目表分公司選擇 */
 .acc-company { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; margin-bottom: 10px; }
 
-/* Per-item accounting and rule conflict review. */
+/* 明細科目對應與衝突確認。 */
 #itemsSection { overflow-x: auto; }
-table.items-edit { min-width: 780px; }
-table.items-edit td:first-child { min-width: 90px; }
-table.items-edit td:nth-child(2) { min-width: 130px; }
 table.items-edit input[type="checkbox"] { width: auto; }
 table.items-edit .account-status { margin: 4px 0; }
 .mapping-dialog { width: min(1000px, 94vw); max-height: 90vh; overflow: auto;
@@ -282,14 +294,6 @@ table.items-edit .account-status { margin: 4px 0; }
 .mapping-dialog select { max-width: 100%; }
 .mapping-dialog td { white-space: pre-wrap; overflow-wrap: anywhere; }
 
-.entries-scroll { overflow-x: auto; margin: 8px 0; }
-table.entries-edit { min-width: 870px; }
-.entries-edit input, .entries-edit select { width: 100%; min-width: 70px; padding: 6px;
-  color: var(--text); background: var(--panel); border: 1px solid var(--border); border-radius: 4px; }
-.entries-edit td:nth-child(3), .entries-edit td:nth-child(5) { min-width: 150px; }
-.entries-edit td:nth-child(4) { min-width: 110px; }
-.entries-edit small { display: block; color: var(--muted); white-space: nowrap; }
-.entries-edit details label { display: block; min-width: 120px; margin: 6px 0; }
-.entry-proposal { border: 1px solid var(--border); padding: 12px; margin-top: 16px; border-radius: 8px; }
-#entryProposalInfo { white-space: pre-line; }
-#balanceInfo ul { padding-left: 22px; margin: 6px 0; }
+@media (max-width: 820px) {
+  table.items-edit { min-width: 780px; }
+}

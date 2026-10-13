@@ -71,7 +71,8 @@ class ItemAccountApiTests(unittest.TestCase):
         from app.services import importdecl, taxid
         namespace = {
             "Body": Body, "Request": Request, "JSONResponse": JSONResponse,
-            "VoucherRecord": VoucherRecord, "review": review, "companies": companies,
+            "VoucherRecord": VoucherRecord, "ReviewStatus": ReviewStatus,
+            "review": review, "companies": companies,
             "item_account_mapping": mapping, "entry_workflow": entry_workflow,
             "accounts": accounts, "auth": auth,
             "taxid": taxid, "importdecl": importdecl, "config": config, "json": json,
@@ -81,7 +82,8 @@ class ItemAccountApiTests(unittest.TestCase):
             if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "_PUBLIC_API"
                 for target in node.targets)))
         for module, name, value in ((importdecl, "is_import", False), (taxid, "check_voucher", {}),
-                                    (taxid, "check_date", {}), (taxid, "check_amounts", {})):
+                                    (taxid, "check_date", {}), (taxid, "check_amounts", {}),
+                                    (review, "recognition_account_warnings", [])):
             fixture_patch = patch.object(module, name, return_value=value)
             fixture_patch.start()
             self.addCleanup(fixture_patch.stop)
@@ -148,7 +150,7 @@ class ItemAccountApiTests(unittest.TestCase):
     def test_save_endpoint_returns_current_and_mapping_history_uses_authenticated_actor(self):
         rec = self.new_record()
         row = json.loads(rec.current_json)["items"][0]
-        row.update(account_code="00120", account_name="文具費")
+        row.update(account_code="00120", account_name="文具費", remember_mapping=True)
         payload = self.payload(rec, items=[row], actor={"username": "spoof", "name": "偽造"})
         with patch.object(auth, "get_user_by_token", return_value=self.actor), \
              patch.object(self.api["importdecl"], "is_import", return_value=False), \
@@ -170,7 +172,7 @@ class ItemAccountApiTests(unittest.TestCase):
     def test_lookup_is_company_scoped_and_strict_accounts_do_not_fall_back(self):
         rec = self.new_record(0)
         row = json.loads(rec.current_json)["items"][0]
-        row.update(account_code="00600", account_name="文具費")
+        row.update(account_code="00600", account_name="文具費", remember_mapping=True)
         self.assertIsInstance(self.call_save(rec.id, self.payload(rec, items=[row])), dict)
         found = self.api["api_lookup_item_accounts"]({"company_id": self.company_ids[0],
             "items": [{"description": "合成明細"}]})
@@ -186,21 +188,22 @@ class ItemAccountApiTests(unittest.TestCase):
         self.assertEqual(strict["accounts"], [])
         self.assertEqual(fallback["accounts"], [{"code": "0001", "name": "通用"}])
 
-    def test_conflicting_mapping_and_stale_document_return_structured_409(self):
+    def test_mapping_conflict_saves_locally_and_stale_document_returns_409(self):
         first = self.new_record()
         row = json.loads(first.current_json)["items"][0]
-        row.update(account_code="00600", account_name="文具費")
+        row.update(account_code="00600", account_name="文具費", remember_mapping=True)
         self.call_save(first.id, self.payload(first, items=[row]))
         second = self.new_record()
         changed = json.loads(second.current_json)["items"][0]
-        changed.update(account_code="00700", account_name="差旅費")
+        changed.update(account_code="00700", account_name="差旅費", remember_mapping=True)
         conflict = self.call_save(second.id, self.payload(second, items=[changed]))
-        self.assertIsInstance(conflict, JSONResponse)
-        self.assertEqual(conflict.status_code, 409)
-        body = self.response_body(conflict)
-        self.assertEqual(body["conflicts"][0]["old"]["account_code"], "00600")
-        self.assertEqual(body["latest"], None)
-        self.assertEqual(review.get_voucher(second.id).current_json, second.current_json)
+        self.assertIsInstance(conflict, dict)
+        self.assertEqual(conflict["current"]["items"][0]["account_code"], "00700")
+        self.assertEqual(len(conflict["mapping_skipped"]), 1)
+        self.assertIn("僅保存本張", conflict["mapping_skipped"][0]["reason"])
+        with Session(self.engine) as session:
+            rule = session.exec(select(ItemAccountMapping)).one()
+            self.assertEqual((rule.account_code, rule.version), ("00600", 1))
 
         current = review.get_voucher(second.id)
         stale_payload = self.payload(current, expected_updated_at="2000-01-01T00:00:00")
@@ -262,7 +265,7 @@ class ItemAccountApiTests(unittest.TestCase):
     def test_raw_confirmation_allows_partial_or_missing_item_accounts_without_publishing_rules(self):
         partial = self.new_record()
         row = json.loads(partial.current_json)["items"][0]
-        row.update(account_code="00600", account_name="")
+        row.update(account_code="00600", account_name="", remember_mapping=True)
         partial_result = self.call_save(partial.id, self.payload(partial, action="confirm", items=[row]))
         self.assertIsInstance(partial_result, dict)
         self.assertEqual(partial_result["status"], ReviewStatus.confirmed)
@@ -272,7 +275,7 @@ class ItemAccountApiTests(unittest.TestCase):
 
         missing = self.new_record()
         row = json.loads(missing.current_json)["items"][0]
-        row.update(account_code="00600", account_name="文具費")
+        row.update(account_code="00600", account_name="文具費", remember_mapping=True)
         no_company = self.call_save(missing.id, self.payload(missing, action="confirm",
             company_index=None, items=[row], company_id=None))
         self.assertIsInstance(no_company, dict)

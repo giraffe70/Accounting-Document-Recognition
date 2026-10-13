@@ -65,6 +65,9 @@ class VoucherRecord(SQLModel, table=True):
 
     correction_note: str = ""
     confirmed_at: Optional[datetime] = None
+    confirmed_by: Optional[int] = Field(default=None, foreign_key="users.id")
+    confirmed_by_name: str = Field(default="", sa_column_kwargs={"server_default": ""})
+    recognition_confirmed_version: int = Field(default=0, sa_column_kwargs={"server_default": "0"})
     entries_status: str = Field(default="none", index=True)
     entries_confirmed_at: Optional[datetime] = None
     entries_confirmed_by: Optional[int] = Field(default=None, foreign_key="users.id")

@@ -46,10 +46,10 @@ class ItemAccountMappingTests(unittest.TestCase):
         return {"username": username, "id": 987654, "name": "偽造名稱", "role": "admin"}
 
     def voucher(self, description="影印紙", *, doc_type="receipt", account_code="", account_name="",
-                remember=True, **extra):
+                **extra):
         item = {"description": description, "quantity": 1, "amount": 100,
                 "account_code": account_code, "account_name": account_name,
-                "remember_mapping": remember, **extra}
+                "remember_mapping": False, **extra}
         return Voucher.model_validate({"doc_type_key": doc_type, "doc_type": doc_type,
             "date": "2026-10-01", "items": [item], "fields": {}, "field_evidence": {}})
 
@@ -72,7 +72,7 @@ class ItemAccountMappingTests(unittest.TestCase):
     def test_company_isolation_and_lookup_across_document_types(self):
         rec = self.new_record(0)
         row = json.loads(rec.current_json)["items"][0]
-        row.update(account_code="00120", account_name="辦公用品")
+        row.update(account_code="00120", account_name="辦公用品", remember_mapping=True)
         review.save_current(rec.id, self.payload(rec, items=[row]), self.actor())
         other = self.new_record(1, doc_type="invoice")
         with Session(self.engine) as session:
@@ -102,7 +102,7 @@ class ItemAccountMappingTests(unittest.TestCase):
         with self.engine.connect() as connection:
             before = connection.exec_driver_sql("SELECT count(*) FROM item_account_mappings").scalar()
         row = json.loads(rec.current_json)["items"][0]
-        row.update(account_code="00600", account_name="文具費")
+        row.update(account_code="00600", account_name="文具費", remember_mapping=True)
         review.save_current(rec.id, self.payload(rec, action="temporary", items=[row]), self.actor())
         with Session(self.engine) as session:
             mapping.lookup(session, self.company_ids[0], [{"description": "影印紙"}])
@@ -114,6 +114,7 @@ class ItemAccountMappingTests(unittest.TestCase):
     def test_save_remember_false_and_same_value_noop(self):
         rec = self.new_record()
         row = json.loads(rec.current_json)["items"][0]
+        self.assertFalse(row["remember_mapping"])
         row.update(account_code="00600", account_name="文具費", remember_mapping=False)
         _, skipped = review.save_current(rec.id, self.payload(rec, items=[row]), self.actor())
         self.assertEqual(skipped, [])
@@ -139,7 +140,7 @@ class ItemAccountMappingTests(unittest.TestCase):
     def test_leading_zero_new_rule_and_actor_is_resolved_from_user_table(self):
         rec = self.new_record()
         row = json.loads(rec.current_json)["items"][0]
-        row.update(account_code="00120", account_name="辦公用品")
+        row.update(account_code="00120", account_name="辦公用品", remember_mapping=True)
         review.save_current(rec.id, self.payload(rec, items=[row]), self.actor())
         with Session(self.engine) as session:
             rule = session.exec(select(ItemAccountMapping)).one()
@@ -151,33 +152,40 @@ class ItemAccountMappingTests(unittest.TestCase):
             self.assertEqual(history.actor_id, self.user_id)
             self.assertEqual(history.actor_name, "審核者")
 
-    def test_new_rule_conflicts_roll_back_entire_save(self):
+    def test_new_rule_conflicts_save_locally_without_publishing(self):
         rec = self.new_record()
         data = json.loads(rec.current_json)
         first = data["items"][0]
-        first.update(account_code="00600", account_name="文具費")
+        first.update(account_code="00600", account_name="文具費", remember_mapping=True)
         second = dict(first, item_id="", account_code="00610", account_name="耗材費")
         data["items"].append(second)
-        with self.assertRaises(mapping.MappingConflict):
-            review.save_current(rec.id, self.payload(rec, items=data["items"]), self.actor())
+        saved, skipped = review.save_current(rec.id, self.payload(rec, items=data["items"]), self.actor())
+        self.assertEqual(len(skipped), 2)
+        saved_rows = json.loads(saved.current_json)["items"]
+        self.assertEqual([row["account_code"] for row in saved_rows], ["00600", "00610"])
         with Session(self.engine) as session:
             self.assertEqual(session.exec(select(ItemAccountMapping)).all(), [])
-            self.assertEqual(session.get(VoucherRecord, rec.id).updated_at, rec.updated_at)
+            self.assertNotEqual(session.get(VoucherRecord, rec.id).updated_at, rec.updated_at)
 
     def test_existing_rule_requires_explicit_versioned_update_or_local_choice(self):
         rec = self.new_record()
         row = json.loads(rec.current_json)["items"][0]
-        row.update(account_code="00600", account_name="文具費")
+        row.update(account_code="00600", account_name="文具費", remember_mapping=True)
         review.save_current(rec.id, self.payload(rec, items=[row]), self.actor())
         other_doc = self.new_record(doc_type="invoice")
         row2 = json.loads(other_doc.current_json)["items"][0]
-        row2.update(account_code="00620", account_name="辦公耗材")
-        with self.assertRaises(mapping.MappingConflict):
-            review.save_current(other_doc.id, self.payload(other_doc, items=[row2]), self.actor())
+        row2.update(account_code="00620", account_name="辦公耗材", remember_mapping=True)
+        with Session(self.engine) as session:
+            with self.assertRaises(mapping.MappingConflict):
+                mapping.publish(session, other_doc, {"doc_type_key": "invoice", "items": [row2]}, self.actor())
+        _, skipped = review.save_current(other_doc.id, self.payload(other_doc, items=[row2]), self.actor())
+        self.assertEqual(len(skipped), 1)
+        saved_row = json.loads(review.get_voucher(other_doc.id).current_json)["items"][0]
+        self.assertEqual(saved_row["account_code"], "00620")
         current = review.get_voucher(other_doc.id)
-        with self.assertRaises(mapping.MappingConflict):
-            review.save_current(current.id, self.payload(current, items=[row2], choices={
-                "影印紙": {"action": "update", "expected_version": 9, "item_id": row2["item_id"]}}), self.actor())
+        _, skipped = review.save_current(current.id, self.payload(current, items=[row2], choices={
+            "影印紙": {"action": "update", "expected_version": 9, "item_id": row2["item_id"]}}), self.actor())
+        self.assertEqual(len(skipped), 1)
         current = review.get_voucher(other_doc.id)
         review.save_current(current.id, self.payload(current, items=[row2], choices={
             "影印紙": {"action": "local"}}), self.actor())
@@ -195,11 +203,13 @@ class ItemAccountMappingTests(unittest.TestCase):
     def test_different_pairs_on_one_document_need_a_choice(self):
         rec = self.new_record()
         rows = json.loads(rec.current_json)["items"]
-        rows[0].update(account_code="00600", account_name="文具費")
+        rows[0].update(account_code="00600", account_name="文具費", remember_mapping=True)
         rows.append(dict(rows[0], item_id="00000000-0000-0000-0000-000000000002",
-                         account_code="00610", account_name="耗材費"))
-        with self.assertRaises(mapping.MappingConflict):
-            review.save_current(rec.id, self.payload(rec, items=rows), self.actor())
+                         account_code="00610", account_name="耗材費", remember_mapping=True))
+        _, skipped = review.save_current(rec.id, self.payload(rec, items=rows), self.actor())
+        self.assertEqual(len(skipped), 2)
+        with Session(self.engine) as session:
+            self.assertEqual(session.exec(select(ItemAccountMapping)).all(), [])
         current = review.get_voucher(rec.id)
         chosen = rows[1]
         review.save_current(current.id, self.payload(current, items=rows, choices={"影印紙": {
@@ -227,7 +237,7 @@ class ItemAccountMappingTests(unittest.TestCase):
     def test_manual_review_after_company_or_item_change_and_acknowledgement(self):
         rec = self.new_record()
         row = json.loads(rec.current_json)["items"][0]
-        row.update(account_code="00600", account_name="文具費")
+        row.update(account_code="00600", account_name="文具費", remember_mapping=True)
         review.save_current(rec.id, self.payload(rec, items=[row]), self.actor())
         current = review.get_voucher(rec.id)
         payload = self.payload(current, company_index=1)
@@ -266,7 +276,7 @@ class ItemAccountMappingTests(unittest.TestCase):
     def test_account_chart_is_not_modified_by_item_mapping(self):
         rec = self.new_record()
         row = json.loads(rec.current_json)["items"][0]
-        row.update(account_code="00120", account_name="辦公用品")
+        row.update(account_code="00120", account_name="辦公用品", remember_mapping=True)
         review.save_current(rec.id, self.payload(rec, items=[row]), self.actor())
         with Session(self.engine) as session:
             company = session.get(Company, self.company_ids[0])
@@ -315,7 +325,7 @@ class ItemAccountMappingTests(unittest.TestCase):
     def test_deleting_source_voucher_preserves_mapping_history(self):
         rec = self.new_record()
         row = json.loads(rec.current_json)["items"][0]
-        row.update(account_code="00120", account_name="辦公用品")
+        row.update(account_code="00120", account_name="辦公用品", remember_mapping=True)
         review.save_current(rec.id, self.payload(rec, items=[row]), self.actor())
         with patch.object(review, "_cleanup_deleted_files", return_value=(0, [])), \
              patch.object(review, "_write_delete_audit"):
@@ -392,13 +402,13 @@ class ItemAccountMappingTests(unittest.TestCase):
         self.assertEqual(len(conflicts), 1)
         self.assertIn("updated_at", conflicts[0].latest)
 
-    def test_concurrent_new_rule_conflict_rolls_back_loser(self):
+    def test_concurrent_new_rule_conflict_saves_both_and_publishes_one(self):
         records = [self.new_record(), self.new_record()]
         codes = (("00600", "文具費"), ("00610", "耗材費"))
         payloads = []
         for rec, (code, name) in zip(records, codes):
             row = json.loads(rec.current_json)["items"][0]
-            row.update(account_code=code, account_name=name)
+            row.update(account_code=code, account_name=name, remember_mapping=True)
             payloads.append(self.payload(rec, items=[row]))
         barrier = threading.Barrier(2)
         outcomes = []
@@ -406,10 +416,10 @@ class ItemAccountMappingTests(unittest.TestCase):
         def save(rec, payload):
             barrier.wait(timeout=5)
             try:
-                review.save_current(rec.id, payload, self.actor())
-                outcomes.append(("saved", rec.id))
+                _, skipped = review.save_current(rec.id, payload, self.actor())
+                outcomes.append(("saved", rec.id, skipped))
             except Exception as exc:
-                outcomes.append((exc, rec.id))
+                outcomes.append((exc, rec.id, []))
 
         threads = [threading.Thread(target=save, args=args) for args in zip(records, payloads)]
         for thread in threads:
@@ -417,20 +427,20 @@ class ItemAccountMappingTests(unittest.TestCase):
         for thread in threads:
             thread.join(timeout=10)
         self.assertTrue(all(not thread.is_alive() for thread in threads), "concurrent saves did not finish")
-        self.assertEqual(sum(outcome[0] == "saved" for outcome in outcomes), 1)
-        conflicts = [outcome for outcome in outcomes if isinstance(outcome[0], mapping.MappingConflict)]
-        self.assertEqual(len(conflicts), 1)
+        self.assertEqual(sum(outcome[0] == "saved" for outcome in outcomes), 2)
+        self.assertEqual(sum(bool(outcome[2]) for outcome in outcomes), 1)
         with Session(self.engine) as session:
             rules = session.exec(select(ItemAccountMapping)).all()
             history = session.exec(select(MappingHistory)).all()
             self.assertEqual((len(rules), len(history), rules[0].version), (1, 1, 1))
-            losing_record = session.get(VoucherRecord, conflicts[0][1])
-            self.assertEqual(json.loads(losing_record.current_json)["items"][0]["account_code"], "")
+            saved_codes = {json.loads(session.get(VoucherRecord, row.id).current_json)["items"][0]["account_code"]
+                           for row in records}
+            self.assertEqual(saved_codes, {"00600", "00610"})
 
     def test_company_change_invalidates_auto_value_and_raw_confirmation_keeps_manual_value_pending(self):
         source = self.new_record(company_index=0)
         source_row = json.loads(source.current_json)["items"][0]
-        source_row.update(account_code="00600", account_name="文具費")
+        source_row.update(account_code="00600", account_name="文具費", remember_mapping=True)
         review.save_current(source.id, self.payload(source, items=[source_row]), self.actor())
         automatic = self.new_record(company_index=0)
         automatic_row = json.loads(automatic.current_json)["items"][0]
@@ -441,7 +451,7 @@ class ItemAccountMappingTests(unittest.TestCase):
 
         manual = self.new_record(company_index=0)
         manual_row = json.loads(manual.current_json)["items"][0]
-        manual_row.update(account_code="00700", account_name="差旅費")
+        manual_row.update(account_code="00700", account_name="差旅費", remember_mapping=True)
         review.save_current(manual.id, self.payload(manual, action="temporary", items=[manual_row]), self.actor())
         current = review.get_voucher(manual.id)
         review.save_current(current.id, self.payload(current, action="temporary", company_index=1), self.actor())

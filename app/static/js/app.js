@@ -7,7 +7,7 @@
   let currentId = null;
   let currentVoucher = {};   // 目前載入的 current（保留 entries 等未編輯欄位）
   let currentVersion = "", companyRecords = [], accountChart = [], reviewedItems = {};
-  let currentEntryStatus = "none", currentProposal = {}, currentEntryChecks = {};
+  let recognitionReady = false, recognitionDirty = false;
   let currentManualEntry = false;   // 保留既有人工修正紀錄的重新辨識提醒
   let editBusy = false;
   let currentUser = null;
@@ -383,6 +383,7 @@
     const sourcePage = rec.record_role === "source_page" || autoSplitSource;
     $("revForm").classList.toggle("source-only", autoSplitSource);
     $("reviewBody").classList.toggle("hidden", autoSplitSource);
+    $("recognitionDetails").classList.toggle("hidden", autoSplitSource);
     $("importBadge").classList.toggle("hidden", !currentIsImport);
     $("revEmpty").classList.add("hidden"); $("revForm").classList.remove("hidden");
     setStatus(rec.status);
@@ -395,7 +396,6 @@
     $("btnConfirmRecognize").classList.toggle("hidden", !isPreExtract);
     $("btnConfirmRecognize").disabled = sourcePage;
     $("btnReRecognize").disabled = sourcePage;
-    $("btnClassify").disabled = sourcePage;
     $("btnConfirm").disabled = sourcePage;
     ["btnRotL", "btnRotR", "btnFineRot", "btnCrop", "btnSplit"].forEach((id) => { $(id).disabled = autoSplitSource; });
     $("revConfWrap").classList.toggle("hidden", isPreExtract || autoSplitSource);
@@ -423,14 +423,13 @@
     $("revConf").textContent = conf;
     $("revConf").className = "tag " + (conf === "high" ? "high" : conf === "low" ? "low" : "warn");
     $("f-note").value = v.note || "";
-    const hasItems = !!(DOC_TYPES[typeKey] && DOC_TYPES[typeKey].has_items) || !!v.items?.length;
+    const hasItems = !sourcePage;
     $("itemsSection").classList.toggle("hidden", !hasItems);
     renderItems(v.items || []);
     renderTaxcheck(rec.taxcheck || {});
     renderDatecheck(rec.datecheck);
     renderAmountcheck(rec.amountcheck);
-    renderEntries(v.entries || [], v.debit_total, v.credit_total, v.balance_check);
-    applyEntryState(rec);
+    applyRecognitionState(rec);
     setupImage(id, rec.has_image, v.boxes || {});
     renderPages(id, rec.attachments || 0);
     loadList();
@@ -454,84 +453,32 @@
     }));
   }
 
-  function renderEntries(entries, dt, ct, bal) {
-    const body = $("entriesBody");
-    body.innerHTML = entries.length ? entries.map(entryRow).join("")
-      : `<tr class="entry-empty"><td colspan="7" class="hint">尚無分錄，可新增草稿；一般單據也可選用「產生分錄建議」。</td></tr>`;
-    bindEntryRows();
-    if (editBusy) body.querySelectorAll("input,select,button").forEach((el) => { el.disabled = true; });
-    const info = $("balanceInfo");
-    if (entries.length) {
-      info.innerHTML = `借方合計 ${nf(dt)}　貸方合計 ${nf(ct)}　` +
-        (bal ? '<span class="ok">借貸平衡 ✓</span>' : '<span class="bad">未平衡，請人工核對</span>');
-    } else info.textContent = "";
-  }
-
-  function entryRow(e) {
-    e = {...e, entry_id: e.entry_id || newItemId()};
-    const debit = !!(e.debit_account || e.debit_account_name), credit = !!(e.credit_account || e.credit_account_name);
-    const direction = debit !== credit ? (debit ? "debit" : "credit") : "";
-    const code = e[`${direction}_account`] || e.raw_account_code || "";
-    const name = e[`${direction}_account_name`] || e.raw_account_name || "";
-    const origin = {observed:"原圖辨識", generated:"AI 建議", manual:"人工新增"}[e.entry_origin] || "人工新增";
-    const input = (key, value, extra = "") => `<input data-entry-key="${key}" value="${esc(value ?? "")}" ${extra}>`;
-    return `<tr data-entry-id="${esc(e.entry_id)}" data-original="${esc(JSON.stringify(e))}">
-      <td><select data-entry-key="direction"><option value="">請選擇</option><option value="debit" ${direction === "debit" ? "selected" : ""}>借方</option><option value="credit" ${direction === "credit" ? "selected" : ""}>貸方</option></select><small>${origin}</small></td>
-      <td>${input("account_code",code,'list="itemAccountCodes"')}</td><td>${input("account_name",name)}</td>
-      <td>${input("amount",e.amount ?? e.raw_amount,'inputmode="decimal"')}</td><td>${input("description",e.description)}</td>
-      <td><details><summary>展開</summary><label>部門${input("dept",e.dept)}</label><label>立沖帳目${input("offset_code",e.offset_code)}</label></details></td>
-      <td><button class="btn btn-sm del-entry">✕</button></td></tr>`;
-  }
-  function markEntryDraft() {
-    $("entriesStatus").textContent = "分錄待核對（未儲存）";
-    $("entriesStatus").className = "tag warn";
-    $("balanceInfo").textContent = "草稿尚未儲存，借貸合計與完整度將於儲存後由伺服器重算。";
-  }
-  function bindEntryRows() {
-    $("entriesBody").querySelectorAll("tr[data-entry-id]").forEach((tr) => {
-      tr.querySelector(".del-entry").addEventListener("click", () => { tr.remove(); markEntryDraft(); });
-      tr.querySelectorAll("input,select").forEach((el) => el.addEventListener("input", () => {
-        if (el.dataset.entryKey === "account_code") {
-          const known = accountChart.find((a) => a.code === el.value);
-          if (known) tr.querySelector('[data-entry-key="account_name"]').value = known.name;
-        }
-        markEntryDraft();
-      }));
-    });
-  }
-  function entryPreview(entries) {
-    return `<table class="entries"><thead><tr><th>方向</th><th>科目</th><th>摘要</th><th>金額</th><th>金額來源／證據</th></tr></thead><tbody>${entries.map((e) =>
-      `<tr><td>${e.debit_account || e.debit_account_name ? "借方" : e.credit_account || e.credit_account_name ? "貸方" : "待指定"}</td>
-      <td>${esc(e.debit_account || e.credit_account || e.raw_account_code)} ${esc(e.debit_account_name || e.credit_account_name || e.raw_account_name)}</td>
-      <td>${esc(e.description)}</td><td>${nf(e.amount)}</td><td>${esc(e.amount_source)} ${esc((e.evidence_paths || []).join("、"))}</td></tr>`).join("") || '<tr><td colspan="5">尚無分錄</td></tr>'}</tbody></table>`;
-  }
-  function applyEntryState(record) {
-    currentEntryStatus = record.entries_status || "none";
-    currentProposal = record.entries_proposal || {};
-    currentEntryChecks = record.entries_checks || {};
-    $("entriesStatus").textContent = {none:"尚無分錄",draft:"分錄待核對",ready:"可供入帳"}[currentEntryStatus] || "分錄待核對";
-    $("entriesStatus").className = "tag " + (currentEntryStatus === "ready" ? "high" : "warn");
-    $("entriesStatus").title = record.entries_confirmed_at ?
-      `${record.entries_confirmed_by_name || ""}　${new Date(record.entries_confirmed_at).toLocaleString("zh-TW", {timeZone:"Asia/Taipei"})}` : "";
-    const spec = DOC_TYPES[currentVoucher.doc_type_key] || {};
-    $("btnClassify").classList.toggle("hidden", !!spec.has_entries || !!spec.is_supporting);
-    $("btnConfirmEntries").classList.toggle("hidden", !!spec.is_supporting);
-    $("btnConfirmEntries").textContent = currentEntryStatus === "ready" ? "✅ 分錄可供入帳（已確認）" : "✅ 確認分錄可供入帳";
-    const summary = currentEntryChecks;
-    if (summary.debit_total != null && currentVoucher.entries?.length) {
-      $("balanceInfo").innerHTML = `借方合計 ${nf(summary.debit_total)}　貸方合計 ${nf(summary.credit_total)}　差額 ${nf(summary.difference)}　` +
-        (summary.balance_check ? '<span class="ok">完整且借貸平衡 ✓</span>' : '<span class="bad">分錄待修正</span>') +
-        (summary.issues?.length ? `<ul>${summary.issues.map((issue) => `<li>${esc(issue)}</li>`).join("")}</ul>` : "");
-    }
-    const visible = ["pending","stale"].includes(currentProposal.status);
-    $("entryProposal").classList.toggle("hidden", !visible);
-    if (visible) {
-      $("entryProposalPreview").innerHTML = entryPreview(currentProposal.entries || []);
-      $("entryProposalInfo").textContent = currentProposal.status === "stale" ? `建議已失效：${currentProposal.reason || "來源內容已變更"}，請重新產生。` :
-        ["此建議尚未改動目前草稿。", ...(currentProposal.validation_warnings || []), ...(currentProposal.classification_meta?.warnings || []), ...(currentProposal.classification_meta?.assumptions || []), ...(currentProposal.checks?.issues || [])].join("\n");
-      $("adoptEntryProposal").disabled = currentProposal.status !== "pending";
+  function updateRecognitionState() {
+    const canPrint = recognitionReady && !recognitionDirty && !editBusy;
+    $("btnPrintVoucher").disabled = !canPrint;
+    const status = $("recognitionStatus");
+    if (status) {
+      status.textContent = recognitionDirty ? "已修改，請儲存並確認" : recognitionReady ? "已確認，可列印" : "待確認";
+      status.className = "hint " + (canPrint ? "ok" : "warn");
     }
   }
+  function markRecognitionDirty() {
+    if (!currentId) return;
+    recognitionDirty = true;
+    updateRecognitionState();
+  }
+  function applyRecognitionState(record) {
+    recognitionReady = !!record.recognition_report_ready;
+    recognitionDirty = false;
+    const warnings = record.detail_account_warnings || [];
+    if ($("detailWarnings")) {
+      $("detailWarnings").textContent = warnings.join("；");
+      $("detailWarnings").classList.toggle("hidden", !warnings.length);
+    }
+    updateRecognitionState();
+  }
+  $("revForm").addEventListener("input", markRecognitionDirty);
+  $("revForm").addEventListener("change", markRecognitionDirty);
 
   function setStatus(status) {
     const el = $("revStatus");
@@ -544,7 +491,7 @@
     const editable = status === "pending" || status === "confirmed";
     $("btnReturnImport").classList.toggle("hidden", !editable);
     $("btnConfirm").classList.toggle("hidden", !editable);
-    $("btnConfirm").textContent = status === "confirmed" ? "✅ 辨識已確認（可重新確認）" : "✅ 確認辨識內容";
+    $("btnConfirm").textContent = "確認";
     // 已確認的憑證只有管理員可刪除（後端同樣強制）
     $("btnDelete").classList.toggle("hidden", status === "confirmed" && !isAdminUser());
   }
@@ -555,13 +502,18 @@
     if (record.updated_at) currentVersion = record.updated_at;
     setStatus(record.status);
     setPendingActionVisibility(record.status);
-    applyEntryState(record);
+    applyRecognitionState(record);
   }
 
   async function refreshCurrentStatus(id = currentId) {
     if (!id) return;
     const resp = await fetch(`/api/vouchers/${id}`);
-    if (resp.ok) applyRecordStatus(await resp.json());
+    if (resp.ok) {
+      const dirty = recognitionDirty;
+      applyRecordStatus(await resp.json());
+      recognitionDirty = dirty;
+      updateRecognitionState();
+    }
     loadList();
   }
 
@@ -777,12 +729,17 @@
   }
 
   function itemSpecs() {
-    const spec = DOC_TYPES[$("revTypeSel").value || currentVoucher.doc_type_key] || DOC_TYPES.other;
-    const extraction = (spec && spec.item_fields && spec.item_fields.length) ? spec.item_fields : [
-      {key:"description",label:"品名",kind:"text"}, {key:"quantity",label:"數量",kind:"number"},
-      {key:"unit_price",label:"單價",kind:"number"}, {key:"amount",label:"合計",kind:"number"}];
-    return [{key:"account_code",label:"會計科目",kind:"text"},
-            {key:"account_name",label:"會計名稱",kind:"text"}, ...extraction];
+    return [{key:"account_code",label:"科目代號",kind:"text"},
+      {key:"account_name",label:"科目名稱",kind:"text"},
+      {key:"description",label:"品名／摘要",kind:"text"},
+      {key:"quantity",label:"數量",kind:"number"},
+      {key:"unit_price",label:"單價",kind:"number"},
+      {key:"amount",label:"金額",kind:"number"}];
+  }
+  function itemExtraSpecs() {
+    const spec = DOC_TYPES[$("revTypeSel").value || currentVoucher.doc_type_key] || {};
+    const primary = new Set(itemSpecs().map((f) => f.key));
+    return (spec.item_fields || []).filter((f) => !primary.has(f.key));
   }
   function newItemId() {
     return globalThis.crypto?.randomUUID?.() || "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g,
@@ -796,7 +753,8 @@
   function itemContext(company, name) { return JSON.stringify([company, normalizedItemName(name)]); }
   const itemBookkeeping = new Set(["item_id", "mapping_id", "mapping_version", "account_source",
     "account_needs_review", "remember_mapping", "account_company_id", "account_item_key",
-    "account_updated_by", "account_updated_by_name", "account_updated_at"]);
+    "account_updated_by", "account_updated_by_name", "account_updated_at", "source_entry_id", "source_direction",
+    "original_account_code", "original_account_name"]);
   async function loadItemAccountChart() {
     const company = selectedCompanyId();
     accountChart = [];
@@ -813,34 +771,41 @@
   function renderItems(items) {
     const body = $("itemsBody");
     const header = $("itemsSection").querySelector("thead tr");
-    if (header) header.innerHTML = itemSpecs().map((f) => `<th>${esc(f.label)}</th>`).join("") + "<th>記住對應／來源</th><th></th>";
-    body.innerHTML = (items.length ? items : [{}]).map(itemRow).join("");
+    if (header) header.innerHTML = itemSpecs().map((f) => `<th>${esc(f.label)}</th>`).join("") + "<th>其他資訊</th><th></th>";
+    body.innerHTML = items.map(itemRow).join("");
     bindItemRows();
     if (editBusy) body.querySelectorAll("input,button").forEach((el) => { el.disabled = true; });
   }
   function itemRow(it) {
     it = {...it, item_id: it.item_id || newItemId()};
     const company = selectedCompanyId();
-    return `<tr data-original="${esc(JSON.stringify(it))}" data-item-id="${esc(it.item_id)}"
-      data-context="${esc(itemContext(it.account_company_id ?? company, it.account_item_key ?? it.description))}"
-      data-source="${esc(it.account_source || "")}" data-needs-review="${it.account_needs_review ? "1" : "0"}">${itemSpecs().map((f) => {
+    const control = (f) => {
       let value = it[f.key], type = f.kind === "number" ? "number" : "text";
       if (type === "number" && value != null && value !== "") {
         const number = Number(String(value).replace(/(?:NT)?\$|[,\s，、＄元]/gi, ""));
         if (Number.isFinite(number)) value = number; else type = "text";
       }
-      return `<td><input data-item-key="${esc(f.key)}" data-kind="${f.kind}" type="${type}"${f.key === "account_code" ? ' list="itemAccountCodes"' : ""} value="${esc(value ?? "")}"></td>`;
-    }).join("")}<td><label><input type="checkbox" class="remember-mapping" ${it.remember_mapping !== false ? "checked" : ""}>記住對應</label>
-      <div class="account-status hint">${it.account_needs_review ? "科目待核對" : it.account_source === "mapping" ? "由品名對應帶入" : it.account_source === "manual" ? "人工指定" : "尚無對應"}</div>
-      <button class="btn btn-sm keep-account ${it.account_needs_review ? "" : "hidden"}">沿用科目</button>
-      <button class="btn btn-sm use-account ${it.account_needs_review ? "" : "hidden"}">採用新建議</button>
-      </td><td><button class="btn btn-sm del">✕</button></td></tr>`;
+      if (f.key === "description") return `<textarea data-item-key="description" data-kind="text" rows="2">${esc(value || "")}</textarea>`;
+      return `<input data-item-key="${esc(f.key)}" data-kind="${f.kind}" type="${type}"${type === "number" ? ' step="any" placeholder="—"' : ""}${f.key === "account_code" ? ' list="itemAccountCodes"' : ""} value="${esc(value ?? "")}">`;
+    };
+    const source = it.account_needs_review ? "科目待核對" : {observed:"原稿科目",mapping:"由品名對應帶入",manual:"人工指定"}[it.account_source] || "科目待指定";
+    return `<tr data-original="${esc(JSON.stringify(it))}" data-item-id="${esc(it.item_id)}"
+      data-context="${esc(itemContext(it.account_company_id ?? company, it.account_item_key ?? it.description))}"
+      data-source="${esc(it.account_source || "")}" data-needs-review="${it.account_needs_review ? "1" : "0"}">
+      ${itemSpecs().map((f) => `<td>${control(f)}</td>`).join("")}
+      <td><details class="item-extras"><summary>展開</summary>
+      ${itemExtraSpecs().map((f) => `<label>${esc(f.label)}${control(f)}</label>`).join("")}
+      <label><input type="checkbox" class="remember-mapping" ${it.remember_mapping === true ? "checked" : ""}>記住品名對應</label>
+      <div class="account-status hint">${source}</div>
+      <button class="btn btn-sm keep-account ${it.account_needs_review ? "" : "hidden"}" type="button">沿用科目</button>
+      <button class="btn btn-sm use-account ${it.account_needs_review ? "" : "hidden"}" type="button">採用新建議</button>
+      </details></td><td><button class="btn btn-sm del" type="button">✕</button></td></tr>`;
   }
   function bindItemRows() {
     $("itemsBody").querySelectorAll("tr").forEach((tr) => {
       if (tr.dataset.bound) return;
       tr.dataset.bound = "1";
-      tr.querySelector(".del").addEventListener("click", () => { delete reviewedItems[tr.dataset.itemId]; tr.remove(); });
+      tr.querySelector(".del").addEventListener("click", () => { delete reviewedItems[tr.dataset.itemId]; tr.remove(); markRecognitionDirty(); });
       tr.querySelector('[data-item-key="description"]')?.addEventListener("change", () => refreshItemMatch(tr).catch((e) => alert(e.message)));
       ["account_code", "account_name"].forEach((key) => tr.querySelector(`[data-item-key="${key}"]`).addEventListener("input", () => {
         tr._lookupGeneration = (tr._lookupGeneration || 0) + 1;
@@ -865,7 +830,7 @@
   function showItemAccountStatus(tr) {
     const pending = tr.dataset.needsReview === "1";
     tr.querySelector(".account-status").textContent = pending ? "科目待核對" :
-      tr.dataset.source === "mapping" ? "由品名對應帶入" : tr.dataset.source === "manual" ? "人工指定" : "尚無對應";
+      tr.dataset.source === "observed" ? "原稿科目" : tr.dataset.source === "mapping" ? "由品名對應帶入" : tr.dataset.source === "manual" ? "人工指定" : "科目待指定";
     tr.querySelectorAll(".keep-account,.use-account").forEach((b) => b.classList.toggle("hidden", !pending));
   }
   function setItemAccount(tr, match) {
@@ -873,6 +838,7 @@
     tr.dataset.source = match ? "mapping" : "";
     tr.dataset.needsReview = "0";
     showItemAccountStatus(tr);
+    markRecognitionDirty();
   }
   function acknowledgeItemAccount(tr) {
     reviewedItems[tr.dataset.itemId] = {company_id: selectedCompanyId(),
@@ -908,27 +874,8 @@
     if (changed && !code && !accountName && tr._accountMatch) setItemAccount(tr, tr._accountMatch);
   }
   $("addItem").addEventListener("click", () => {
-    $("itemsBody").insertAdjacentHTML("beforeend", itemRow({})); bindItemRows();
+    $("itemsBody").insertAdjacentHTML("beforeend", itemRow({})); bindItemRows(); markRecognitionDirty();
   });
-
-  function collectEntries() {
-    const body = $("entriesBody");
-    if (!body) return currentVoucher.entries || [];
-    return Array.from(body.querySelectorAll("tr[data-entry-id]")).map((tr) => {
-      const row = {...JSON.parse(tr.dataset.original || "{}"), entry_id:tr.dataset.entryId};
-      const value = (key) => tr.querySelector(`[data-entry-key="${key}"]`)?.value || "";
-      const direction = value("direction"), code = value("account_code"), name = value("account_name");
-      ["debit","credit"].forEach((side) => {
-        row[`${side}_account`] = direction === side ? code : "";
-        row[`${side}_account_name`] = direction === side ? name : "";
-      });
-      row.raw_account_code = direction ? "" : code;
-      row.raw_account_name = direction ? "" : name;
-      row.amount = value("amount") || null;
-      ["description","dept","offset_code"].forEach((key) => { row[key] = value(key); });
-      return row;
-    });
-  }
 
   function collectForm() {
     const fields = {...(currentVoucher.fields || {})};
@@ -948,82 +895,13 @@
     // The server owns common-field mapping; retain every unrendered field/attribute.
     const typeKey = $("revTypeSel")?.value || currentVoucher.doc_type_key;
     return {...currentVoucher, doc_type_key:typeKey, doc_type:DOC_TYPES[typeKey]?.label || currentVoucher.doc_type,
-      fields, items, entries:collectEntries(), note: $("f-note").value};
+      fields, items, entries:currentVoucher.entries || [], note: $("f-note").value};
   }
 
-  $("btnClassify").addEventListener("click", () => withEditLock(async () => {
-    try {
-      await persistCurrentEdits();
-      const response = await withInferProgress("產生分錄建議中…", () =>
-        fetch(`/api/vouchers/${currentId}/classify`, { method:"POST", headers:json(),
-          body:JSON.stringify({expected_updated_at:currentVersion}) }));
-      const record = await response.json();
-      if (!response.ok) throw new Error(errText(record, "產生建議失敗"));
-      applyRecordStatus(record);
-      toast("已產生建議，請預覽後決定是否採用");
-    } catch (err) {
-      alert(`產生建議失敗：${err.message}`);
-    }
-  }));
-
-  $("addEntry").addEventListener("click", () => {
-    $("entriesBody").querySelector(".entry-empty")?.remove();
-    const row = entryRow({});
-    $("entriesBody").insertAdjacentHTML("beforeend", row);
-    // Bind only the new row to avoid duplicate listeners.
-    const last = $("entriesBody").lastElementChild;
-    last.querySelector(".del-entry").addEventListener("click", () => { last.remove(); markEntryDraft(); });
-    last.querySelectorAll("input,select").forEach((el) => el.addEventListener("input", () => {
-      if (el.dataset.entryKey === "account_code") {
-        const known = accountChart.find((a) => a.code === el.value);
-        if (known) last.querySelector('[data-entry-key="account_name"]').value = known.name;
-      }
-      markEntryDraft();
-    }));
-    markEntryDraft();
-  });
-
-  function confirmEntryReplacement(before, after) {
-    const dialog = $("entryReplaceDialog");
-    $("entryReplaceBefore").innerHTML = entryPreview(before);
-    $("entryReplaceAfter").innerHTML = entryPreview(after);
-    return new Promise((resolve) => {
-      const finish = (value) => { dialog.close(); resolve(value); };
-      $("entryReplaceCancel").onclick = () => finish(false);
-      $("entryReplaceContinue").onclick = () => finish(true);
-      dialog.oncancel = (event) => { event.preventDefault(); finish(false); };
-      dialog.showModal();
-    });
+  async function responseError(response, fallback) {
+    try { return errText(await response.json(), fallback); }
+    catch (_) { return fallback; }
   }
-  async function performEntryAction(action) {
-    try {
-      await persistCurrentEdits();
-      if (action === "adopt" && !await confirmEntryReplacement(currentVoucher.entries || [], currentProposal.entries || [])) return;
-      const response = await fetch(`/api/vouchers/${currentId}/entries/${action}`, {method:"POST",headers:json(),
-        body:JSON.stringify({expected_updated_at:currentVersion,proposal_id:currentProposal.id,replace_existing:action === "adopt"})});
-      const record = await response.json();
-      if (!response.ok) {
-        if (response.status === 409 && record.latest) await reviewLatestVoucher(record.latest);
-        throw new Error(errText(record, "分錄操作失敗") + (response.status === 409 ? "；目前輸入仍保留，請比對最新內容後重新操作。" : ""));
-      }
-      currentVoucher = record.current || currentVoucher;
-      renderEntries(currentVoucher.entries || [],currentVoucher.debit_total,currentVoucher.credit_total,currentVoucher.balance_check);
-      applyRecordStatus(record);
-      toast({confirm:"分錄已經人工確認，可供入帳",adopt:"已採用建議，分錄待核對",discard:"已捨棄建議"}[action]);
-      loadList();
-    } catch (error) { alert(error.message); }
-  }
-  $("btnConfirmEntries").addEventListener("click", () => withEditLock(() => performEntryAction("confirm")));
-  $("adoptEntryProposal").addEventListener("click", () => withEditLock(() => performEntryAction("adopt")));
-  $("discardEntryProposal").addEventListener("click", () => withEditLock(() => performEntryAction("discard")));
-
-  async function responseError(resp, fallback) {
-    const data = await resp.json().catch(() => ({}));
-    return errText(data, `${fallback}（HTTP ${resp.status}）`);
-  }
-
-  // 暫存與一般儲存共用：歸屬公司、欄位、明細、分錄與摘要必須全數寫入後
-  // 才視為成功，避免頁面切換後把失敗誤認成已保存。
   async function persistCurrentEdits(action = "temporary") {
     if (!currentId) throw new Error("尚未選取憑證");
     const id = currentId;
@@ -1037,9 +915,7 @@
       });
       const record = await voucherResp.json();
       if (voucherResp.status === 409 && record.conflicts?.length) {
-        const next = await chooseMappingConflicts(record.conflicts);
-        if (!next) throw new Error("已取消儲存，輸入內容仍保留");
-        choices = next;
+        choices = Object.fromEntries(record.conflicts.map((conflict) => [conflict.item_name_key, {action:"local"}]));
         continue;
       }
       if (voucherResp.status === 409 && record.latest?.updated_at) {
@@ -1054,13 +930,12 @@
         currentVoucher = record.current || currentVoucher;
         reviewedItems = {};
         renderItems(currentVoucher.items || []);
-        renderEntries(currentVoucher.entries || [],currentVoucher.debit_total,currentVoucher.credit_total,currentVoucher.balance_check);
-        $("itemsSection").classList.toggle("hidden", !DOC_TYPES[currentVoucher.doc_type_key]?.has_items && !currentVoucher.items?.length);
-        applyEntryState(record);
+        $("itemsSection").classList.remove("hidden");
+        applyRecognitionState(record);
       }
       if (record.mapping_skipped?.length) alert("單據已儲存，以下明細未建立共用對應：\n" +
         record.mapping_skipped.map((row) => {
-          const item = record.current.items.find((it) => it.item_id === row.item_id);
+          const item = record.current.items.find((it) => it.item_id === row.item_id) || {};
           return `${item?.description || "空白品名"}：${row.reason}`;
         }).join("\n"));
       return record;
@@ -1140,7 +1015,7 @@
       $("revForm").querySelectorAll("input,textarea,select,button").forEach((control) => {
         if (!controls.includes(control)) control.disabled = false;
       });
-      $("adoptEntryProposal").disabled = currentProposal.status !== "pending";
+      updateRecognitionState();
     }
   }
 
@@ -1166,7 +1041,7 @@
   async function confirmCurrent() {
     try {
       await persistCurrentEdits("confirm");
-      toast("辨識內容已確認；分錄需另行確認可供入帳");
+      toast("辨識內容已確認，可列印報告");
       loadList();
     } catch (err) {
       alert(`確認失敗：${err.message}`);
@@ -1376,7 +1251,7 @@
   function clearReview() {
     $("revForm").classList.add("hidden"); $("revEmpty").classList.remove("hidden"); currentId = null;
     currentManualEntry = false;
-    currentEntryStatus = "none"; currentProposal = {}; currentEntryChecks = {};
+    recognitionReady = false; recognitionDirty = false; updateRecognitionState();
   }
   // 外觀確認 → 加入掃描清單（prepared → queued）
   async function confirmAppearance() {
@@ -1579,29 +1454,21 @@
   }
 
   async function printVoucher() {
+    if (!recognitionReady || recognitionDirty || editBusy) { alert("請先儲存並確認目前內容，再列印報告"); return; }
+    const id = currentId, version = currentVersion;
     const preview = window.open("", "_blank");
     if (!preview) { alert("請允許開啟列印視窗"); return; }
-    let record;
-    try { record = await persistCurrentEdits(); }
-    catch (error) { preview.close(); alert(`列印前儲存失敗：${error.message}`); return; }
-    const v = record.current || {}; currentVoucher = v;
-    const specs = itemSpecs();
-    const items = (v.items || []).map((i) => `<tr>${specs.map((f) => `<td>${f.kind === "number" ? nf(i[f.key]) : esc(i[f.key])}</td>`).join("")}</tr>`).join("");
-    const meta = v.classification_meta || {};
-    const warnings = [meta.status === "candidate" ? "候選分錄，需人工核對" : "", ...(v.validation_warnings || []), ...(meta.warnings || []), ...(meta.assumptions || [])].filter(Boolean);
-    const entries = (currentVoucher.entries || []).map((e) => `<tr><td>${esc(e.description)}</td><td>${esc(e.debit_account)} ${esc(e.debit_account_name)}</td><td>${esc(e.credit_account)} ${esc(e.credit_account_name)}</td><td class="num">${nf(e.amount)}</td><td>${esc(e.amount_source)}</td><td>${esc((e.evidence_paths || []).join("、"))}</td></tr>`).join("");
-    const audit = {field_evidence: v.field_evidence || {}, validation_warnings: v.validation_warnings || [],
-      classification_meta: meta, payment_state: v.payment_state || {}, items: v.items || [], entries: v.entries || []};
-    printWindow(`憑證 ${v.voucher_id}`, `
-      <h1>會計憑證審核報告</h1>
-      <div class="meta">憑證號 ${esc(v.voucher_id)}　日期 ${esc(v.date)}　類型 ${esc(v.doc_type)}</div>
-      <table class="kv"><tr><td>賣方</td><td>${esc(v.seller.name)}（${esc(v.seller.tax_id)}）</td><td>買方</td><td>${esc(v.buyer.name)}（${esc(v.buyer.tax_id)}）</td></tr>
-      <tr><td>未稅</td><td>${nf(v.subtotal)}</td><td>稅額</td><td>${nf(v.tax_amount)}</td></tr>
-      <tr><td>總計</td><td>${nf(v.total_amount)} ${esc(v.currency)}</td><td>摘要</td><td>${esc(v.note)}</td></tr></table>
-      ${items ? `<h3>明細</h3><table><thead><tr>${specs.map((f) => `<th>${esc(f.label)}</th>`).join("")}</tr></thead><tbody>${items}</tbody></table>` : ""}
-      ${warnings.length ? `<p>${warnings.map(esc).join("；")}</p>` : ""}
-      ${entries ? `<h3>會計分錄（${record.entries_status === "ready" ? "可供入帳" : "草稿待核對"}）</h3><table><thead><tr><th>摘要</th><th>借方科目</th><th>貸方科目</th><th>金額</th><th>主要金額來源</th><th>輔助證據路徑</th></tr></thead><tbody>${entries}</tbody></table>` : ""}
-      <h3>來源、驗證與政策紀錄</h3><pre class="audit">${esc(JSON.stringify(audit, null, 2))}</pre>`, preview);
+    try {
+      const response = await fetch(`/api/vouchers/${id}/recognition-report?expected_updated_at=${encodeURIComponent(version)}`);
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(errText(error, "報告無法列印，請重新確認"));
+      }
+      const html = await response.text();
+      if (id !== currentId || version !== currentVersion || recognitionDirty) throw new Error("內容已變更，請重新確認");
+      preview.document.write(html);
+      preview.document.close();
+    } catch (error) { preview.close(); alert(error.message); }
   }
   $("btnPrintVoucher").addEventListener("click", printVoucher);
 

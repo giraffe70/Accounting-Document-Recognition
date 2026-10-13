@@ -88,6 +88,29 @@ vm.runInContext(input.source.slice(start, end) + '\nglobalThis.refresh = refresh
 """
 
 
+ITEM_ROW_HARNESS = r"""
+const fs = require('fs');
+const vm = require('vm');
+const input = JSON.parse(fs.readFileSync(0, 'utf8'));
+const start = input.source.indexOf('  function itemSpecs()');
+const end = input.source.indexOf('  function bindItemRows()', start);
+if (start < 0 || end < 0) throw new Error('could not locate item row renderer');
+const nodes = { revCompanySel: { value: '3' }, revTypeSel: { value: 'other' } };
+const context = {
+  currentVoucher: { doc_type_key: 'other' },
+  DOC_TYPES: { other: { item_fields: [{ key: 'batch_tag', label: '批次備註', kind: 'text' }] } },
+  $: (id) => nodes[id] || null,
+  esc: (value) => String(value ?? '').replace(/[<>&"]/g, (c) => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c])),
+  selectedCompanyId: () => 3,
+  normalizedItemName: (value) => String(value || '').trim().replace(/\s+/g, ' '),
+  itemContext: (company, name) => JSON.stringify([company, String(name || '').trim().replace(/\s+/g, ' ')]),
+};
+vm.createContext(context);
+vm.runInContext(input.source.slice(start, end) + '\nglobalThis.renderItem = itemRow;', context);
+process.stdout.write(JSON.stringify({ html: context.renderItem(input.item) }));
+"""
+
+
 class MappingFrontendTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -106,6 +129,29 @@ class MappingFrontendTests(unittest.TestCase):
         )
         self.assertEqual(completed.returncode, 0, completed.stderr.decode("utf-8", errors="replace"))
         return json.loads(completed.stdout.decode("utf-8"))
+
+    def render_item(self, item):
+        completed = subprocess.run(
+            [str(NODE), "-e", ITEM_ROW_HARNESS],
+            input=json.dumps({"source": self.source, "item": item}, ensure_ascii=False).encode("utf-8"),
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr.decode("utf-8", errors="replace"))
+        return json.loads(completed.stdout.decode("utf-8"))["html"]
+
+    def test_item_editor_uses_wrapping_description_and_expanded_extras_with_opt_in_mapping(self):
+        html = self.render_item({"item_id": "item-1", "description": "長品名\n續行"})
+
+        self.assertIn('<textarea data-item-key="description" data-kind="text" rows="2">', html)
+        self.assertIn('<details class="item-extras"><summary>展開</summary>', html)
+        self.assertIn("批次備註", html)
+        self.assertIn('class="remember-mapping"', html)
+        self.assertNotRegex(html, r'class="remember-mapping"[^>]*checked')
+
+        remembered = self.render_item({"item_id": "item-2", "description": "商品", "remember_mapping": True})
+        self.assertRegex(remembered, r'class="remember-mapping" checked')
 
     def test_old_company_and_name_response_does_not_replace_new_context(self):
         result = self.run_lookup("stale-context")

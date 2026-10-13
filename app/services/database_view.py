@@ -46,6 +46,8 @@ TABLE_META = {
             "period": "所屬期別", "status": "審核狀態", "confidence": "辨識信心度",
             "ai_json": "AI 辨識內容", "current_json": "目前憑證內容",
             "correction_note": "修正備註", "confirmed_at": "確認完成時間",
+            "confirmed_by": "辨識確認者編號", "confirmed_by_name": "辨識確認者名稱",
+            "recognition_confirmed_version": "辨識報告確認版本",
             "entries_status": "分錄狀態", "entries_confirmed_at": "分錄確認時間",
             "entries_confirmed_by": "分錄確認者編號",
             "entries_confirmed_by_name": "分錄確認者名稱",

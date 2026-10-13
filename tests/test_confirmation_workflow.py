@@ -265,10 +265,10 @@ class ReviewMigrationTests(unittest.TestCase):
                 conn.exec_driver_sql("""INSERT INTO voucher_records
                     (id,source_file,record_role,recognition_history,company,period,status,confidence,
                      ai_json,current_json,correction_note,manual_entry,ocr_provider,structure_model,
-                     image_path,attachments,created_at,updated_at,dev_note,entries_status,
+                     image_path,attachments,created_at,updated_at,dev_note,confirmed_by_name,entries_status,
                      entries_confirmed_by_name,entries_proposal_json,entries_history)
                     VALUES (1,'','voucher','[]','','','pending','','{}','{}','',0,'','','','[]',
-                            '2026-10-01 00:00:00','2026-10-01 00:00:00','x','none','','{}','[]')""")
+                            '2026-10-01 00:00:00','2026-10-01 00:00:00','x','','none','','{}','[]')""")
             with patch.object(db_session, "_engine", engine):
                 db_session._migrate()
                 db_session._migrate()
@@ -301,20 +301,24 @@ class ConfirmationApiContractTests(unittest.TestCase):
         self.assertEqual(route_by_suffix["confirm"].name, "api_confirm_record")
         self.assertEqual(route_by_suffix["confirm-appearance"].name, "api_confirm_appearance")
         params = {arg.arg for arg in route_by_suffix["confirm"].args.args}
+        self.assertIn("request", params)
         self.assertIn("expected_updated_at", params)
         self.assertNotIn("doc_type_key", params)
 
     def test_record_confirmation_endpoint_passes_expected_version(self):
         from fastapi import Body
 
+        request = SimpleNamespace(cookies={"session": "signed-token"})
+        actor = {"username": "reviewer", "role": "accountant"}
+        auth_stub = SimpleNamespace(get_user_by_token=Mock(return_value=actor))
         record = SimpleNamespace(id=13)
         review_stub = SimpleNamespace(confirm_record=Mock(return_value=record))
         endpoint = _load_endpoint("api_confirm_record", {
-            "review": review_stub, "JSONResponse": Mock(), "Body": Body,
+            "review": review_stub, "JSONResponse": Mock(), "Body": Body, "auth": auth_stub,
             "_rec_to_dict": lambda value: {"id": value.id},
         })
-        result = endpoint(13, "2026-10-01T12:00:00")
-        review_stub.confirm_record.assert_called_once_with(13, "2026-10-01T12:00:00")
+        result = endpoint(request, 13, "2026-10-01T12:00:00")
+        review_stub.confirm_record.assert_called_once_with(13, "2026-10-01T12:00:00", actor)
         self.assertEqual(result["id"], 13)
 
     def test_auth_guard_allows_each_signed_role_to_confirm_and_rejects_anonymous(self):
@@ -330,7 +334,7 @@ class ConfirmationApiContractTests(unittest.TestCase):
         record = SimpleNamespace(id=13)
         review_stub = SimpleNamespace(confirm_record=Mock(return_value=record))
         confirm = _load_endpoint("api_confirm_record", {
-            "review": review_stub, "JSONResponse": JSONResponse, "Body": Body,
+            "review": review_stub, "JSONResponse": JSONResponse, "Body": Body, "auth": auth,
             "_rec_to_dict": lambda value: {"id": value.id},
         })
 
@@ -341,7 +345,7 @@ class ConfirmationApiContractTests(unittest.TestCase):
             )
 
             async def call_next(_request):
-                return JSONResponse(confirm(13, "2026-10-01T12:00:00"))
+                return JSONResponse(confirm(_request, 13, "2026-10-01T12:00:00"))
 
             coroutine = guard(request, call_next)
             try:
@@ -354,9 +358,9 @@ class ConfirmationApiContractTests(unittest.TestCase):
             response = guarded_request(f"{role}-token")
             self.assertEqual(response.status_code, 200, role)
         review_stub.confirm_record.assert_has_calls([
-            unittest.mock.call(13, "2026-10-01T12:00:00"),
-            unittest.mock.call(13, "2026-10-01T12:00:00"),
-            unittest.mock.call(13, "2026-10-01T12:00:00"),
+            unittest.mock.call(13, "2026-10-01T12:00:00", users["clerk-token"]),
+            unittest.mock.call(13, "2026-10-01T12:00:00", users["accountant-token"]),
+            unittest.mock.call(13, "2026-10-01T12:00:00", users["admin-token"]),
         ])
         anonymous = guarded_request(None)
         self.assertEqual(anonymous.status_code, 401)

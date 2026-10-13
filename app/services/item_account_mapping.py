@@ -10,6 +10,8 @@ from app.db.models import ItemAccountMapping, MappingHistory, UserAccount, Vouch
 ACCOUNT_FIELDS = frozenset({"item_id", "account_code", "account_name", "mapping_id", "mapping_version",
     "account_source", "account_needs_review", "remember_mapping", "account_company_id", "account_item_key",
     "account_updated_by", "account_updated_by_name", "account_updated_at"})
+from app.services.recognition_details import SOURCE_FIELDS
+ACCOUNT_FIELDS = ACCOUNT_FIELDS | SOURCE_FIELDS
 
 
 class MappingConflict(ValueError):
@@ -33,7 +35,7 @@ def defaults(row):
     row.setdefault("mapping_version", None)
     row.setdefault("account_source", "manual" if row["account_code"] or row["account_name"] else "")
     row.setdefault("account_needs_review", False)
-    row.setdefault("remember_mapping", True)
+    row.setdefault("remember_mapping", False)
     return row
 
 
@@ -64,6 +66,7 @@ def lookup(session, company_id, items):
 def strip_accounting(data):
     """Keep application-added fields out of extraction alignment and classification."""
     result = deepcopy(data)
+    result.pop("details_version", None)
     if "items" in result:
         result["items"] = [{k: v for k, v in row.items() if k not in ACCOUNT_FIELDS}
                            for row in result.get("items", [])]
@@ -88,7 +91,7 @@ def remap_evidence(previous, rows):
 
 
 def prepare_items(session, data, company_id, *, previous=None, previous_company_id=None,
-                  model_result=False, reviewed=None, rec_id=None):
+                  model_result=False, reviewed=None, rec_id=None, observed_accounts=None):
     """Derive provenance on the server. The browser may only acknowledge a new context."""
     previous = previous or {}
     old_rows = {row.get("item_id"): row for row in previous.get("items", []) if row.get("item_id")}
@@ -109,6 +112,7 @@ def prepare_items(session, data, company_id, *, previous=None, previous_company_
     rules = rules_for(session, company_id, [row.get("description") for row in rows])
     seen = set()
     reviewed = reviewed or {}
+    observed_accounts = observed_accounts or {}
     for row in rows:
         try:
             row["item_id"] = str(UUID(row["item_id"]))
@@ -137,13 +141,15 @@ def prepare_items(session, data, company_id, *, previous=None, previous_company_
                                        item_key(old.get("description")) != key))
         # Preserve protected model rows, but never accept model-generated accounting attributes.
         if model_result and not old:
-            pair = ("", "")
+            pair = observed_accounts.get(identity, ("", ""))
         if old and pair == old_pair:
             source = old.get("account_source", "")
             needs_review = bool(old.get("account_needs_review"))
             mapping_id, mapping_version = old.get("mapping_id"), old.get("mapping_version")
         else:
             source, needs_review, mapping_id, mapping_version = ("manual" if any(pair) else ""), False, None, None
+        if not old and any(pair) and pair == observed_accounts.get(identity):
+            source = "observed"
         if changed_context:
             if old.get("account_source") == "mapping" and pair == old_pair:
                 pair = ("", "")
@@ -151,7 +157,7 @@ def prepare_items(session, data, company_id, *, previous=None, previous_company_
             elif any(pair):
                 needs_review = True
             mapping_id, mapping_version = None, None
-        if not old and match and pair == (match["account_code"], match["account_name"]):
+        if not old and source != "observed" and match and pair == (match["account_code"], match["account_name"]):
             source = "mapping"
             mapping_id, mapping_version = match["mapping_id"], match["mapping_version"]
         # An unchanged saved snapshot is never refreshed when a rule has changed.
@@ -195,12 +201,12 @@ def audit_items(session, data, previous, actor):
                        account_updated_at=utc_now().isoformat() + "Z")
 
 
-def publish(session, rec, data, actor, choices=None):
+def publish(session, rec, data, actor, choices=None, *, nonblocking=False):
     """Validate every choice first, then publish all rule changes in the caller's transaction."""
     choices = choices or {}
     groups, skipped = {}, []
     for row in data.get("items", []):
-        if not row.get("remember_mapping", True):
+        if not row.get("remember_mapping", False):
             continue
         key = item_key(row.get("description"))
         reason = ("未指定公司" if not rec.company_id else "品名空白" if not key else
@@ -244,6 +250,11 @@ def publish(session, rec, data, actor, choices=None):
             continue
         pending.append((key, row, rows, rule))
     if conflicts:
+        if nonblocking:
+            local_choices = {**choices, **{row["item_name_key"]: {"action": "local"} for row in conflicts}}
+            notices = [{"item_id": row["item_id"], "reason": "共用科目規則衝突，僅保存本張，未更新規則"}
+                       for conflict in conflicts for row in conflict["rows"]]
+            return notices + publish(session, rec, data, actor, local_choices)
         raise MappingConflict("請選擇只修改本張或更新共用規則；規則有變更時請重新選擇", conflicts)
     user = session.exec(select(UserAccount).where(UserAccount.username == actor.get("username", ""))).first()
     if pending and not user:

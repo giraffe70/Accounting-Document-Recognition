@@ -19,36 +19,31 @@ const vm = require('vm');
 const input = JSON.parse(fs.readFileSync(0, 'utf8'));
 const source = input.source;
 const start = source.indexOf('  function itemSpecs()');
-const end = source.indexOf('  $("btnClassify").addEventListener("click"', start);
+const specsEnd = source.indexOf('  async function loadItemAccountChart()', start);
+const rowStart = source.indexOf('  function itemRow(it)', specsEnd);
+const rowEnd = source.indexOf('  function bindItemRows()', rowStart);
+const collectStart = source.indexOf('  function collectForm()', rowEnd);
+const collectEnd = source.indexOf('  async function responseError(', collectStart);
 const escStart = source.indexOf('  const esc = ');
 const escEnd = source.indexOf('\n', escStart);
-if (start < 0 || end < 0 || escStart < 0 || escEnd <= escStart) {
+if ([start, specsEnd, rowStart, rowEnd, collectStart, collectEnd].some((p) => p < 0) || escStart < 0 || escEnd <= escStart) {
   throw new Error('could not locate production form functions in app.js');
 }
-const formCode = source.slice(start, end);
 const escCode = source.slice(escStart, escEnd);
+const specsCode = source.slice(start, specsEnd);
+const itemRowCode = source.slice(rowStart, rowEnd);
+const collectCode = source.slice(collectStart, collectEnd);
 const fieldNodes = Object.fromEntries(Object.entries(input.fieldInputs || {}).map(([key, value]) =>
   ['dyn-' + key, { value }]));
 const rows = (input.rows || []).map((row) => ({
   dataset: { original: row.original || '{}' },
   querySelectorAll: (selector) => selector === '[data-item-key]' ? row.inputs : [],
-  querySelector: (selector) => selector === '.remember-mapping' ? { checked: row.remember !== false } : null,
+  querySelector: (selector) => selector === '.remember-mapping' ? { checked: row.remember === true } : null,
 }));
-const entryRows = (input.entryRows || []).map((row) => {
-  const fields = Object.fromEntries(Object.entries(row.fields || {}).map(([key, value]) => [key, { value }]));
-  return {
-    dataset: { entryId: row.entryId, original: row.original || '{}' },
-    querySelector: (selector) => {
-      const match = selector.match(/data-entry-key="([^"]+)"/);
-      return match ? (fields[match[1]] || null) : null;
-    },
-  };
-});
 const nodes = {
   revTypeSel: { value: input.typeKey },
   revCompanySel: { value: String(input.companyId ?? 3) },
   itemsBody: { querySelectorAll: (selector) => selector === 'tr' ? rows : [] },
-  entriesBody: { querySelectorAll: (selector) => selector === 'tr[data-entry-id]' ? entryRows : [] },
   'f-note': { value: input.note || '' },
   addItem: { addEventListener: () => {} },
   ...fieldNodes,
@@ -60,15 +55,13 @@ const context = {
   currentVoucher: input.voucher,
   activeFields: input.activeFields,
   selectedCompanyId: () => input.companyId ?? 3,
-  itemContext: (company, name) => JSON.stringify([company, String(name || '').trim().replace(/\s+/g, ' ')]),
-  newItemId: () => 'generated-item-id',
   $: (id) => nodes[id] || null,
 };
 vm.createContext(context);
-vm.runInContext(`${escCode}\n${formCode}\nglobalThis.result = {
+vm.runInContext(`${escCode}\n${specsCode}\n${itemRowCode}\n${collectCode}\nglobalThis.result = {
   itemSpecs: itemSpecs(),
+  extraSpecs: itemExtraSpecs(),
   itemHtml: itemRow(input.rowItem || {}),
-  collectedEntries: collectEntries(),
   collected: collectForm(),
 };`, context);
 process.stdout.write(JSON.stringify(context.result));
@@ -132,10 +125,14 @@ class FrontendFormRegressionTests(unittest.TestCase):
                      "fields": {"direction": "import", "old_field": "keep"},
                      "items": [original_item], "note": "existing"},
             rows=[{"original": json.dumps(original_item, ensure_ascii=False), "inputs": item_inputs}],
+            rowItem=original_item,
         )
 
         item_keys = {field["key"] for field in result["itemSpecs"]}
-        self.assertTrue({"hs_code", "origin_country"} <= item_keys)
+        extra_keys = {field["key"] for field in result["extraSpecs"]}
+        self.assertTrue({"account_code", "account_name", "description", "quantity", "unit_price", "amount"} <= item_keys)
+        self.assertTrue({"hs_code", "origin_country"} <= extra_keys)
+        self.assertFalse({"hs_code", "origin_country"} & item_keys)
         collected = result["collected"]
         self.assertEqual(collected["fields"]["direction"], "import")
         self.assertEqual(collected["fields"]["old_field"], "keep")
@@ -143,9 +140,14 @@ class FrontendFormRegressionTests(unittest.TestCase):
         self.assertEqual(len(collected["items"]), 1)
         item = collected["items"][0]
         self.assertEqual(item["amount"], 0)
+        self.assertIsNone(item["description"])
         self.assertEqual(item["hs_code"], "0901.21")
         self.assertEqual(item["origin_country"], "TW")
         self.assertEqual(item["legacyattr"], "keep-me")
+        self.assertIn('<textarea data-item-key="description" data-kind="text" rows="2"></textarea>', result["itemHtml"])
+        details = result["itemHtml"].index('<details class="item-extras">')
+        self.assertGreater(result["itemHtml"].index('data-item-key="hs_code"'), details)
+        self.assertGreater(result["itemHtml"].index('data-item-key="origin_country"'), details)
 
     def test_nonnumeric_number_text_is_kept_for_backend_and_html_is_escaped(self):
         hostile = 'x"><img src=x onerror="alert(1)">&'
@@ -196,7 +198,7 @@ class FrontendFormRegressionTests(unittest.TestCase):
                         result["itemHtml"].index('data-item-key="description"'))
         self.assertIn('data-item-key="account_code" data-kind="text" type="text" list="itemAccountCodes" value="00120"',
                       result["itemHtml"])
-        self.assertIn('class="remember-mapping" >記住對應', result["itemHtml"])
+        self.assertIn('class="remember-mapping" >記住品名對應', result["itemHtml"])
         item = result["collected"]["items"][0]
         self.assertEqual(item["account_code"], "00120")
         self.assertEqual(item["account_name"], "手填科目")
@@ -215,7 +217,7 @@ class FrontendFormRegressionTests(unittest.TestCase):
         )
         self.assertEqual(result["collected"]["items"], [])
 
-    def test_entry_editor_preserves_fixed_id_and_manual_account_code(self):
+    def test_unedited_entries_keep_original_ids_and_account_codes(self):
         entry = {
             "entry_id": "fixed-entry-uuid",
             "entry_origin": "observed",
@@ -231,24 +233,13 @@ class FrontendFormRegressionTests(unittest.TestCase):
         result = self.run_form(
             typeKey="other", activeFields=[],
             voucher={"doc_type_key": "other", "fields": {}, "items": [item], "entries": [entry]},
-            # A non-item type must still retain and show persisted rows during edit.
             rows=[{"original": json.dumps(item, ensure_ascii=False), "inputs": []}],
-            entryRows=[{"entryId": entry["entry_id"], "original": json.dumps(entry, ensure_ascii=False),
-                        "fields": {"direction": "debit", "account_code": "00120", "account_name": "手填科目",
-                                   "amount": "660", "description": "運費修正", "dept": "", "offset_code": ""}}],
         )
         collected = result["collected"]
         self.assertEqual(collected["items"][0]["item_id"], "fixed-item-uuid")
-        self.assertEqual(len(collected["entries"]), 1)
-        row = collected["entries"][0]
-        self.assertEqual(row["entry_id"], "fixed-entry-uuid")
-        self.assertEqual(row["entry_origin"], "observed")
-        self.assertEqual(row["source_entry_index"], 2)
-        self.assertEqual(row["debit_account"], "00120")
-        self.assertEqual(row["debit_account_name"], "手填科目")
-        self.assertEqual(row["credit_account"], "")
-        self.assertEqual(row["description"], "運費修正")
-        self.assertEqual(row["legacy_field"], "keep-entry-metadata")
+        self.assertEqual(collected["entries"], [entry])
+        self.assertEqual(collected["entries"][0]["entry_id"], "fixed-entry-uuid")
+        self.assertEqual(collected["entries"][0]["debit_account"], "00120")
 
 
 class ValidationTimingFrontendContractTests(unittest.TestCase):

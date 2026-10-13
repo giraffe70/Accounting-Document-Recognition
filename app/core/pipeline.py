@@ -365,6 +365,7 @@ def extract_evidence(image_path: str, type_key: str, chat, ocr_lines: list, ocr_
                     for record in data["field_evidence"].get(path, []):
                         record["selected"] = False
                     data["field_evidence"].setdefault(path, []).append({"source": "ocr", "value": row[key], "selected": True})
+        _filter_entry_rows_with_ocr(data, ocr_lines)
     vlm_boxes = _normalize_boxes(data.get("boxes"), image_path) if mode == "image" else {}
     dense = type_key in doc_types.NO_VLM_BOX_TYPES
     data["boxes"] = _refine_boxes_with_ocr(data["fields"], vlm_boxes, ocr_lines, image_path,
@@ -586,15 +587,68 @@ def _fix_entry_sides_with_ocr(data: dict, ocr_lines: list) -> int:
                 cands = near
         sides = {"debit" if x < mid else "credit" for x, _ in cands}
         if len(sides) != 1:          # 仍無法判定（多半撞上合計列）→ 保留模型原判
+            warning = "原傳票金額位置無法唯一判定，請對照原圖核對明細"
+            if warning not in data.setdefault("validation_warnings", []):
+                data["validation_warnings"].append(warning)
             continue
         side = sides.pop()
-        if side == "debit" and not d:
+        if side == "debit" and (not d or c == amt):
             r["debit"], r["credit"] = amt, None
+            r["source_direction"] = side
             fixed += 1
-        elif side == "credit" and not c:
+        elif side == "credit" and (not c or d == amt):
             r["debit"], r["credit"] = None, amt
+            r["source_direction"] = side
             fixed += 1
+        else:
+            r["source_direction"] = side
+        if len(cands) == 1:
+            r["source_row_y"] = cands[0][1]
     return fixed
+
+
+def _filter_entry_rows_with_ocr(data, ocr_lines):
+    """Discard only empty rows or repeated/footer rows anchored to OCR geometry."""
+    import re
+    from copy import deepcopy
+    def center(line):
+        box = line.get("box") or []
+        return sum(p[1] for p in box) / len(box) if box else None
+    headers = [center(line) for line in ocr_lines if any(word in str(line.get("text", "")) for word in ("借方", "貸方"))]
+    headers = [y for y in headers if y is not None]
+    footer = [center(line) for line in ocr_lines if re.sub(r"\s+", "", str(line.get("text", ""))) in ("合計", "總計", "本頁合計")]
+    footer = [y for y in footer if y is not None and headers and y > max(headers)]
+    keep, seen, removed = [], set(), []
+    for index, row in enumerate(data.get("entries") or []):
+        if not isinstance(row, dict):
+            continue
+        empty = all(row.get(key) in (None, "") for key in ("account_code", "account_name", "description", "debit", "credit"))
+        y = row.get("source_row_y")
+        is_footer = y is not None and any(abs(y - footer_y) <= 6 for footer_y in footer)
+        marker = re.sub(r"[\s/／]+", "", str(row.get("description") or ""))
+        is_blank_marker = marker in ("以下空白", "本頁以下空白", "以下無資料", "以下無明細") and any(
+            marker in re.sub(r"[\s/／]+", "", str(line.get("text") or "")) for line in ocr_lines)
+        physical = (y, row.get("source_direction"), row.get("debit"), row.get("credit")) if y is not None else None
+        duplicate = physical is not None and physical in seen
+        if empty or is_footer or is_blank_marker or duplicate:
+            removed.append(index)
+            continue
+        if physical is not None:
+            seen.add(physical)
+        keep.append((index, row))
+    if not removed:
+        return 0
+    evidence = data.get("field_evidence") or {}
+    updated = {path: records for path, records in evidence.items() if not path.startswith("entries[")}
+    for new_index, (old_index, row) in enumerate(keep):
+        for path, records in evidence.items():
+            prefix = f"entries[{old_index}]."
+            if path.startswith(prefix):
+                updated[f"entries[{new_index}]." + path[len(prefix):]] = deepcopy(records)
+    data["entries"] = [row for _, row in keep]
+    data["field_evidence"] = updated
+    data.setdefault("validation_warnings", []).append("已依原表格位置排除合計、空白或重複擷取列，請核對明細")
+    return len(removed)
 
 
 def _entries_from_voucher_form(data: dict, spec: dict) -> dict:
@@ -627,6 +681,7 @@ def _entries_from_voucher_form(data: dict, spec: dict) -> dict:
             continue
         for side, value in sides:
             entry = {**base, "amount": value, side + "_account": code, side + "_account_name": name,
+                     "source_direction": side,
                      "evidence_paths": [f"entries[{index}].{side}"]}
             entries.append(entry)
             if side == "debit": dr += value
@@ -741,6 +796,7 @@ def _build_voucher(data: dict, type_key: str, *, derive_entries: bool = True, no
         "doc_type_key": type_key, "doc_type": spec["label"], "fields": f,
         "note": to_traditional(data.get("note") or ""), "confidence": data.get("confidence"),
         "boxes": data.get("boxes") or {}, "items": data.get("items") or [],
+        "details_version": data.get("details_version") or 0,
         "box_issues": data.get("box_issues") or [], "origin": data.get("origin") or {},
         "field_evidence": evidence, "validation_warnings": list(dict.fromkeys(warnings)),
         "classification_meta": data.get("classification_meta") or {},

@@ -436,6 +436,7 @@ async def _save_upload(file: UploadFile) -> Path:
 
 # ── 憑證確認（保存修正 → 人工確認完成）──────────────────────────
 def _rec_to_dict(rec: VoucherRecord, full: bool = False) -> dict:
+    from app.services import recognition_details
     d = {
         "id": rec.id, "source_file": rec.source_file, "company": rec.company,
         "company_id": rec.company_id,
@@ -444,6 +445,8 @@ def _rec_to_dict(rec: VoucherRecord, full: bool = False) -> dict:
         "structure_model": rec.structure_model, "ocr_provider": rec.ocr_provider,
         "correction_note": rec.correction_note,
         "confirmed_at": rec.confirmed_at.isoformat() if rec.confirmed_at else "",
+        "confirmed_by_name": getattr(rec, "confirmed_by_name", ""),
+        "recognition_report_ready": rec.status == ReviewStatus.confirmed and getattr(rec, "recognition_confirmed_version", 0) == recognition_details.VERSION,
         "manual_entry": bool(rec.manual_entry),
         "entries_status": getattr(rec, "entries_status", "none"),
         "entries_confirmed_at": rec.entries_confirmed_at.isoformat() + "Z" if getattr(rec, "entries_confirmed_at", None) else "",
@@ -459,6 +462,8 @@ def _rec_to_dict(rec: VoucherRecord, full: bool = False) -> dict:
     if full:
         d["ai"] = json.loads(rec.ai_json)
         d["current"] = json.loads(rec.current_json)
+        recognition_details.ensure(d["current"], rec.id)
+        d["detail_account_warnings"] = review.recognition_account_warnings(rec, d["current"])
         d["entries_checks"] = entry_workflow.checks(d["current"])
         d["entries_proposal"] = json.loads(getattr(rec, "entries_proposal_json", "{}") or "{}")
         d["is_import"] = importdecl.is_import(d["current"])
@@ -570,8 +575,8 @@ def api_save_current(request: Request, rec_id: int, payload: dict = Body(...)):
 
 
 @app.post("/api/vouchers/{rec_id}/confirm")
-def api_confirm_record(rec_id: int, expected_updated_at: str = Body(..., embed=True)):
-    rec = review.confirm_record(rec_id, expected_updated_at)
+def api_confirm_record(request: Request, rec_id: int, expected_updated_at: str = Body(..., embed=True)):
+    rec = review.confirm_record(rec_id, expected_updated_at, auth.get_user_by_token(request.cookies.get("session")))
     return _rec_to_dict(rec) if rec else JSONResponse({"detail": "查無此紀錄"}, status_code=404)
 
 
@@ -723,12 +728,32 @@ def _run_extract(ids: list):
         _ejob["current"] = ""
 
 
+@app.get("/api/vouchers/{rec_id}/recognition-report", response_class=HTMLResponse)
+def api_recognition_report(request: Request, rec_id: int, expected_updated_at: str):
+    from app.services import recognition_details, recognition_report
+    if not auth.get_user_by_token(request.cookies.get("session")):
+        return JSONResponse({"detail": "未登入"}, status_code=401)
+    rec = review.get_voucher(rec_id)
+    if not rec:
+        return JSONResponse({"detail": "查無此紀錄"}, status_code=404)
+    data = json.loads(rec.current_json)
+    if (rec.record_role == "source_page" or rec.status != ReviewStatus.confirmed
+            or rec.recognition_confirmed_version != recognition_details.VERSION
+            or data.get("details_version") != recognition_details.VERSION
+            or rec.updated_at.isoformat() != expected_updated_at):
+        return JSONResponse({"detail": "內容尚未確認或版本已變更，請重新載入並確認"}, status_code=409)
+    return HTMLResponse(recognition_report.render(rec, data, review.recognition_account_warnings(rec, data)),
+                        headers={"Cache-Control": "no-store"})
+
+
 @app.get("/api/vouchers/{rec_id}/image")
-def api_voucher_image(rec_id: int, att: int = -1):
+def api_voucher_image(rec_id: int, att: int = -1, expected_updated_at: str = ""):
     """att=-1 主頁；att>=0 取第 N 張附頁。"""
     rec = review.get_voucher(rec_id)
     if not rec:
         return JSONResponse({"detail": "找不到紀錄"}, status_code=404)
+    if expected_updated_at and rec.updated_at.isoformat() != expected_updated_at:
+        return JSONResponse({"detail": "影像版本已變更，請重新確認"}, status_code=409)
     if att >= 0:
         atts = json.loads(rec.attachments or "[]")
         rel = atts[att] if att < len(atts) else None
@@ -739,7 +764,7 @@ def api_voucher_image(rec_id: int, att: int = -1):
     p = config.UPLOAD_DIR / rel
     if not p.exists():
         return JSONResponse({"detail": "影像檔不存在"}, status_code=404)
-    return FileResponse(str(p))
+    return FileResponse(str(p), headers={"Cache-Control": "no-store"})
 
 
 @app.post("/api/vouchers/merge")

@@ -18,7 +18,7 @@ const fs = require('fs');
 const vm = require('vm');
 const input = JSON.parse(fs.readFileSync(0, 'utf8'));
 const source = input.source;
-const start = source.indexOf('  async function responseError(');
+const start = source.indexOf('  async function persistCurrentEdits(');
 const end = source.indexOf('  const json = () =>', start);
 if (start < 0 || end < 0) throw new Error('could not locate production confirmation functions');
 const code = source.slice(start, end);
@@ -26,7 +26,7 @@ const events = [];
 const nodes = {
   'revCompanySel': { value: '1' },
   'itemsBody': { querySelectorAll: () => [] },
-  'itemsSection': { classList: { toggle: () => {} } },
+  'itemsSection': { classList: { toggle: () => {}, remove: () => {} } },
   'revForm': { querySelectorAll: () => [] },
   'btnSave': { disabled: false, addEventListener: () => {} },
   'btnConfirm': { disabled: false, addEventListener: () => {} },
@@ -34,9 +34,9 @@ const nodes = {
   'dirInput': { value: 'directory-selection' },
 };
 let currentId = input.currentId ?? 12;
-let currentVoucher = { fields: { amount: 125 }, status: 'pending' };
+let currentVoucher = { fields: { amount: 125 }, items: [], entries: [{ id: 'untouched-entry' }], status: 'pending' };
 let currentVersion = 'original-ts';
-let currentEntryStatus = 'none', currentProposal = {}, currentEntryChecks = {};
+let recognitionReady = !!input.recognitionReady, recognitionDirty = !!input.recognitionDirty;
 let reviewedItems = input.reviewedItems || {};
 let saveCalls = 0;
 let editBusy = false;
@@ -46,17 +46,18 @@ const progressText = { textContent: '' };
 const progress = { classList: { remove: () => {} } };
 const barFill = { style: {} };
 function $(id) { return nodes[id] || null; }
-function collectForm() { return { fields: { amount: 125 }, entries: [] }; }
+function collectForm() { return { ...currentVoucher, fields: { amount: 125 } }; }
 function json() { return { 'Content-Type': 'application/json' }; }
-function applyRecordStatus(record) { events.push({ type: 'status', id: record.id, status: record.status }); }
-function renderEntries(entries = [], debitTotal = null, creditTotal = null, balanceCheck = false) {
-  events.push({ type: 'renderEntries', count: entries.length, debitTotal, creditTotal, balanceCheck });
+function updateRecognitionState() { events.push({ type: 'recognitionState', ready: recognitionReady, dirty: recognitionDirty }); }
+function applyRecognitionState(record) {
+  recognitionReady = !!record.recognition_report_ready;
+  recognitionDirty = false;
+  updateRecognitionState();
 }
-function applyEntryState(record) {
-  currentEntryStatus = record.entries_status || 'none';
-  currentProposal = record.entries_proposal || {};
-  currentEntryChecks = record.entries_checks || {};
-  events.push({ type: 'entryState', status: currentEntryStatus, proposal: currentProposal.status || null });
+function applyRecordStatus(record) {
+  events.push({ type: 'status', id: record.id, status: record.status });
+  if (record.updated_at) currentVersion = record.updated_at;
+  applyRecognitionState(record);
 }
 async function refreshItemMatch() {}
 function selectedCompanyId() { return 1; }
@@ -79,7 +80,7 @@ async function fetch(url, options = {}) {
   if (status === 409 && input.latest) return response(false, 409, { latest: input.latest });
   if (status < 200 || status >= 300) return response(false, status, { detail: 'stale record' });
   return response(true, status, { id: 12, status: parsed.action === 'confirm' ? 'confirmed' : 'pending',
-    updated_at: 'saved-ts', current: currentVoucher });
+    recognition_report_ready: parsed.action === 'confirm', updated_at: 'saved-ts', current: currentVoucher });
 }
 
 const context = {
@@ -87,7 +88,8 @@ const context = {
   set currentId(value) { currentId = value; }, currentVoucher, currentVersion,
   DOC_TYPES: { other: { has_items: false } },
   reviewedItems, editBusy, inferBusy,
-  fileInput, progressText, progress, barFill, $, collectForm, json, applyRecordStatus, renderEntries, applyEntryState,
+  recognitionReady, recognitionDirty, fileInput, progressText, progress, barFill, $, collectForm, json,
+  applyRecordStatus, applyRecognitionState, updateRecognitionState, errText: (record, fallback) => record?.detail || fallback,
   refreshItemMatch, selectedCompanyId, renderItems,
   clearReview, setStage, loadList, alert, toast, fetch,
 };
@@ -109,6 +111,50 @@ globalThis.api = { confirmCurrent, saveDraft, persistCurrentEdits };`, context);
     currentId: vm.runInContext('currentId', context),
     currentVersion: vm.runInContext('currentVersion', context),
   }));
+})().catch((error) => { console.error(error.stack || error); process.exit(1); });
+"""
+
+
+PRINT_HARNESS = r"""
+const fs = require('fs');
+const vm = require('vm');
+const input = JSON.parse(fs.readFileSync(0, 'utf8'));
+const source = input.source;
+const stateStart = source.indexOf('  function updateRecognitionState()');
+const stateEnd = source.indexOf('  function setStatus(', stateStart);
+const printStart = source.indexOf('  async function printVoucher()', stateEnd);
+const printEnd = source.indexOf('  $("btnPrintVoucher").addEventListener', printStart);
+if ([stateStart, stateEnd, printStart, printEnd].some((p) => p < 0)) throw new Error('could not locate recognition/print functions');
+const events = [], requests = [], formHandlers = {};
+const nodes = {
+  btnPrintVoucher: { disabled: false, addEventListener() {} },
+  recognitionStatus: { textContent: '', className: '' },
+  detailWarnings: { textContent: '', classList: { toggle() {} } },
+  revForm: { addEventListener(type, handler) { formHandlers[type] = handler; } },
+};
+function $(id) { return nodes[id] || null; }
+let currentId = 12, currentVersion = 'version-ready';
+let recognitionReady = false, recognitionDirty = false, editBusy = false;
+const preview = { document: { write(html) { events.push({ type: 'write', html }); }, close() { events.push({ type: 'close' }); } } };
+const window = { open() { events.push({ type: 'open' }); return preview; } };
+function alert(message) { events.push({ type: 'alert', message }); }
+function errText(error, fallback) { return error?.detail || fallback; }
+async function fetch(url, options = {}) {
+  requests.push({ url, method: options.method || 'GET' });
+  return { ok: true, text: async () => '<html>recognition report</html>' };
+}
+const context = { console, input, events, requests, nodes, $, window, alert, errText, fetch,
+  currentId, currentVersion, recognitionReady, recognitionDirty, editBusy };
+vm.createContext(context);
+vm.runInContext(source.slice(stateStart, stateEnd) + '\n' + source.slice(printStart, printEnd) +
+  '\nglobalThis.api = { applyRecognitionState, printVoucher };', context);
+(async () => {
+  context.api.applyRecognitionState({ recognition_report_ready: !!input.ready });
+  if (input.event) formHandlers[input.event]({ target: nodes.revForm });
+  const buttonDisabledAfterEdit = nodes.btnPrintVoucher.disabled;
+  await context.api.printVoucher();
+  process.stdout.write(JSON.stringify({ events, requests, buttonDisabledAfterEdit,
+    ready: vm.runInContext('recognitionReady', context), dirty: vm.runInContext('recognitionDirty', context) }));
 })().catch((error) => { console.error(error.stack || error); process.exit(1); });
 """
 
@@ -153,17 +199,15 @@ function node(id) {
 const $ = node;
 let currentId = null, currentVoucher = {}, currentIsImport = false, editBusy = false, inferBusy = 0, cropping = false, stageAction = '';
 let currentManualEntry = false;
-let currentEntryStatus = 'none', currentProposal = {}, currentEntryChecks = {};
 const currentUser = { role: input.role || 'clerk' };
 const fileInput = { value: 'selected-file' }, progressText = { textContent: '' }, progress = { classList: { remove() {} } }, barFill = { style: {} };
 function setCropMode() {}
 function setStatus() {}
 function setPendingActionVisibility() {}
-function applyEntryState(record) {
-  currentEntryStatus = record.entries_status || 'none';
-  currentProposal = record.entries_proposal || {};
-  currentEntryChecks = record.entries_checks || {};
-  events.push({ type: 'entryState', status: currentEntryStatus, proposal: currentProposal.status || null });
+function updateRecognitionState() {}
+function applyRecognitionState(record) {
+  events.push({ type: 'recognitionState', ready: !!record.recognition_report_ready });
+  updateRecognitionState();
 }
 function populateTypeSel() {}
 function buildActiveFields() {}
@@ -201,7 +245,7 @@ const context = { console, events, requests, input, nodes, $, currentUser, fileI
   get currentManualEntry() { return currentManualEntry; }, set currentManualEntry(v) { currentManualEntry = v; },
   get currentIsImport() { return currentIsImport; }, set currentIsImport(v) { currentIsImport = v; },
   editBusy, inferBusy, cropping, stageAction, currentVersion: '', reviewedItems: { stale: true },
-  currentEntryStatus, currentProposal, currentEntryChecks, applyEntryState,
+  updateRecognitionState, applyRecognitionState,
   DOC_TYPES: { other: { fields: [] } },
   async loadItemAccountChart() { events.push({ type: 'loadItemAccountChart', company: node('revCompanySel').value }); },
   setCropMode, setStatus, setPendingActionVisibility, populateTypeSel, buildActiveFields, renderFields, renderItems,
@@ -387,6 +431,17 @@ class ConfirmationFrontendTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr.decode("utf-8", errors="replace"))
         return json.loads(completed.stdout.decode("utf-8"))
 
+    def run_print(self, **scenario):
+        payload = {"source": self.source, **scenario}
+        completed = subprocess.run(
+            [str(NODE), "-e", PRINT_HARNESS],
+            input=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr.decode("utf-8", errors="replace"))
+        return json.loads(completed.stdout.decode("utf-8"))
+
     def run_review(self, **scenario):
         payload = {"source": self.source, **scenario}
         completed = subprocess.run(
@@ -431,6 +486,7 @@ class ConfirmationFrontendTests(unittest.TestCase):
         self.assertEqual(requests[0]["body"]["action"], "confirm")
         self.assertEqual(requests[0]["body"]["company_id"], 1)
         self.assertEqual(requests[0]["body"]["expected_updated_at"], "original-ts")
+        self.assertEqual(requests[0]["body"]["voucher"]["entries"], [{"id": "untouched-entry"}])
         self.assertIn("已確認", " ".join(e["message"] for e in result["events"] if e["type"] == "toast"))
 
     def test_save_return_and_default_temporary_send_the_right_action(self):
@@ -518,7 +574,7 @@ class ConfirmationFrontendTests(unittest.TestCase):
         records = {"12": self.review_record(True)}
         cancelled = self.run_review(action="recognize", recordId=12, records=records, acceptConfirm=False)
         self.assertEqual([e["type"] for e in cancelled["events"]],
-                         ["loadItemAccountChart", "entryState", "loadList", "confirm"])
+                         ["loadItemAccountChart", "recognitionState", "loadList", "confirm"])
         self.assertEqual([r["method"] for r in cancelled["requests"]], ["GET"])
 
         accepted = self.run_review(action="recognize", recordId=12, records=records, acceptConfirm=True)
@@ -554,6 +610,27 @@ class ConfirmationFrontendTests(unittest.TestCase):
         self.assertEqual(parser.options, [
             ("pending", "待確認"), ("confirmed", "已確認"), ("pending,confirmed", "全部"),
         ])
+
+    def test_print_requires_clean_confirmed_recognition_and_uses_report_version(self):
+        dirty = self.run_print(ready=True, event="input")
+        unready = self.run_print(ready=False)
+        for result in (dirty, unready):
+            self.assertEqual(result["requests"], [])
+            self.assertNotIn({"type": "write", "html": "<html>recognition report</html>"}, result["events"])
+            self.assertNotIn({"type": "open"}, result["events"])
+        self.assertTrue(dirty["buttonDisabledAfterEdit"])
+        self.assertFalse(unready["ready"])
+
+        ready = self.run_print(ready=True)
+        self.assertEqual(ready["requests"], [{
+            "url": "/api/vouchers/12/recognition-report?expected_updated_at=version-ready", "method": "GET",
+        }])
+        self.assertFalse(any(request["url"].endswith("/save") for request in ready["requests"]))
+        self.assertTrue(any(event["type"] == "write" for event in ready["events"]))
+        for event in ("input", "change"):
+            edited = self.run_print(ready=True, event=event)
+            self.assertTrue(edited["buttonDisabledAfterEdit"])
+            self.assertEqual(edited["requests"], [])
 
     def run_trace(self, rows, stage="prepared", hint=None):
         payload = {"source": self.source, "rows": rows, "stage": stage, "hint": hint}

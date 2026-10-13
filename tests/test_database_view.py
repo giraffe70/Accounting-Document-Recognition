@@ -135,7 +135,11 @@ class DatabaseViewTests(unittest.TestCase):
         for table in tables:
             columns = self.rows(table=table["name"]).json()["columns"]
             self.assertTrue(all(c["label"] for c in columns))
-        self.assertEqual(sum(len(meta["columns"]) for meta in database_view.TABLE_META.values()), 127)
+        self.assertEqual(sum(len(meta["columns"]) for meta in database_view.TABLE_META.values()), 130)
+        columns = database_view.TABLE_META[("app", "voucher_records")]["columns"]
+        self.assertEqual(columns["confirmed_by"], "辨識確認者編號")
+        self.assertEqual(columns["confirmed_by_name"], "辨識確認者名稱")
+        self.assertEqual(columns["recognition_confirmed_version"], "辨識報告確認版本")
         voucher_labels = database_view.TABLE_META[("app", "voucher_records")]["columns"]
         for legacy in ("clerk_note", "accountant_note", "dev_note",
                        "clerk_reviewed_at", "accountant_approved_at"):
