@@ -8,20 +8,15 @@
 </head>
 <body>
   <header class="topbar">
-    <div class="brand"><span class="logo">憑</span> 憑證辨識系統 <span class="sub">OCR + VLM／LLM</span></div>
+    <div class="brand"><span class="logo">憑</span> 憑證辨識系統 </div>
     <div class="spacer"></div>
-    <span id="userChip" class="userchip hidden"></span>
-    <span id="modeBadge" class="badge">地端優先</span>
     <button class="btn" onclick="location.href='/validation.html'">🧪 資料集驗證</button>
     <button id="journalBtn" class="btn">📒 日記帳</button>
-    <button id="reportBtn" class="btn">📊 報表</button>
     <button id="accountsBtn" class="btn">🧾 科目表</button>
-    <button id="feedbackBtn" class="btn hidden">🐞 修正回饋</button>
-    <button id="backupBtn" class="btn hidden">💾 備份</button>
     <button id="databaseBtn" class="btn hidden" onclick="location.href='/database.html'">🗃️ 資料庫檢視</button>
-    <button id="sysconfigBtn" class="btn hidden">🔧 系統組態</button>
     <button id="settingsBtn" class="btn">⚙️ 模型設定</button>
     <button id="logoutBtn" class="btn hidden">登出</button>
+    <span id="userChip" class="userchip hidden"></span>
   </header>
 
   <!-- 登入畫面 -->
@@ -59,7 +54,7 @@
             <p class="hint">支援 PDF、JPG、PNG、BMP、TIFF、WEBP（≤5MB）；可多選批次</p>
           </div>
           <input id="fileInput" type="file" accept=".pdf,image/*" multiple hidden>
-          <label class="btn btn-sm folder-btn">📁 選整個資料夾匯入
+          <label class="btn btn-sm folder-btn hidden">📁 選整個資料夾匯入
             <input id="dirInput" type="file" webkitdirectory hidden>
           </label>
           <div id="progress" class="progress hidden">
@@ -68,12 +63,12 @@
           </div>
         </div>
 
-        <div class="panel">
+        <div id="scanSourcePanel" class="panel hidden">
           <div class="row-between">
             <h2>掃描來源目錄</h2>
             <button id="btnScanList" class="btn btn-sm">🔄 讀取目錄</button>
           </div>
-          <p class="hint" id="scanDirHint">於「🔧 系統組態 → 掃描來源」設定本機資料夾路徑後，按「讀取目錄」列出可匯入的檔案。</p>
+          <p class="hint" id="scanDirHint">按「讀取目錄」列出已設定來源目錄中的檔案。</p>
           <div id="scanFiles" class="scan-files"></div>
           <button id="btnScanImport" class="btn btn-sm primary hidden">匯入勾選檔案</button>
         </div>
@@ -223,65 +218,6 @@
     </div>
   </div>
 
-  <!-- 修正回饋 modal（管理員）-->
-  <div id="feedbackModal" class="modal hidden">
-    <div class="modal-box modal-wide">
-      <div class="row-between"><h3>修正回饋清單</h3><button id="closeFeedback" class="btn btn-sm">關閉</button></div>
-      <p class="hint">彙集「有備註」或「經人工修正」的憑證，供優化辨識提示詞／Router／掃描規範。點列可開啟該筆。</p>
-      <table class="list"><thead><tr><th>檔案</th><th>類型</th><th>狀態</th><th>已修正</th><th>備註</th></tr></thead>
-        <tbody id="feedbackBody"></tbody></table>
-      <div id="feedbackEmpty" class="hint">尚無回饋紀錄。</div>
-    </div>
-  </div>
-
-  <!-- 系統組態 modal（管理員）-->
-  <div id="sysconfigModal" class="modal hidden">
-    <div class="modal-box modal-wide">
-      <div class="row-between"><h3>系統組態</h3><button id="closeSysconfig" class="btn btn-sm">關閉</button></div>
-      <p class="hint">管理員專用。密鑰以遮罩顯示，留空表示不變更。</p>
-
-      <h4>① LLM 連線方式與 API Key</h4>
-      <div class="cfg-grid">
-        <label>Ollama 端點（地端）<input id="cfg-ollama_base_url" class="select"></label>
-        <label>H200 vLLM 端點（內網，需 VPN）<input id="cfg-h200_base_url" class="select"></label>
-        <label>Google API Key（Gemini）<input id="cfg-google_api_key" type="password" class="select"></label>
-        <label>OpenAI API Key（GPT）<input id="cfg-openai_api_key" type="password" class="select"></label>
-        <label>Anthropic API Key（Claude）<input id="cfg-anthropic_api_key" type="password" class="select"></label>
-      </div>
-      <div class="modal-actions" style="justify-content:flex-start;"><button class="btn primary cfg-save" data-section="llm">儲存 LLM 設定</button></div>
-
-      <h4>② 掃描單據遠端存取點</h4>
-      <div class="cfg-grid">
-        <label>來源類型<select id="cfg-type" class="select">
-          <option value="local">本機資料夾</option><option value="smb">SMB 網路芳鄰</option>
-          <option value="nas">NAS</option><option value="gdrive">Google Drive</option>
-          <option value="onedrive">OneDrive</option><option value="sftp">SFTP</option></select></label>
-        <label>主機／位址<input id="cfg-host" class="select" placeholder="\\server 或 IP／網址"></label>
-        <label>路徑／共享資料夾<input id="cfg-path" class="select"></label>
-        <label>帳號<input id="cfg-username" class="select"></label>
-        <label>密碼／權杖<input id="cfg-password" type="password" class="select"></label>
-        <label>備註<input id="cfg-note" class="select"></label>
-      </div>
-      <div class="modal-actions" style="justify-content:flex-start;"><button class="btn primary cfg-save" data-section="scan_source">儲存掃描來源</button></div>
-
-      <h4>③ 雲端部署空間與權限</h4>
-      <div class="cfg-grid">
-        <label>雲端供應商<select id="cfg-provider" class="select">
-          <option value="none">未使用（地端）</option><option value="azure">Microsoft Azure</option>
-          <option value="gcp">Google Cloud</option><option value="aws">Amazon Web Service</option></select></label>
-        <label>區域 Region<input id="cfg-region" class="select"></label>
-        <label>儲存空間／Bucket<input id="cfg-bucket" class="select"></label>
-        <label>Access Key<input id="cfg-access_key" type="password" class="select"></label>
-        <label>Secret Key<input id="cfg-secret_key" type="password" class="select"></label>
-        <label>存取權限<select id="cfg-permission" class="select">
-          <option value="private">私有 private</option><option value="team">團隊 team</option>
-          <option value="public">公開 public</option></select></label>
-        <label class="cfg-full">備註<input id="cfg-cloud_note" class="select"></label>
-      </div>
-      <div class="modal-actions" style="justify-content:flex-start;"><button class="btn primary cfg-save" data-section="cloud_deploy">儲存雲端部署</button></div>
-    </div>
-  </div>
-
   <!-- 刪除確認 modal -->
   <div id="deleteModal" class="modal hidden">
     <div class="modal-box">
@@ -294,34 +230,6 @@
       <div class="modal-actions">
         <button id="deleteConfirm" class="btn danger" disabled>🗑 確認刪除</button>
         <button id="deleteCancel" class="btn">取消</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- 備份 modal -->
-  <div id="backupModal" class="modal hidden">
-    <div class="modal-box">
-      <div class="row-between"><h3>地端備份</h3><button id="closeBackup" class="btn btn-sm">關閉</button></div>
-      <p class="hint">備份資料庫與設定（科目表、公司、模型設定）為 zip，可下載保存於地端。</p>
-      <div class="modal-actions" style="justify-content:flex-start;">
-        <button id="backupNow" class="btn primary">立即備份</button>
-      </div>
-      <table class="list"><thead><tr><th>備份檔</th><th>時間</th><th>大小</th><th></th></tr></thead>
-        <tbody id="backupBody"></tbody></table>
-      <div id="backupEmpty" class="hint">尚無備份。</div>
-    </div>
-  </div>
-
-  <!-- 報表 modal -->
-  <div id="reportModal" class="modal hidden">
-    <div class="modal-box">
-      <div class="row-between"><h3>產製報表</h3><button id="closeReport" class="btn btn-sm">關閉</button></div>
-      <div class="form-group"><label>報表模板</label><select id="reportTemplate" class="select"></select></div>
-      <div class="form-group"><label>期別（YYYY-MM）</label><select id="reportPeriod" class="select"></select></div>
-      <div class="form-group"><label>公司（可空=全部）</label><input id="reportCompany" class="select" placeholder="全部"></div>
-      <div class="modal-actions">
-        <button id="reportGen" class="btn primary">產生報表</button>
-        <button id="reportCancel" class="btn">取消</button>
       </div>
     </div>
   </div>
@@ -355,8 +263,8 @@
   <!-- 設定 modal -->
   <div id="modal" class="modal hidden">
     <div class="modal-box">
-      <h3>模型設定（地端／雲端可切換）</h3>
-      <p class="hint">未設雲端金鑰時，僅顯示地端 Ollama 模型。</p>
+      <h3>模型設定（地端）</h3>
+      <p class="hint">OCR 使用地端 PaddleOCR；結構化與科目分類使用 Ollama 模型。</p>
       <div class="form-group"><label>OCR（辨識文字）</label><select id="sel-ocr" class="select"></select>
         <div id="ocrStatus" class="hint"></div>
       </div>

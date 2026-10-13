@@ -1083,111 +1083,6 @@
     loadList();
   });
 
-  // ── 修正回饋清單 modal（管理員）──
-  $("feedbackBtn").addEventListener("click", openFeedback);
-  $("closeFeedback").addEventListener("click", () => $("feedbackModal").classList.add("hidden"));
-  async function openFeedback() {
-    const rows = (await (await fetch("/api/feedback")).json()).items || [];
-    $("feedbackEmpty").classList.toggle("hidden", rows.length > 0);
-    const noteCell = (r) => [r.dev_note && "🛠" + r.dev_note, r.correction_note].filter(Boolean).join("　") || "—";
-    $("feedbackBody").innerHTML = rows.map((r) =>
-      `<tr data-id="${r.id}"><td>${esc(r.source_file)}</td><td>${esc(r.doc_type)}</td>
-        <td><span class="tag ${STATUS_CLASS[r.status] || ""}">${STATUS_LABEL[r.status] || r.status}</span></td>
-        <td>${r.changed ? "✓" : ""}</td><td>${esc(noteCell(r))}</td></tr>`).join("");
-    $("feedbackBody").querySelectorAll("tr").forEach((tr) => tr.addEventListener("click", () => {
-      $("feedbackModal").classList.add("hidden"); openReview(Number(tr.dataset.id));
-    }));
-    $("feedbackModal").classList.remove("hidden");
-  }
-
-  // ── 系統組態 modal（管理員）──
-  const CFG_FIELDS = {
-    llm: { ollama_base_url: "cfg-ollama_base_url", h200_base_url: "cfg-h200_base_url",
-           google_api_key: "cfg-google_api_key",
-           openai_api_key: "cfg-openai_api_key", anthropic_api_key: "cfg-anthropic_api_key" },
-    scan_source: { type: "cfg-type", host: "cfg-host", path: "cfg-path",
-                   username: "cfg-username", password: "cfg-password", note: "cfg-note" },
-    cloud_deploy: { provider: "cfg-provider", region: "cfg-region", bucket: "cfg-bucket",
-                    access_key: "cfg-access_key", secret_key: "cfg-secret_key",
-                    permission: "cfg-permission", note: "cfg-cloud_note" },
-  };
-  const SECRET_FIELDS = new Set(["google_api_key", "openai_api_key", "anthropic_api_key",
-                                 "password", "access_key", "secret_key"]);
-  $("sysconfigBtn").addEventListener("click", openSysconfig);
-  $("closeSysconfig").addEventListener("click", () => $("sysconfigModal").classList.add("hidden"));
-  document.querySelectorAll(".cfg-save").forEach((b) =>
-    b.addEventListener("click", () => saveSysconfig(b.dataset.section)));
-
-  async function openSysconfig() {
-    const d = await (await fetch("/api/sysconfig")).json();
-    const cfg = d.config || {}, sset = d.secrets_set || {};
-    for (const sec in CFG_FIELDS) {
-      for (const key in CFG_FIELDS[sec]) {
-        const el = $(CFG_FIELDS[sec][key]); if (!el) continue;
-        if (SECRET_FIELDS.has(key)) {
-          el.value = "";
-          el.placeholder = (sset[sec] && sset[sec][key]) ? "已設定（留空不變更）" : "未設定";
-        } else {
-          el.value = (cfg[sec] && cfg[sec][key]) || "";
-        }
-      }
-    }
-    $("sysconfigModal").classList.remove("hidden");
-  }
-
-  async function saveSysconfig(section) {
-    const values = {};
-    for (const key in CFG_FIELDS[section]) {
-      const el = $(CFG_FIELDS[section][key]); if (!el) continue;
-      if (SECRET_FIELDS.has(key) && el.value === "") continue;  // 留空不變更
-      values[key] = el.value;
-    }
-    const r = await fetch("/api/sysconfig", { method: "POST", headers: json(), body: JSON.stringify({ section, values }) });
-    if (!r.ok) { alert("儲存失敗（需管理員）"); return; }
-    toast("組態已儲存");
-  }
-
-  // ── 地端備份 modal（管理員）──
-  $("backupBtn").addEventListener("click", openBackup);
-  $("closeBackup").addEventListener("click", () => $("backupModal").classList.add("hidden"));
-  $("backupNow").addEventListener("click", async () => {
-    const r = await fetch("/api/backup", { method: "POST" });
-    if (!r.ok) { alert("備份失敗（需管理員）"); return; }
-    toast("備份完成"); loadBackups();
-  });
-
-  async function openBackup() { await loadBackups(); $("backupModal").classList.remove("hidden"); }
-  async function loadBackups() {
-    const data = await (await fetch("/api/backups")).json();
-    const rows = data.backups || [];
-    $("backupEmpty").classList.toggle("hidden", rows.length > 0);
-    $("backupBody").innerHTML = rows.map((b) =>
-      `<tr><td>${esc(b.name)}</td><td>${esc(b.time)}</td><td>${(b.size / 1024).toFixed(1)} KB</td>
-       <td><a href="/api/backup/download/${encodeURIComponent(b.name)}">下載</a></td></tr>`).join("");
-  }
-
-  // ── 報表 modal ──
-  $("reportBtn").addEventListener("click", openReport);
-  $("closeReport").addEventListener("click", () => $("reportModal").classList.add("hidden"));
-  $("reportCancel").addEventListener("click", () => $("reportModal").classList.add("hidden"));
-  $("reportGen").addEventListener("click", () => {
-    const t = $("reportTemplate").value, p = $("reportPeriod").value, c = $("reportCompany").value.trim();
-    if (!p) { alert("請選擇期別"); return; }
-    const url = `/api/report?template=${encodeURIComponent(t)}&period=${encodeURIComponent(p)}` + (c ? `&company=${encodeURIComponent(c)}` : "");
-    window.open(url, "_blank");
-  });
-
-  async function openReport() {
-    const [tpls, periods] = await Promise.all([
-      (await fetch("/api/report/templates")).json(),
-      (await fetch("/api/journal/periods")).json(),
-    ]);
-    $("reportTemplate").innerHTML = (tpls.templates || []).map((t) => `<option value="${t.id}">${t.name}</option>`).join("");
-    const ps = periods.periods || [];
-    $("reportPeriod").innerHTML = ps.length ? ps.map((p) => `<option value="${p}">${p}</option>`).join("") : `<option value="">（無資料）</option>`;
-    $("reportModal").classList.remove("hidden");
-  }
-
   // ── 科目表 modal ──
   $("accountsBtn").addEventListener("click", openAccounts);
   $("closeAccounts").addEventListener("click", () => $("accountsModal").classList.add("hidden"));
@@ -1245,7 +1140,7 @@
 
   async function openSettings() {
     const [models, cfg] = await Promise.all([
-      (await fetch("/api/models")).json(), (await fetch("/api/config")).json(),
+      (await fetch("/api/models?local_only=true")).json(), (await fetch("/api/config")).json(),
     ]);
     fillSelect("sel-ocr", models.ocr, cfg.ocr);
     const os = models.ocr_status || {};
@@ -1257,14 +1152,25 @@
     modal.classList.remove("hidden");
   }
   function fillSelect(id, options, selected) {
-    const label = (m) => m.startsWith("ollama/") ? "地端 " + m.replace("ollama/", "")
-      : m.startsWith("paddle/") ? "地端 OCR " + m.replace("paddle/", "") : "雲端 " + m;
-    $(id).innerHTML = (options || []).map((m) => `<option value="${m}" ${m === selected ? "selected" : ""}>${label(m)}</option>`).join("");
+    const prefix = id === "sel-ocr" ? "paddle/" : "ollama/";
+    const localModels = (options || []).filter((m) => typeof m === "string" && m.startsWith(prefix));
+    const placeholder = localModels.includes(selected) ? ""
+      : `<option value="" selected disabled>${localModels.length ? "請選擇地端模型" : "無可用的地端模型"}</option>`;
+    const label = (m) => (prefix === "paddle/" ? "地端 OCR " : "地端 ") + m.slice(prefix.length);
+    $(id).innerHTML = placeholder + localModels.map((m) => `<option value="${esc(m)}" ${m === selected ? "selected" : ""}>${esc(label(m))}</option>`).join("");
   }
   async function saveSettings() {
-    await fetch("/api/config", { method: "POST", headers: json(), body: JSON.stringify({
-      ocr: $("sel-ocr").value, structure: $("sel-structure").value, classify: $("sel-classify").value }) });
-    modal.classList.add("hidden");
+    const settings = { ocr: $("sel-ocr").value, structure: $("sel-structure").value, classify: $("sel-classify").value };
+    if (!settings.ocr.startsWith("paddle/") || !settings.structure.startsWith("ollama/") || !settings.classify.startsWith("ollama/")) {
+      alert("請先選擇各階段的地端模型"); return;
+    }
+    try {
+      const response = await fetch("/api/config", { method: "POST", headers: json(), body: JSON.stringify(settings) });
+      if (!response.ok) throw new Error(await responseError(response, "模型設定儲存失敗"));
+      modal.classList.add("hidden");
+    } catch (err) {
+      alert(`模型設定儲存失敗：${err.message}`);
+    }
   }
 
   // ── 日記帳 ──
@@ -1368,7 +1274,6 @@
   function openFromHash() {
     if (/journal/.test(location.hash)) { openJournal(); return; }
     if (/accounts/.test(location.hash)) { openAccounts(); return; }
-    if (/sysconfig/.test(location.hash)) { openSysconfig(); return; }
     const m = location.hash.match(/v=(\d+)/);
     if (m) openReview(Number(m[1]));
   }
@@ -1391,10 +1296,7 @@
   function applyRole() {
     const canAdmin = currentUser && currentUser.role === "admin";
     $("accountsBtn").classList.toggle("hidden", !canAdmin);
-    $("backupBtn").classList.toggle("hidden", !canAdmin);
     $("databaseBtn").classList.toggle("hidden", !canAdmin);
-    $("sysconfigBtn").classList.toggle("hidden", !canAdmin);
-    $("feedbackBtn").classList.toggle("hidden", !canAdmin);
   }
 
   async function enterApp() {

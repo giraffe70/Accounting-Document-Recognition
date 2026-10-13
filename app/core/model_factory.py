@@ -154,9 +154,10 @@ def is_vision_model(model_id: str) -> bool:
     ))
 
 
-def list_models(kind: str = "llm") -> list[str]:
+def list_models(kind: str = "llm", local_only: bool = False) -> list[str]:
     """合併地端 Ollama 動態清單 + H200 vLLM 動態清單 + 已設金鑰的雲端模型。
-    kind: 'vlm'、'llm' 或 'text'。vlm 僅回傳可看圖的模型；text 排除視覺與 embedding 模型。"""
+    kind: 'vlm'、'llm' 或 'text'。vlm 僅回傳可看圖的模型；text 排除視覺與 embedding 模型。
+    local_only=True 僅列出 Ollama，不探測 H200 或雲端清單。"""
     ollama = [m for m in _ollama_models() if not is_embedding_model(m)]
     if kind == "vlm":
         models = [m for m in ollama if is_vision_model(m)]
@@ -164,6 +165,8 @@ def list_models(kind: str = "llm") -> list[str]:
         models = [m for m in ollama if not is_vision_model(m)]
     else:
         models = ollama
+    if local_only:
+        return sorted(set(models))
     # H200 自 2026-08-17 起同時提供 qwen3-32b（純文字）與 qwen2.5-vl-7b（視覺）。
     # vlm 選單濾掉純文字模型——選錯了要等呼叫失敗才知道。以 id 含 "vl" 判定，
     # 是遷就 vLLM 那端的命名慣例（qwen2.5-vl-7b / 未來的 qwen3-vl-*）；

@@ -110,7 +110,17 @@ const recognizeEnd = source.indexOf('  function buildActiveFields(', recognizeSt
 if ([openStart, openEnd, clearStart, clearEnd, roleStart, roleEnd, recognizeStart, recognizeEnd].some((p) => p < 0))
   throw new Error('could not locate review/role/recognize functions');
 const events = [], requests = [];
-const removed = new Set(['voucherWarnings', 'f-manual_entry', 'f-correction_note', 'f-dev_note', 'devNoteWrap', 'revSrc']);
+const removed = new Set([
+  'voucherWarnings', 'f-manual_entry', 'f-correction_note', 'f-dev_note', 'devNoteWrap', 'revSrc',
+  'feedbackBtn', 'feedbackModal', 'closeFeedback', 'feedbackBody', 'feedbackEmpty',
+  'backupBtn', 'backupModal', 'closeBackup', 'backupNow', 'backupBody', 'backupEmpty',
+  'sysconfigBtn', 'sysconfigModal', 'closeSysconfig', 'cfg-ollama_base_url', 'cfg-h200_base_url',
+  'cfg-google_api_key', 'cfg-openai_api_key', 'cfg-anthropic_api_key', 'cfg-type', 'cfg-host',
+  'cfg-path', 'cfg-username', 'cfg-password', 'cfg-note', 'cfg-provider', 'cfg-region',
+  'cfg-bucket', 'cfg-access_key', 'cfg-secret_key', 'cfg-permission', 'cfg-cloud_note',
+  'reportBtn', 'reportModal', 'closeReport', 'reportTemplate', 'reportPeriod', 'reportCompany',
+  'reportGen', 'reportCancel',
+]);
 const nodes = {};
 function node(id) {
   if (removed.has(id)) return null;
@@ -180,7 +190,7 @@ vm.runInContext(reviewCode + '\nglobalThis.api = { openReview, clearReview, appl
     out.absentNodes = [...removed].every((id) => !nodes[id]);
   } else if (input.action === 'role') {
     context.api.applyRole();
-    out.visible = Object.fromEntries(['accountsBtn', 'backupBtn', 'databaseBtn', 'sysconfigBtn', 'feedbackBtn'].map((id) => [id, !node(id).classList.contains('hidden')]));
+    out.visible = Object.fromEntries(['accountsBtn', 'databaseBtn'].map((id) => [id, !node(id).classList.contains('hidden')]));
   } else if (input.action === 'recognize') {
     await context.api.openReview(input.recordId);
     if (input.clearBetween) {
@@ -194,6 +204,27 @@ vm.runInContext(reviewCode + '\nglobalThis.api = { openReview, clearReview, appl
   out.events = events; out.requests = requests;
   process.stdout.write(JSON.stringify(out));
 })().catch((e) => { console.error(e.stack || e); process.exit(1); });
+"""
+
+
+HASH_HARNESS = r"""
+const fs = require('fs');
+const vm = require('vm');
+const input = JSON.parse(fs.readFileSync(0, 'utf8'));
+const source = input.source;
+const start = source.indexOf('  function openFromHash()');
+const end = source.indexOf('  window.addEventListener("hashchange", openFromHash)', start);
+if (start < 0 || end < 0) throw new Error('could not locate hash routing function');
+const events = [];
+const location = { hash: '' };
+function openJournal() { events.push({ handler: 'journal' }); }
+function openAccounts() { events.push({ handler: 'accounts' }); }
+function openReview(id) { events.push({ handler: 'review', id }); }
+const context = { events, location, openJournal, openAccounts, openReview };
+vm.createContext(context);
+vm.runInContext(source.slice(start, end) + '\nglobalThis.api = { openFromHash };', context);
+for (const hash of input.hashes) { location.hash = hash; context.api.openFromHash(); }
+process.stdout.write(JSON.stringify(events));
 """
 
 
@@ -336,6 +367,17 @@ class ConfirmationFrontendTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr.decode("utf-8", errors="replace"))
         return json.loads(completed.stdout.decode("utf-8"))
 
+    def run_hashes(self, hashes):
+        payload = {"source": self.source, "hashes": hashes}
+        completed = subprocess.run(
+            [str(NODE), "-e", HASH_HARNESS],
+            input=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr.decode("utf-8", errors="replace"))
+        return json.loads(completed.stdout.decode("utf-8"))
+
     @staticmethod
     def review_record(manual_entry=False):
         return {"id": 12, "status": "pending", "manual_entry": manual_entry, "current": {"fields": {}, "items": [], "entries": []}}
@@ -410,8 +452,19 @@ class ConfirmationFrontendTests(unittest.TestCase):
 
         clerk = self.run_review(action="role", role="clerk")
         self.assertFalse(any(clerk["visible"].values()))
+        accountant = self.run_review(action="role", role="accountant")
+        self.assertFalse(any(accountant["visible"].values()))
         admin = self.run_review(action="role", role="admin")
         self.assertTrue(all(admin["visible"].values()))
+
+    def test_removed_sysconfig_hash_is_noop_and_supported_hashes_still_route(self):
+        events = self.run_hashes(["#sysconfig", "#journal", "#accounts", "#v=47"])
+
+        self.assertEqual(events, [
+            {"handler": "journal"},
+            {"handler": "accounts"},
+            {"handler": "review", "id": 47},
+        ])
 
     def test_re_recognition_manual_entry_prompt_cancel_and_accept(self):
         records = {"12": self.review_record(True)}
@@ -588,6 +641,21 @@ class ConfirmationFrontendTests(unittest.TestCase):
         tag_start = html.index('id="btnDelete"')
         self.assertIn('class="btn btn-sm danger"', html[tag_start:html.index(">", tag_start)])
         self.assertIn('status === "confirmed" && !isAdminUser()', self.source)
+
+    def test_folder_import_and_scan_source_directory_are_hidden(self):
+        html = APP_HTML.read_text(encoding="utf-8")
+
+        folder_start = html.index('<label class="btn btn-sm folder-btn')
+        folder_tag = html[folder_start:html.index(">", folder_start)]
+        self.assertIn("hidden", folder_tag.split('"')[1].split())
+
+        panel_start = html.index('id="scanSourcePanel"')
+        panel_tag = html[html.rindex("<div", 0, panel_start):html.index(">", panel_start)]
+        self.assertIn("hidden", panel_tag)
+
+        # 一般拖拉／檔案選擇匯入仍可使用。
+        for marker in ('id="dropZone"', 'id="fileInput"'):
+            self.assertIn(marker, html)
 
     def test_source_pages_are_not_rendered_as_a_separate_frontend_area(self):
         html = APP_HTML.read_text(encoding="utf-8")

@@ -229,12 +229,6 @@ table.entries td.num { text-align: right; font-variant-numeric: tabular-nums; }
 .login-overlay { position: fixed; inset: 0; background: linear-gradient(135deg,#eef2f7,#e6ecf5); display: grid; place-items: center; z-index: 100; }
 .login-box { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 30px; width: min(360px, 92vw); box-shadow: 0 10px 40px rgba(0,0,0,.12); }
 
-.cfg-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; margin: 10px 0; }
-.cfg-grid label { display: flex; flex-direction: column; font-size: 12px; color: var(--muted); gap: 3px; }
-.cfg-grid .cfg-full { grid-column: 1 / -1; }
-#sysconfigModal h4 { margin: 18px 0 4px; padding-top: 12px; border-top: 1px solid var(--border); }
-#sysconfigModal h4:first-of-type { border-top: none; padding-top: 0; }
-
 .acc-wrap { max-height: 55vh; overflow-y: auto; margin: 10px 0; }
 table.acc-edit { width: 100%; border-collapse: collapse; font-size: 13px; }
 table.acc-edit th, table.acc-edit td { border: 1px solid var(--border); padding: 2px; text-align: left; }

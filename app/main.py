@@ -109,14 +109,14 @@ def health():
 
 
 @app.get("/api/models")
-def api_models():
-    """給前端設定 modal：各階段可選模型（地端 Ollama + 已設金鑰的雲端）。"""
+def api_models(local_only: bool = False):
+    """主設定可指定僅地端模型；預設保留驗證頁的完整模型清單。"""
     return {
         "ocr": model_factory.list_ocr_providers(),
         "ocr_status": model_factory.ocr_status(),
-        "structure": model_factory.list_models(kind="vlm"),
-        "classify": model_factory.list_models(kind="llm"),
-        "text": model_factory.list_models(kind="text"),
+        "structure": model_factory.list_models(kind="vlm", local_only=local_only),
+        "classify": model_factory.list_models(kind="llm", local_only=local_only),
+        "text": model_factory.list_models(kind="text", local_only=local_only),
     }
 
 
