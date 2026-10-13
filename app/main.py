@@ -218,7 +218,8 @@ def api_doc_types():
     """各單據類型的欄位契約，供前端動態渲染審核欄位。"""
     return {"types": {k: {"label": v["label"], "fields": v["fields"],
                           "has_items": v.get("has_items", False), "item_fields": v["item_fields"],
-                          "has_entries": v.get("has_entries", False), "entry_fields": v["entry_fields"]}
+                          "has_entries": v.get("has_entries", False), "entry_fields": v["entry_fields"],
+                          "is_supporting": doc_types.is_supporting(k)}
                       for k, v in doc_types.DOC_TYPES.items()}}
 
 
@@ -575,9 +576,10 @@ def api_confirm_record(rec_id: int, expected_updated_at: str = Body(..., embed=T
 
 
 @app.post("/api/vouchers/{rec_id}/company")
-def api_set_company(rec_id: int, company: str = Body("", embed=True)):
+def api_set_company(request: Request, rec_id: int, company: str = Body("", embed=True), expected_updated_at: str = Body(..., embed=True)):
     """補填歸屬公司（匯入時漏選者）。"""
-    rec = review.set_company(rec_id, company)
+    rec = review.set_company(rec_id, company, expected_updated_at=expected_updated_at,
+        actor=auth.get_user_by_token(request.cookies.get("session")))
     return _rec_to_dict(rec) if rec else JSONResponse({"detail": "查無此紀錄"}, status_code=404)
 
 
@@ -595,20 +597,23 @@ def api_notes(rec_id: int, correction_note: str = Body(None, embed=True),
 
 
 @app.post("/api/vouchers/{rec_id}/rotate")
-def api_rotate(rec_id: int, direction: str = Body("cw", embed=True)):
-    ok = review.rotate_image(rec_id, "ccw" if direction == "ccw" else "cw")
+def api_rotate(request: Request, rec_id: int, direction: str = Body("cw", embed=True), expected_updated_at: str = Body(..., embed=True)):
+    ok = review.rotate_image(rec_id, "ccw" if direction == "ccw" else "cw", expected_updated_at=expected_updated_at,
+        actor=auth.get_user_by_token(request.cookies.get("session")))
     return {"ok": bool(ok)} if ok else JSONResponse({"detail": "無影像可旋轉"}, status_code=404)
 
 
 @app.post("/api/vouchers/{rec_id}/rotate-fine")
-def api_rotate_fine(rec_id: int, angle: float = Body(0, embed=True)):
-    ok = review.rotate_fine(rec_id, angle)
+def api_rotate_fine(request: Request, rec_id: int, angle: float = Body(0, embed=True), expected_updated_at: str = Body(..., embed=True)):
+    ok = review.rotate_fine(rec_id, angle, expected_updated_at=expected_updated_at,
+        actor=auth.get_user_by_token(request.cookies.get("session")))
     return {"ok": bool(ok)} if ok else JSONResponse({"detail": "無影像可旋轉"}, status_code=404)
 
 
 @app.post("/api/vouchers/{rec_id}/crop")
-def api_crop(rec_id: int, box: list = Body(..., embed=True)):
-    ok = review.crop_image(rec_id, box)
+def api_crop(request: Request, rec_id: int, box: list = Body(..., embed=True), expected_updated_at: str = Body(..., embed=True)):
+    ok = review.crop_image(rec_id, box, expected_updated_at=expected_updated_at,
+        actor=auth.get_user_by_token(request.cookies.get("session")))
     return {"ok": bool(ok)} if ok else JSONResponse({"detail": "裁切範圍無效或無影像"}, status_code=400)
 
 
@@ -631,9 +636,11 @@ def api_split(rec_id: int, box: list = Body(..., embed=True)):
 
 
 @app.post("/api/vouchers/{rec_id}/re-recognize")
-def api_re_recognize(rec_id: int):
+def api_re_recognize(request: Request, rec_id: int):
     try:
-        rec = review.re_recognize(rec_id)
+        rec = review.re_recognize(rec_id, actor=auth.get_user_by_token(request.cookies.get("session")))
+    except entry_workflow.EntryConflict:
+        raise
     except review.RecognitionProtected as exc:
         return JSONResponse({"ok": False, "detail": str(exc)}, status_code=409)
     except Exception as exc:  # noqa: BLE001
@@ -643,10 +650,11 @@ def api_re_recognize(rec_id: int):
 
 
 @app.post("/api/vouchers/{rec_id}/set-type")
-def api_set_type(rec_id: int, doc_type_key: str = Body(..., embed=True)):
+def api_set_type(request: Request, rec_id: int, doc_type_key: str = Body(..., embed=True), expected_updated_at: str = Body(..., embed=True)):
     """外觀確認：修正表單種類。"""
-    rec = review.set_type(rec_id, doc_type_key)
-    return {"ok": True, "id": rec.id} if rec else JSONResponse({"detail": "找不到紀錄"}, status_code=404)
+    rec = review.set_type(rec_id, doc_type_key, expected_updated_at=expected_updated_at,
+        actor=auth.get_user_by_token(request.cookies.get("session")))
+    return {"ok": True, **_rec_to_dict(rec, full=True)} if rec else JSONResponse({"detail": "找不到紀錄"}, status_code=404)
 
 
 @app.post("/api/vouchers/{rec_id}/confirm-appearance")
@@ -657,10 +665,12 @@ def api_confirm_appearance(rec_id: int, doc_type_key: str = Body("", embed=True)
 
 
 @app.post("/api/vouchers/{rec_id}/recognize")
-def api_recognize(rec_id: int):
+def api_recognize(request: Request, rec_id: int):
     """依確認的類型在準備好的影像上做內容辨識（queued/prepared → pending 待確認）。"""
     try:
-        rec = review.recognize_record(rec_id)
+        rec = review.recognize_record(rec_id, actor=auth.get_user_by_token(request.cookies.get("session")))
+    except entry_workflow.EntryConflict:
+        raise
     except review.RecognitionProtected as exc:
         return JSONResponse({"ok": False, "detail": str(exc)}, status_code=409)
     except Exception as exc:  # noqa: BLE001
@@ -749,17 +759,22 @@ def api_classify(request: Request, rec_id: int, expected_updated_at: str = Body(
     rec = review.get_voucher(rec_id)
     if not rec:
         return JSONResponse({"detail": "查無此紀錄"}, status_code=404)
+    actor = auth.get_user_by_token(request.cookies.get("session"))
+    if not actor:
+        return JSONResponse({"detail": "未登入"}, status_code=401)
     try:
         review._check_model_write(rec)
         data = json.loads(rec.current_json)
         if rec.status not in (ReviewStatus.pending, ReviewStatus.confirmed) or doc_types.get(data.get("doc_type_key", "")).get("has_entries") or doc_types.is_supporting(data.get("doc_type_key", "")):
             return JSONResponse({"detail": "此類型不產生 AI 分錄建議，請核對原圖分錄"}, status_code=409)
         if rec.updated_at.isoformat() != expected_updated_at:
-            return JSONResponse({"detail": "單據已被修改，請重新載入"}, status_code=409)
+            raise entry_workflow.EntryConflict("單據已被修改，請重新載入", latest={
+                "updated_at": rec.updated_at.isoformat(), "company_id": rec.company_id, "current": data})
         fingerprint = entry_workflow.source_fingerprint(rec)
         voucher = Voucher.model_validate(json.loads(rec.current_json))
         voucher = classify.classify(voucher, company=rec.company)
-        saved = review.save_entry_proposal(rec_id, voucher, auth.get_user_by_token(request.cookies.get("session")), fingerprint)
+        saved = review.save_entry_proposal(rec_id, voucher, actor, fingerprint,
+            expected_updated_at=expected_updated_at)
         if saved is None:
             return JSONResponse({"detail": "查無此紀錄"}, status_code=404)
         return {"ok": True, **_rec_to_dict(saved, full=True)}

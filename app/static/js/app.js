@@ -7,6 +7,7 @@
   let currentId = null;
   let currentVoucher = {};   // 目前載入的 current（保留 entries 等未編輯欄位）
   let currentVersion = "", companyRecords = [], accountChart = [], reviewedItems = {};
+  let currentEntryStatus = "none", currentProposal = {}, currentEntryChecks = {};
   let currentManualEntry = false;   // 保留既有人工修正紀錄的重新辨識提醒
   let editBusy = false;
   let currentUser = null;
@@ -29,7 +30,7 @@
   }
 
   const STATUS_LABEL = {
-    prepared: "待外觀確認", queued: "待提取", pending: "待確認", confirmed: "已確認",
+    prepared: "待外觀確認", queued: "待提取", pending: "辨識待確認", confirmed: "辨識已確認",
   };
   const STATUS_CLASS = {
     prepared: "prep", queued: "scan", pending: "", confirmed: "high",
@@ -422,13 +423,14 @@
     $("revConf").textContent = conf;
     $("revConf").className = "tag " + (conf === "high" ? "high" : conf === "low" ? "low" : "warn");
     $("f-note").value = v.note || "";
-    const hasItems = !!(DOC_TYPES[typeKey] && DOC_TYPES[typeKey].has_items);
+    const hasItems = !!(DOC_TYPES[typeKey] && DOC_TYPES[typeKey].has_items) || !!v.items?.length;
     $("itemsSection").classList.toggle("hidden", !hasItems);
     renderItems(v.items || []);
     renderTaxcheck(rec.taxcheck || {});
     renderDatecheck(rec.datecheck);
     renderAmountcheck(rec.amountcheck);
     renderEntries(v.entries || [], v.debit_total, v.credit_total, v.balance_check);
+    applyEntryState(rec);
     setupImage(id, rec.has_image, v.boxes || {});
     renderPages(id, rec.attachments || 0);
     loadList();
@@ -454,17 +456,81 @@
 
   function renderEntries(entries, dt, ct, bal) {
     const body = $("entriesBody");
-    body.innerHTML = entries.length ? entries.map((e) => `
-      <tr><td>${esc(e.description)}</td>
-        <td>${esc(e.debit_account)} ${esc(e.debit_account_name)}</td>
-        <td>${esc(e.credit_account)} ${esc(e.credit_account_name)}</td>
-        <td class="num">${nf(e.amount)}</td></tr>`).join("")
-      : `<tr><td colspan="4" class="hint">尚無分錄，可按「自動分類科目」產生。</td></tr>`;
+    body.innerHTML = entries.length ? entries.map(entryRow).join("")
+      : `<tr class="entry-empty"><td colspan="7" class="hint">尚無分錄，可新增草稿；一般單據也可選用「產生分錄建議」。</td></tr>`;
+    bindEntryRows();
+    if (editBusy) body.querySelectorAll("input,select,button").forEach((el) => { el.disabled = true; });
     const info = $("balanceInfo");
     if (entries.length) {
       info.innerHTML = `借方合計 ${nf(dt)}　貸方合計 ${nf(ct)}　` +
         (bal ? '<span class="ok">借貸平衡 ✓</span>' : '<span class="bad">未平衡，請人工核對</span>');
     } else info.textContent = "";
+  }
+
+  function entryRow(e) {
+    e = {...e, entry_id: e.entry_id || newItemId()};
+    const debit = !!(e.debit_account || e.debit_account_name), credit = !!(e.credit_account || e.credit_account_name);
+    const direction = debit !== credit ? (debit ? "debit" : "credit") : "";
+    const code = e[`${direction}_account`] || e.raw_account_code || "";
+    const name = e[`${direction}_account_name`] || e.raw_account_name || "";
+    const origin = {observed:"原圖辨識", generated:"AI 建議", manual:"人工新增"}[e.entry_origin] || "人工新增";
+    const input = (key, value, extra = "") => `<input data-entry-key="${key}" value="${esc(value ?? "")}" ${extra}>`;
+    return `<tr data-entry-id="${esc(e.entry_id)}" data-original="${esc(JSON.stringify(e))}">
+      <td><select data-entry-key="direction"><option value="">請選擇</option><option value="debit" ${direction === "debit" ? "selected" : ""}>借方</option><option value="credit" ${direction === "credit" ? "selected" : ""}>貸方</option></select><small>${origin}</small></td>
+      <td>${input("account_code",code,'list="itemAccountCodes"')}</td><td>${input("account_name",name)}</td>
+      <td>${input("amount",e.amount ?? e.raw_amount,'inputmode="decimal"')}</td><td>${input("description",e.description)}</td>
+      <td><details><summary>展開</summary><label>部門${input("dept",e.dept)}</label><label>立沖帳目${input("offset_code",e.offset_code)}</label></details></td>
+      <td><button class="btn btn-sm del-entry">✕</button></td></tr>`;
+  }
+  function markEntryDraft() {
+    $("entriesStatus").textContent = "分錄待核對（未儲存）";
+    $("entriesStatus").className = "tag warn";
+    $("balanceInfo").textContent = "草稿尚未儲存，借貸合計與完整度將於儲存後由伺服器重算。";
+  }
+  function bindEntryRows() {
+    $("entriesBody").querySelectorAll("tr[data-entry-id]").forEach((tr) => {
+      tr.querySelector(".del-entry").addEventListener("click", () => { tr.remove(); markEntryDraft(); });
+      tr.querySelectorAll("input,select").forEach((el) => el.addEventListener("input", () => {
+        if (el.dataset.entryKey === "account_code") {
+          const known = accountChart.find((a) => a.code === el.value);
+          if (known) tr.querySelector('[data-entry-key="account_name"]').value = known.name;
+        }
+        markEntryDraft();
+      }));
+    });
+  }
+  function entryPreview(entries) {
+    return `<table class="entries"><thead><tr><th>方向</th><th>科目</th><th>摘要</th><th>金額</th><th>金額來源／證據</th></tr></thead><tbody>${entries.map((e) =>
+      `<tr><td>${e.debit_account || e.debit_account_name ? "借方" : e.credit_account || e.credit_account_name ? "貸方" : "待指定"}</td>
+      <td>${esc(e.debit_account || e.credit_account || e.raw_account_code)} ${esc(e.debit_account_name || e.credit_account_name || e.raw_account_name)}</td>
+      <td>${esc(e.description)}</td><td>${nf(e.amount)}</td><td>${esc(e.amount_source)} ${esc((e.evidence_paths || []).join("、"))}</td></tr>`).join("") || '<tr><td colspan="5">尚無分錄</td></tr>'}</tbody></table>`;
+  }
+  function applyEntryState(record) {
+    currentEntryStatus = record.entries_status || "none";
+    currentProposal = record.entries_proposal || {};
+    currentEntryChecks = record.entries_checks || {};
+    $("entriesStatus").textContent = {none:"尚無分錄",draft:"分錄待核對",ready:"可供入帳"}[currentEntryStatus] || "分錄待核對";
+    $("entriesStatus").className = "tag " + (currentEntryStatus === "ready" ? "high" : "warn");
+    $("entriesStatus").title = record.entries_confirmed_at ?
+      `${record.entries_confirmed_by_name || ""}　${new Date(record.entries_confirmed_at).toLocaleString("zh-TW", {timeZone:"Asia/Taipei"})}` : "";
+    const spec = DOC_TYPES[currentVoucher.doc_type_key] || {};
+    $("btnClassify").classList.toggle("hidden", !!spec.has_entries || !!spec.is_supporting);
+    $("btnConfirmEntries").classList.toggle("hidden", !!spec.is_supporting);
+    $("btnConfirmEntries").textContent = currentEntryStatus === "ready" ? "✅ 分錄可供入帳（已確認）" : "✅ 確認分錄可供入帳";
+    const summary = currentEntryChecks;
+    if (summary.debit_total != null && currentVoucher.entries?.length) {
+      $("balanceInfo").innerHTML = `借方合計 ${nf(summary.debit_total)}　貸方合計 ${nf(summary.credit_total)}　差額 ${nf(summary.difference)}　` +
+        (summary.balance_check ? '<span class="ok">完整且借貸平衡 ✓</span>' : '<span class="bad">分錄待修正</span>') +
+        (summary.issues?.length ? `<ul>${summary.issues.map((issue) => `<li>${esc(issue)}</li>`).join("")}</ul>` : "");
+    }
+    const visible = ["pending","stale"].includes(currentProposal.status);
+    $("entryProposal").classList.toggle("hidden", !visible);
+    if (visible) {
+      $("entryProposalPreview").innerHTML = entryPreview(currentProposal.entries || []);
+      $("entryProposalInfo").textContent = currentProposal.status === "stale" ? `建議已失效：${currentProposal.reason || "來源內容已變更"}，請重新產生。` :
+        ["此建議尚未改動目前草稿。", ...(currentProposal.validation_warnings || []), ...(currentProposal.classification_meta?.warnings || []), ...(currentProposal.classification_meta?.assumptions || []), ...(currentProposal.checks?.issues || [])].join("\n");
+      $("adoptEntryProposal").disabled = currentProposal.status !== "pending";
+    }
   }
 
   function setStatus(status) {
@@ -478,7 +544,7 @@
     const editable = status === "pending" || status === "confirmed";
     $("btnReturnImport").classList.toggle("hidden", !editable);
     $("btnConfirm").classList.toggle("hidden", !editable);
-    $("btnConfirm").textContent = status === "confirmed" ? "✅ 已確認（修改後可重新確認）" : "✅ 確認完成";
+    $("btnConfirm").textContent = status === "confirmed" ? "✅ 辨識已確認（可重新確認）" : "✅ 確認辨識內容";
     // 已確認的憑證只有管理員可刪除（後端同樣強制）
     $("btnDelete").classList.toggle("hidden", status === "confirmed" && !isAdminUser());
   }
@@ -489,6 +555,7 @@
     if (record.updated_at) currentVersion = record.updated_at;
     setStatus(record.status);
     setPendingActionVisibility(record.status);
+    applyEntryState(record);
   }
 
   async function refreshCurrentStatus(id = currentId) {
@@ -519,8 +586,10 @@
     const id = currentId, tk = $("revTypeSel").value;
     try {
       if (!$("revForm").classList.contains("prepared")) await persistCurrentEdits();
-      const typeResp = await fetch(`/api/vouchers/${id}/set-type`, { method: "POST", headers: json(), body: JSON.stringify({ doc_type_key: tk }) });
+      const typeResp = await fetch(`/api/vouchers/${id}/set-type`, { method: "POST", headers: json(), body: JSON.stringify({ doc_type_key: tk, expected_updated_at:currentVersion }) });
       if (!typeResp.ok) throw new Error(await responseError(typeResp, "類型儲存失敗"));
+      const typeRecord = await typeResp.json();
+      currentVersion = typeRecord.updated_at || currentVersion;
       const d = await withInferProgress("內容辨識中…", () =>
         fetch(`/api/vouchers/${id}/recognize`, { method: "POST", headers: json() }).then((r) => r.json()));
       if (!d.ok) throw new Error(errText(d, "辨識失敗"));
@@ -747,6 +816,7 @@
     if (header) header.innerHTML = itemSpecs().map((f) => `<th>${esc(f.label)}</th>`).join("") + "<th>記住對應／來源</th><th></th>";
     body.innerHTML = (items.length ? items : [{}]).map(itemRow).join("");
     bindItemRows();
+    if (editBusy) body.querySelectorAll("input,button").forEach((el) => { el.disabled = true; });
   }
   function itemRow(it) {
     it = {...it, item_id: it.item_id || newItemId()};
@@ -841,6 +911,25 @@
     $("itemsBody").insertAdjacentHTML("beforeend", itemRow({})); bindItemRows();
   });
 
+  function collectEntries() {
+    const body = $("entriesBody");
+    if (!body) return currentVoucher.entries || [];
+    return Array.from(body.querySelectorAll("tr[data-entry-id]")).map((tr) => {
+      const row = {...JSON.parse(tr.dataset.original || "{}"), entry_id:tr.dataset.entryId};
+      const value = (key) => tr.querySelector(`[data-entry-key="${key}"]`)?.value || "";
+      const direction = value("direction"), code = value("account_code"), name = value("account_name");
+      ["debit","credit"].forEach((side) => {
+        row[`${side}_account`] = direction === side ? code : "";
+        row[`${side}_account_name`] = direction === side ? name : "";
+      });
+      row.raw_account_code = direction ? "" : code;
+      row.raw_account_name = direction ? "" : name;
+      row.amount = value("amount") || null;
+      ["description","dept","offset_code"].forEach((key) => { row[key] = value(key); });
+      return row;
+    });
+  }
+
   function collectForm() {
     const fields = {...(currentVoucher.fields || {})};
     activeFields.forEach((f) => {
@@ -857,29 +946,76 @@
       return item;
     }).filter((it) => Object.entries(it).some(([key,value]) => !itemBookkeeping.has(key) && value != null && value !== ""));
     // The server owns common-field mapping; retain every unrendered field/attribute.
-    return {...currentVoucher, fields, items, note: $("f-note").value};
+    const typeKey = $("revTypeSel")?.value || currentVoucher.doc_type_key;
+    return {...currentVoucher, doc_type_key:typeKey, doc_type:DOC_TYPES[typeKey]?.label || currentVoucher.doc_type,
+      fields, items, entries:collectEntries(), note: $("f-note").value};
   }
 
-  $("btnClassify").addEventListener("click", async () => {
-    // 先存目前編輯，再產生分錄
+  $("btnClassify").addEventListener("click", () => withEditLock(async () => {
     try {
       await persistCurrentEdits();
-      const r = await withInferProgress("科目分類中…", () =>
-        fetch(`/api/vouchers/${currentId}/classify`, { method: "POST" }).then((x) => x.json()));
-      if (!r.ok) { alert(errText(r, "分類失敗")); return; }
-      currentVoucher.entries = r.entries;
-      currentVoucher.debit_total = r.debit_total; currentVoucher.credit_total = r.credit_total;
-      currentVoucher.balance_check = r.balance_check;
-      currentVoucher.classification_meta = r.classification_meta || {};
-      currentVoucher.validation_warnings = r.validation_warnings || [];
-      currentVoucher.payment_state = r.payment_state || {};
-      renderEntries(r.entries, r.debit_total, r.credit_total, r.balance_check);
-      await refreshCurrentStatus();
-      toast("已產生會計分錄");
+      const response = await withInferProgress("產生分錄建議中…", () =>
+        fetch(`/api/vouchers/${currentId}/classify`, { method:"POST", headers:json(),
+          body:JSON.stringify({expected_updated_at:currentVersion}) }));
+      const record = await response.json();
+      if (!response.ok) throw new Error(errText(record, "產生建議失敗"));
+      applyRecordStatus(record);
+      toast("已產生建議，請預覽後決定是否採用");
     } catch (err) {
-      alert(`分類失敗：${err.message}`);
+      alert(`產生建議失敗：${err.message}`);
     }
+  }));
+
+  $("addEntry").addEventListener("click", () => {
+    $("entriesBody").querySelector(".entry-empty")?.remove();
+    const row = entryRow({});
+    $("entriesBody").insertAdjacentHTML("beforeend", row);
+    // Bind only the new row to avoid duplicate listeners.
+    const last = $("entriesBody").lastElementChild;
+    last.querySelector(".del-entry").addEventListener("click", () => { last.remove(); markEntryDraft(); });
+    last.querySelectorAll("input,select").forEach((el) => el.addEventListener("input", () => {
+      if (el.dataset.entryKey === "account_code") {
+        const known = accountChart.find((a) => a.code === el.value);
+        if (known) last.querySelector('[data-entry-key="account_name"]').value = known.name;
+      }
+      markEntryDraft();
+    }));
+    markEntryDraft();
   });
+
+  function confirmEntryReplacement(before, after) {
+    const dialog = $("entryReplaceDialog");
+    $("entryReplaceBefore").innerHTML = entryPreview(before);
+    $("entryReplaceAfter").innerHTML = entryPreview(after);
+    return new Promise((resolve) => {
+      const finish = (value) => { dialog.close(); resolve(value); };
+      $("entryReplaceCancel").onclick = () => finish(false);
+      $("entryReplaceContinue").onclick = () => finish(true);
+      dialog.oncancel = (event) => { event.preventDefault(); finish(false); };
+      dialog.showModal();
+    });
+  }
+  async function performEntryAction(action) {
+    try {
+      await persistCurrentEdits();
+      if (action === "adopt" && !await confirmEntryReplacement(currentVoucher.entries || [], currentProposal.entries || [])) return;
+      const response = await fetch(`/api/vouchers/${currentId}/entries/${action}`, {method:"POST",headers:json(),
+        body:JSON.stringify({expected_updated_at:currentVersion,proposal_id:currentProposal.id,replace_existing:action === "adopt"})});
+      const record = await response.json();
+      if (!response.ok) {
+        if (response.status === 409 && record.latest) await reviewLatestVoucher(record.latest);
+        throw new Error(errText(record, "分錄操作失敗") + (response.status === 409 ? "；目前輸入仍保留，請比對最新內容後重新操作。" : ""));
+      }
+      currentVoucher = record.current || currentVoucher;
+      renderEntries(currentVoucher.entries || [],currentVoucher.debit_total,currentVoucher.credit_total,currentVoucher.balance_check);
+      applyRecordStatus(record);
+      toast({confirm:"分錄已經人工確認，可供入帳",adopt:"已採用建議，分錄待核對",discard:"已捨棄建議"}[action]);
+      loadList();
+    } catch (error) { alert(error.message); }
+  }
+  $("btnConfirmEntries").addEventListener("click", () => withEditLock(() => performEntryAction("confirm")));
+  $("adoptEntryProposal").addEventListener("click", () => withEditLock(() => performEntryAction("adopt")));
+  $("discardEntryProposal").addEventListener("click", () => withEditLock(() => performEntryAction("discard")));
 
   async function responseError(resp, fallback) {
     const data = await resp.json().catch(() => ({}));
@@ -918,6 +1054,9 @@
         currentVoucher = record.current || currentVoucher;
         reviewedItems = {};
         renderItems(currentVoucher.items || []);
+        renderEntries(currentVoucher.entries || [],currentVoucher.debit_total,currentVoucher.credit_total,currentVoucher.balance_check);
+        $("itemsSection").classList.toggle("hidden", !DOC_TYPES[currentVoucher.doc_type_key]?.has_items && !currentVoucher.items?.length);
+        applyEntryState(record);
       }
       if (record.mapping_skipped?.length) alert("單據已儲存，以下明細未建立共用對應：\n" +
         record.mapping_skipped.map((row) => {
@@ -972,6 +1111,8 @@
     const itemText = (items) => (items || []).map((row) => [row.description, row.account_code, row.account_name,
       row.quantity == null ? "" : `數量 ${row.quantity}`, row.amount == null ? "" : `金額 ${row.amount}`].filter(Boolean).join("／")).join("\n");
     add("明細", itemText(remote.items), itemText(local.items));
+    const entryText = (entries) => (entries || []).map((row) => `${row.description || ""}／${row.debit_account ? "借" : "貸"} ${row.debit_account || row.credit_account || ""} ${row.debit_account_name || row.credit_account_name || ""}／${row.amount ?? ""}`).join("\n");
+    add("分錄", entryText(remote.entries), entryText(local.entries));
     $("voucherVersionRows").innerHTML = rows.join("") || '<tr><td colspan="3">最新版本已有其他保存紀錄，請確認是否以目前輸入儲存。</td></tr>';
     const dialog = $("voucherVersionDialog");
     return new Promise((resolve) => {
@@ -996,6 +1137,10 @@
     } finally {
       editBusy = false;
       controls.forEach((control, index) => { control.disabled = disabled[index]; });
+      $("revForm").querySelectorAll("input,textarea,select,button").forEach((control) => {
+        if (!controls.includes(control)) control.disabled = false;
+      });
+      $("adoptEntryProposal").disabled = currentProposal.status !== "pending";
     }
   }
 
@@ -1021,7 +1166,7 @@
   async function confirmCurrent() {
     try {
       await persistCurrentEdits("confirm");
-      toast("已確認，可納入日記帳");
+      toast("辨識內容已確認；分錄需另行確認可供入帳");
       loadList();
     } catch (err) {
       alert(`確認失敗：${err.message}`);
@@ -1121,7 +1266,7 @@
   // ── 影像手動旋轉 + 重新辨識 ──
   async function rotateImage(dir) {
     if (!currentId) return;
-    const resp = await fetch(`/api/vouchers/${currentId}/rotate`, { method: "POST", headers: json(), body: JSON.stringify({ direction: dir }) });
+    const resp = await fetch(`/api/vouchers/${currentId}/rotate`, { method: "POST", headers: json(), body: JSON.stringify({ direction: dir, expected_updated_at:currentVersion }) });
     if (!resp.ok) { alert(await responseError(resp, "旋轉失敗")); return; }
     const result = await resp.json();
     if (!result.ok) { alert("旋轉失敗"); return; }
@@ -1147,7 +1292,7 @@
     if (!currentId) return;
     const angle = Number($("fineAngle").value) || 0;
     if (!angle) return;
-    const resp = await fetch(`/api/vouchers/${currentId}/rotate-fine`, { method: "POST", headers: json(), body: JSON.stringify({ angle }) });
+    const resp = await fetch(`/api/vouchers/${currentId}/rotate-fine`, { method: "POST", headers: json(), body: JSON.stringify({ angle, expected_updated_at:currentVersion }) });
     if (!resp.ok) { alert(await responseError(resp, "微調失敗")); return; }
     if (!(await resp.json()).ok) { alert("微調失敗"); return; }
     await refreshCurrentStatus();
@@ -1220,7 +1365,7 @@
       if (d.id) openReview(d.id);
     } else {
       if (!confirm("「裁切」會取代目前憑證的原圖且無法復原。\n若是要把一頁多張拆開，請改用「✂➕ 裁切為新憑證」。\n\n確定要裁切目前這張嗎？")) return;
-      const r = await fetch(`/api/vouchers/${currentId}/crop`, { method: "POST", headers: json(), body: JSON.stringify({ box }) });
+      const r = await fetch(`/api/vouchers/${currentId}/crop`, { method: "POST", headers: json(), body: JSON.stringify({ box, expected_updated_at:currentVersion }) });
       setCropMode(false);
       if (!r.ok) { alert("裁切失敗"); return; }
       if (!(await r.json()).ok) { alert("裁切失敗"); return; }
@@ -1231,6 +1376,7 @@
   function clearReview() {
     $("revForm").classList.add("hidden"); $("revEmpty").classList.remove("hidden"); currentId = null;
     currentManualEntry = false;
+    currentEntryStatus = "none"; currentProposal = {}; currentEntryChecks = {};
   }
   // 外觀確認 → 加入掃描清單（prepared → queued）
   async function confirmAppearance() {
@@ -1252,7 +1398,7 @@
       if ($("revForm").classList.contains("prepared")) {
         const company = companyRecords.find((c) => c.id === selectedCompanyId());
         const r = await fetch(`/api/vouchers/${currentId}/company`, { method:"POST",headers:json(),
-          body:JSON.stringify({company:company?.account_chart_key || ""})});
+          body:JSON.stringify({company:company?.account_chart_key || "", expected_updated_at:currentVersion})});
         if (!r.ok) throw new Error(await responseError(r, "歸屬公司儲存失敗"));
         applyRecordStatus(await r.json());
       } else {
@@ -1263,9 +1409,21 @@
   $("revTypeSel").addEventListener("change", async () => {
     if (!currentId) return;
     const tk = $("revTypeSel").value;
-    const resp = await fetch(`/api/vouchers/${currentId}/set-type`, { method: "POST", headers: json(), body: JSON.stringify({ doc_type_key: tk }) });
+    if (!$("revForm").classList.contains("prepared")) {
+      await withEditLock(async () => {
+        try {
+          const record = await persistCurrentEdits();
+          buildActiveFields(tk); renderFields(record.current?.fields || {});
+          loadList();
+        } catch (err) { alert(err.message); }
+      });
+      return;
+    }
+    const resp = await fetch(`/api/vouchers/${currentId}/set-type`, { method: "POST", headers: json(), body: JSON.stringify({ doc_type_key: tk, expected_updated_at:currentVersion }) });
     if (!resp.ok) { alert(await responseError(resp, "單據類型儲存失敗")); return; }
     await refreshCurrentStatus();
+    currentVoucher.doc_type_key = tk;
+    currentVoucher.doc_type = DOC_TYPES[tk]?.label || currentVoucher.doc_type;
     buildActiveFields(tk);
     renderFields(currentVoucher.fields || {});
     loadList();
@@ -1391,7 +1549,7 @@
   function showJournal(d) {
     if (!d || !d.rows || !d.rows.length) {
       $("journalWrap").classList.add("hidden"); $("journalEmpty").classList.remove("hidden");
-      $("journalEmpty").textContent = d ? "此期別無已確認憑證分錄。" : "選擇期別以檢視日記帳（僅彙整「已確認」的憑證）。";
+      $("journalEmpty").textContent = d ? `此期別尚無可供入帳分錄。未納入 ${d.excluded_count || 0} 張分錄待核對單據。` : "選擇期別以檢視日記帳（辨識已確認且分錄可供入帳）。";
       return;
     }
     $("journalEmpty").classList.add("hidden"); $("journalWrap").classList.remove("hidden");
@@ -1402,7 +1560,7 @@
         <td class="num">${r.credit_amount == null ? "" : nf(r.credit_amount)}</td></tr>`).join("");
     $("journalDebit").textContent = nf(d.debit_total);
     $("journalCredit").textContent = nf(d.credit_total);
-    $("journalBalance").innerHTML = `${d.count} 張憑證　` +
+    $("journalBalance").innerHTML = `${d.count} 張可供入帳　未納入 ${d.excluded_count || 0} 張分錄待核對單據　` +
       (d.balance_check ? '<span class="ok">借貸平衡 ✓</span>' : '<span class="bad">未平衡，請人工核對</span>');
   }
 
@@ -1442,7 +1600,7 @@
       <tr><td>總計</td><td>${nf(v.total_amount)} ${esc(v.currency)}</td><td>摘要</td><td>${esc(v.note)}</td></tr></table>
       ${items ? `<h3>明細</h3><table><thead><tr>${specs.map((f) => `<th>${esc(f.label)}</th>`).join("")}</tr></thead><tbody>${items}</tbody></table>` : ""}
       ${warnings.length ? `<p>${warnings.map(esc).join("；")}</p>` : ""}
-      ${entries ? `<h3>會計分錄</h3><table><thead><tr><th>摘要</th><th>借方科目</th><th>貸方科目</th><th>金額</th><th>主要金額來源</th><th>輔助證據路徑</th></tr></thead><tbody>${entries}</tbody></table>` : ""}
+      ${entries ? `<h3>會計分錄（${record.entries_status === "ready" ? "可供入帳" : "草稿待核對"}）</h3><table><thead><tr><th>摘要</th><th>借方科目</th><th>貸方科目</th><th>金額</th><th>主要金額來源</th><th>輔助證據路徑</th></tr></thead><tbody>${entries}</tbody></table>` : ""}
       <h3>來源、驗證與政策紀錄</h3><pre class="audit">${esc(JSON.stringify(audit, null, 2))}</pre>`, preview);
   }
   $("btnPrintVoucher").addEventListener("click", printVoucher);
@@ -1452,7 +1610,7 @@
     const rows = journalData.rows.map((r) => `<tr><td>${esc(r.date)}</td><td>${esc(r.voucher_id)}</td><td>${esc(r.summary)}</td><td>${esc(r.debit_account)}</td><td>${esc(r.credit_account)}</td><td class="num">${r.debit_amount == null ? "" : nf(r.debit_amount)}</td><td class="num">${r.credit_amount == null ? "" : nf(r.credit_amount)}</td><td>${esc(r.amount_source)}</td><td>${esc((r.evidence_paths || []).join("、"))}</td><td>${esc(r.payment_state == null ? "" : JSON.stringify(r.payment_state))}</td></tr>`).join("");
     printWindow(`日記帳 ${journalData.period}`, `
       <h1>單月日記帳　${esc(journalData.period)}</h1>
-      <div class="meta">${journalData.company ? "公司 " + esc(journalData.company) + "　" : ""}${journalData.count} 張已確認憑證</div>
+      <div class="meta">${journalData.company ? "公司 " + esc(journalData.company) + "　" : ""}${journalData.count} 張可供入帳憑證；未納入 ${journalData.excluded_count || 0} 張分錄待核對單據</div>
       <table><thead><tr><th>日期</th><th>憑證號</th><th>摘要</th><th>借方科目</th><th>貸方科目</th><th>借方金額</th><th>貸方金額</th><th>主要金額來源</th><th>輔助證據路徑</th><th>付款狀態</th></tr></thead>
       <tbody>${rows}</tbody>
       <tfoot><tr><td colspan="5">合計</td><td class="num">${nf(journalData.debit_total)}</td><td class="num">${nf(journalData.credit_total)}</td><td></td></tr></tfoot></table>`);

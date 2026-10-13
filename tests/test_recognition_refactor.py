@@ -13,6 +13,7 @@ from unittest.mock import Mock, patch
 
 from app import config, validation
 from app.core import barcode, doc_types, model_invocation, pipeline, prompts
+from app.db.models import ReviewStatus
 from app.models.schemas import Voucher
 from app.services import accounting_policy, classify, importdecl, journal, review
 
@@ -271,13 +272,19 @@ class RefactorFlowTests(unittest.TestCase):
         good["entries"][0]["debit_account_name"] = "文具用品"
         good["entries"][1]["credit_account_name"] = "應付費用"
         bad = deepcopy(good); bad["entries"][0]["amount"] = bad["entries"][1]["amount"] = 999
-        records = [SimpleNamespace(company=company, current_json=json.dumps(item)) for company, item in (("B", good), ("A", bad), ("A", good))]
+        records = [SimpleNamespace(company=company, company_id=1, status=ReviewStatus.confirmed,
+                                   entries_status=entry_status, current_json=json.dumps(item))
+                   for company, item, entry_status in (("B", good, "ready"), ("A", bad, "ready"),
+                                                       ("A", good, "ready"), ("A", good, "draft"))]
         with patch("app.services.review.list_vouchers", return_value=records) as search, patch("app.services.classify._embed", return_value=[1.0]):
             examples = classify._retrieve_examples(v, company="A", chart=CHART, policy=policy)
         self.assertEqual(len(examples), 1)
         self.assertEqual(search.call_args.kwargs["company"], "A")
-        Path(self.temp.name, "entry_examples.json").write_text(json.dumps([{"分錄": good["entries"]}]), encoding="utf-8")
-        self.assertEqual(classify._seed_examples("A", v, CHART, policy), [])
+        seed_ready = {"company": "A", "status": "confirmed", "entries_status": "ready", "voucher": good}
+        seed_draft = {**seed_ready, "entries_status": "draft"}
+        Path(self.temp.name, "entry_examples.json").write_text(
+            json.dumps([seed_draft, seed_ready], ensure_ascii=False), encoding="utf-8")
+        self.assertEqual(len(classify._seed_examples("A", v, CHART, policy)), 1)
 
     def test_manual_save_and_model_roundtrip_keep_extra_fields_items_and_metadata(self):
         original = Voucher(doc_type_key="import_declaration", fields={"direction": "進口", "total_tax": 100},
@@ -342,20 +349,18 @@ class RefactorFlowTests(unittest.TestCase):
         self.assertEqual(json.loads(read("entries.csv")[0]["evidence_paths_json"]), ["fields.total_amount"])
         self.assertEqual(json.loads(read("vouchers.csv")[0]["classification_meta_json"])["status"], "candidate")
 
-    def test_journal_preserves_missing_amount_evidence_and_ignores_supporting_pages(self):
+    def test_journal_excludes_incomplete_entry_drafts_and_supporting_pages(self):
         v = Voucher(doc_type_key="receipt", date="2026-06-04", entries=[proposal(None, "fields.total_amount", debit="6200")],
                     field_evidence={"fields.total_amount": [{"source": "manual", "value": None}]},
                     validation_warnings=["金額缺漏"], classification_meta={"status": "candidate"})
-        records = [SimpleNamespace(current_json=v.model_dump_json()),
-                   SimpleNamespace(current_json=Voucher(doc_type_key="bill_detail", entries=[proposal(999, "fields.total_amount", debit="6200")]).model_dump_json())]
+        records = [SimpleNamespace(status=ReviewStatus.confirmed, entries_status="draft", company_id=1,
+                                   current_json=v.model_dump_json()),
+                   SimpleNamespace(status=ReviewStatus.confirmed, entries_status="ready", company_id=1,
+                                   current_json=Voucher(doc_type_key="bill_detail", entries=[proposal(999, "fields.total_amount", debit="6200")]).model_dump_json())]
         with patch("app.services.review.list_vouchers", return_value=records):
             result = journal.build_journal("2026-06")
-        self.assertEqual(len(result["rows"]), 1)
-        row = result["rows"][0]
-        self.assertIsNone(row["debit_amount"])
-        self.assertEqual(row["evidence_paths"], ["fields.total_amount"])
-        self.assertEqual(row["classification_meta"]["status"], "candidate")
-        self.assertEqual(row["validation_warnings"], ["金額缺漏"])
+        self.assertEqual(result["rows"], [])
+        self.assertEqual(result["excluded_count"], 1)
         self.assertFalse(result["balance_check"])
 
     def test_source_hash_v2_is_stable_sensitive_to_runtime_and_rejects_legacy_resume(self):

@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>憑證辨識系統</title>
-  <link rel="stylesheet" href="/css/styles.css">
+  <link rel="stylesheet" href="/css/styles.css?v=20261013-entry-workflow">
 </head>
 <body>
   <header class="topbar">
@@ -164,8 +164,8 @@
         <div id="dynFields" class="grid2"></div>
         <label class="full">摘要／備註<input id="f-note"></label>
 
-        <div id="itemsSection">
         <datalist id="itemAccountCodes"></datalist>
+        <div id="itemsSection">
         <div class="row-between mt">
           <h4>明細</h4><button id="addItem" class="btn btn-sm">＋ 新增列</button>
         </div>
@@ -174,16 +174,27 @@
         </div>
 
         <div class="row-between mt">
-          <h4>會計分錄</h4><button id="btnClassify" class="btn btn-sm">🧮 自動分類科目</button>
+          <h4>會計分錄 <span id="entriesStatus" class="tag">尚無分錄</span></h4>
+          <div><button id="addEntry" class="btn btn-sm">＋ 新增分錄</button>
+          <button id="btnClassify" class="btn btn-sm">🧮 產生分錄建議</button></div>
         </div>
-        <table class="entries"><thead><tr><th>摘要</th><th>借方科目</th><th>貸方科目</th><th>金額</th></tr></thead>
-          <tbody id="entriesBody"></tbody></table>
+        <p class="hint">分錄可保存為草稿。確認辨識內容後，需另行核對並確認分錄，才會納入正式帳務報表。</p>
+        <div class="entries-scroll"><table class="entries entries-edit"><thead><tr><th>借／貸</th><th>科目代號</th><th>科目名稱</th><th>金額</th><th>摘要</th><th>部門／立沖帳目</th><th></th></tr></thead>
+          <tbody id="entriesBody"></tbody></table></div>
         <div id="balanceInfo" class="hint"></div>
+        <button id="btnConfirmEntries" class="btn">✅ 確認分錄可供入帳</button>
+        <section id="entryProposal" class="entry-proposal hidden">
+          <h4>AI 分錄建議（尚未採用）</h4>
+          <div id="entryProposalInfo" class="hint"></div>
+          <div id="entryProposalPreview" class="entries-scroll"></div>
+          <div class="actions"><button id="adoptEntryProposal" class="btn">採用建議並替換草稿</button>
+            <button id="discardEntryProposal" class="btn">捨棄建議</button></div>
+        </section>
 
         <div class="actions">
           <button id="btnReturnImport" class="btn hidden" title="先暫存目前修正與備註，再返回①匯入下一份檔案">↩ 返回①匯入下一份</button>
           <button id="btnSave" class="btn">💾 儲存修正</button>
-          <button id="btnConfirm" class="btn primary" title="保存目前修正與備註，確認後納入日記帳">✅ 確認完成</button>
+          <button id="btnConfirm" class="btn primary" title="保存並確認辨識內容；分錄需另外確認可供入帳">✅ 確認辨識內容</button>
           <button id="btnPrintVoucher" class="btn">🖨 列印/PDF</button>
         </div>
         </div><!-- /reviewBody -->
@@ -192,6 +203,15 @@
       </div>
     </section>
   </main>
+
+  <dialog id="entryReplaceDialog" class="mapping-dialog">
+    <h3>採用建議並替換整組分錄</h3>
+    <p>採用後分錄回到待核對，舊草稿會保留在操作歷程。</p>
+    <h4>目前草稿</h4><div id="entryReplaceBefore" class="entries-scroll"></div>
+    <h4>將採用的建議</h4><div id="entryReplaceAfter" class="entries-scroll"></div>
+    <div class="actions"><button id="entryReplaceCancel" class="btn">保留目前草稿</button>
+      <button id="entryReplaceContinue" class="btn primary">確認整組替換</button></div>
+  </dialog>
 
   <dialog id="mappingConflictDialog" class="mapping-dialog">
     <h3>確認品名共用對應</h3>
@@ -306,6 +326,6 @@
     <span class="eng-hint" id="engHint"></span>
   </div>
 
-  <script src="/js/app.js?v=20261013-item-account-mapping"></script>
+  <script src="/js/app.js?v=20261013-entry-workflow"></script>
 </body>
 </html>

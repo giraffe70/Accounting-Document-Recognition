@@ -281,3 +281,15 @@ table.items-edit .account-status { margin: 4px 0; }
 .mapping-dialog th, .mapping-dialog td { border: 1px solid var(--border); padding: 8px; text-align: left; }
 .mapping-dialog select { max-width: 100%; }
 .mapping-dialog td { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.entries-scroll { overflow-x: auto; margin: 8px 0; }
+table.entries-edit { min-width: 870px; }
+.entries-edit input, .entries-edit select { width: 100%; min-width: 70px; padding: 6px;
+  color: var(--text); background: var(--panel); border: 1px solid var(--border); border-radius: 4px; }
+.entries-edit td:nth-child(3), .entries-edit td:nth-child(5) { min-width: 150px; }
+.entries-edit td:nth-child(4) { min-width: 110px; }
+.entries-edit small { display: block; color: var(--muted); white-space: nowrap; }
+.entries-edit details label { display: block; min-width: 120px; margin: 6px 0; }
+.entry-proposal { border: 1px solid var(--border); padding: 12px; margin-top: 16px; border-radius: 8px; }
+#entryProposalInfo { white-space: pre-line; }
+#balanceInfo ul { padding-left: 22px; margin: 6px 0; }

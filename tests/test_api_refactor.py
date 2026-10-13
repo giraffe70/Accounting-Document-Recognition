@@ -12,9 +12,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from fastapi import Body, Request
 from fastapi.responses import JSONResponse
 
 from app.core import doc_types
+from app.db.models import ReviewStatus
 from app.models.schemas import JournalEntry, Voucher
 from app import validation
 
@@ -54,13 +56,24 @@ class ApiContractTests(unittest.TestCase):
             "doc_type_key": "invoice",
             "fields": {"total_amount": 120.0},
             "legacy_extension": extra["legacy_extension"],
+            "entries": [{"entry_id": "draft-1", "description": "existing adopted draft"}],
         }
-        record = SimpleNamespace(current_json=json.dumps(source), company="Example Ltd")
+        record = SimpleNamespace(
+            id=7, current_json=json.dumps(source), company="Example Ltd",
+            status="pending", updated_at=SimpleNamespace(isoformat=lambda: "v1"),
+        )
+        save_proposal = Mock(return_value=record)
         update = Mock()
-        review = SimpleNamespace(get_voucher=Mock(return_value=record), update_current=update)
+        review = SimpleNamespace(
+            get_voucher=Mock(return_value=record), _check_model_write=Mock(),
+            RecognitionProtected=type("RecognitionProtected", (ValueError,), {}),
+            save_entry_proposal=save_proposal, update_current=update,
+        )
 
         def classify_voucher(voucher, company=""):
             self.assertEqual(company, "Example Ltd")
+            # AI results form a separate candidate; they must not replace the
+            # existing entry draft stored on the voucher.
             voucher.entries = [JournalEntry(
                 description="invoice payment", amount=120,
                 debit_account="6000", credit_account="1000",
@@ -78,34 +91,44 @@ class ApiContractTests(unittest.TestCase):
             voucher.payment_state = {"status": "paid", "raw_status": "已結清"}
             return voucher
 
-        review._check_model_write = Mock()
-        review.RecognitionProtected = type("RecognitionProtected", (ValueError,), {})
+        request = SimpleNamespace(cookies={"session": "session-token"})
+        actor = SimpleNamespace(id=19, username="reviewer")
+        response_record = {"id": 7, "entries_proposal": {"proposal_id": "proposal-1"}}
         endpoint = load_endpoint("api_classify", {
             "json": json,
             "Voucher": Voucher,
             "JSONResponse": JSONResponse,
+            "Body": Body,
+            "Request": Request,
+            "ReviewStatus": ReviewStatus,
+            "doc_types": doc_types,
             "review": review,
             "classify": SimpleNamespace(classify=classify_voucher),
+            "auth": SimpleNamespace(get_user_by_token=Mock(return_value=actor)),
+            "entry_workflow": SimpleNamespace(source_fingerprint=Mock(return_value="source-hash"),
+                                               EntryConflict=type("EntryConflict", (ValueError,), {})),
+            "_rec_to_dict": Mock(return_value=response_record),
             "logger": SimpleNamespace(exception=Mock()),
         })
 
-        response = endpoint(7)
+        response = endpoint(request, 7, "v1")
+        if isinstance(response, JSONResponse):
+            self.fail(f"classify endpoint returned {response.status_code}: {response.body.decode('utf-8')}")
         self.assertTrue(response["ok"])
-        self.assertEqual(response["entries"][0]["evidence_paths"], ["fields.total_amount"])
-        self.assertEqual(response["entries"][0]["amount_source"], "fields.total_amount")
-        self.assertEqual(response["payment_state"]["status"], "paid")
-        self.assertEqual(response["debit_total"], 120)
-        self.assertEqual(response["credit_total"], 120)
-        self.assertTrue(response["balance_check"])
-        self.assertEqual(response["classification_meta"]["status"], "candidate")
-        self.assertEqual(response["warnings"], ["review evidence"])
-        self.assertEqual(response["validation_warnings"], ["amount source requires review"])
-        update.assert_called_once()
-        args, kwargs = update.call_args
+        self.assertEqual(response["entries_proposal"]["proposal_id"], "proposal-1")
+        save_proposal.assert_called_once()
+        args = save_proposal.call_args.args
         self.assertEqual(args[0], 7)
-        self.assertEqual(args[1]["legacy_extension"], extra["legacy_extension"])
-        self.assertEqual(args[1]["classification_meta"]["status"], "candidate")
-        self.assertFalse(kwargs["mark_manual"])
+        self.assertEqual(args[1].entries[0].evidence_paths, ["fields.total_amount"])
+        self.assertEqual(args[1].entries[0].amount_source, "fields.total_amount")
+        self.assertEqual(args[1].payment_state["status"], "paid")
+        self.assertEqual(args[1].debit_total, 120)
+        self.assertEqual(args[1].credit_total, 120)
+        self.assertTrue(args[1].balance_check)
+        self.assertEqual(args[1].classification_meta["status"], "candidate")
+        self.assertEqual(args[3], "source-hash")
+        update.assert_not_called()
+        self.assertEqual(json.loads(record.current_json)["entries"][0]["entry_id"], "draft-1")
 
 
 class ValidationVersionGateTests(unittest.TestCase):

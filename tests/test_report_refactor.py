@@ -11,7 +11,8 @@ from app.services import reports
 
 
 def record(current: dict, status=ReviewStatus.confirmed):
-    return SimpleNamespace(current_json=json.dumps(current, ensure_ascii=False), status=status)
+    return SimpleNamespace(current_json=json.dumps(current, ensure_ascii=False), status=status,
+                           company_id=1, entries_status="ready")
 
 
 class ReportAuditTests(unittest.TestCase):
@@ -33,8 +34,10 @@ class ReportAuditTests(unittest.TestCase):
             "items": [{"description": "coffee", "amount": 105,
                        "hs_code": "0901.21", "origin_country": self.hostile}],
             "entries": [{"amount": 105, "debit_account": "6000", "debit_account_name": self.hostile,
-                         "credit_account": "1000", "credit_account_name": "Cash",
-                         "evidence_paths": ["fields.total_amount", self.hostile]}],
+                         "credit_account": "", "credit_account_name": "",
+                         "evidence_paths": ["fields.total_amount", self.hostile]},
+                        {"amount": 105, "debit_account": "", "debit_account_name": "",
+                         "credit_account": "1000", "credit_account_name": "Cash"}],
         }
 
     def test_both_report_templates_render_audit_metadata_and_escape_source_data(self):

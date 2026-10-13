@@ -13,7 +13,7 @@ from unittest.mock import Mock, patch
 
 from sqlmodel import Session, SQLModel, create_engine
 
-from app.db.models import ReviewStatus, VoucherRecord
+from app.db.models import Company, ReviewStatus, VoucherRecord
 from app.models.schemas import Voucher
 from app.services import journal, review
 
@@ -36,11 +36,11 @@ def _load_endpoint(name: str, namespace: dict[str, object]):
     return namespace[name]
 
 
-def _voucher(*, role="voucher", amount=100):
+def _voucher(*, role="voucher", amount=100, entries=None):
     data = {
         "doc_type_key": "receipt", "doc_type": "收據", "voucher_id": "R-1",
         "date": "2026-10-01", "fields": {"total_amount": amount},
-        "entries": [{"description": "合成費用", "amount": amount,
+        "entries": entries if entries is not None else [{"description": "合成費用", "amount": amount,
                      "debit_account": "6000", "credit_account": "1000"}],
         "origin": {"record_role": role},
     }
@@ -54,6 +54,10 @@ class ConfirmationServiceTests(unittest.TestCase):
         self.engine = create_engine(f"sqlite:///{Path(self.tmp.name) / 'review.db'}",
                                     connect_args={"check_same_thread": False})
         SQLModel.metadata.create_all(self.engine)
+        with Session(self.engine) as session:
+            session.add(Company(name="Synthetic Company", short="Synthetic Co", tax_id="",
+                                account_chart_key="synthetic"))
+            session.commit()
         self.addCleanup(self.engine.dispose)
         self.session_patch = patch.object(review, "get_session",
                                            side_effect=lambda: Session(self.engine, expire_on_commit=False))
@@ -97,7 +101,14 @@ class ConfirmationServiceTests(unittest.TestCase):
     def test_journal_only_includes_confirmed_and_content_change_returns_to_pending(self):
         prepared = self.save(status=ReviewStatus.prepared)
         pending = self.save()
-        confirmed = self.save(status=ReviewStatus.confirmed)
+        balanced_entries = [
+            {"description": "費用", "amount": 100, "debit_account": "6000", "debit_account_name": "費用"},
+            {"description": "現金", "amount": 100, "credit_account": "1000", "credit_account_name": "現金"},
+        ]
+        confirmed = review.save_voucher(_voucher(entries=balanced_entries), company="Synthetic Co",
+                                        status=ReviewStatus.confirmed)
+        confirmed = review.manage_entries(confirmed.id, "confirm", confirmed.updated_at.isoformat(), None)
+        self.assertEqual(confirmed.entries_status, "ready")
         for record in (prepared, pending, confirmed):
             record.period = "2026-10"
         with Session(self.engine, expire_on_commit=False) as session:
@@ -107,7 +118,7 @@ class ConfirmationServiceTests(unittest.TestCase):
             session.commit()
 
         built = journal.build_journal("2026-10")
-        self.assertEqual(len(built["rows"]), 1)
+        self.assertEqual(len(built["rows"]), 2)
         self.assertEqual(built["rows"][0]["voucher_id"], "R-1")
         self.assertEqual(built["count"], 1)
         self.assertEqual(journal.periods(), ["2026-10"])
@@ -254,9 +265,10 @@ class ReviewMigrationTests(unittest.TestCase):
                 conn.exec_driver_sql("""INSERT INTO voucher_records
                     (id,source_file,record_role,recognition_history,company,period,status,confidence,
                      ai_json,current_json,correction_note,manual_entry,ocr_provider,structure_model,
-                     image_path,attachments,created_at,updated_at,dev_note)
+                     image_path,attachments,created_at,updated_at,dev_note,entries_status,
+                     entries_confirmed_by_name,entries_proposal_json,entries_history)
                     VALUES (1,'','voucher','[]','','','pending','','{}','{}','',0,'','','','[]',
-                            '2026-10-01 00:00:00','2026-10-01 00:00:00','x')""")
+                            '2026-10-01 00:00:00','2026-10-01 00:00:00','x','none','','{}','[]')""")
             with patch.object(db_session, "_engine", engine):
                 db_session._migrate()
                 db_session._migrate()

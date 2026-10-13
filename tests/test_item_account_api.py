@@ -16,7 +16,7 @@ from sqlmodel import Session, SQLModel, select, create_engine
 
 from app.db.models import Company, ItemAccountMapping, MappingHistory, ReviewStatus, UserAccount, VoucherRecord
 from app.models.schemas import Voucher
-from app.services import accounts, auth, companies, item_account_mapping as mapping, review
+from app.services import accounts, auth, companies, entry_workflow, item_account_mapping as mapping, review
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -72,7 +72,8 @@ class ItemAccountApiTests(unittest.TestCase):
         namespace = {
             "Body": Body, "Request": Request, "JSONResponse": JSONResponse,
             "VoucherRecord": VoucherRecord, "review": review, "companies": companies,
-            "item_account_mapping": mapping, "accounts": accounts, "auth": auth,
+            "item_account_mapping": mapping, "entry_workflow": entry_workflow,
+            "accounts": accounts, "auth": auth,
             "taxid": taxid, "importdecl": importdecl, "config": config, "json": json,
         }
         main_tree = ast.parse((ROOT / "app" / "main.py").read_text(encoding="utf-8"))
@@ -238,9 +239,14 @@ class ItemAccountApiTests(unittest.TestCase):
             self.assertEqual(saved_row["account_updated_by"], self.user_id)
 
         stale = dict(voucher, expected_updated_at="2000-01-01T00:00:00")
+        before_stale_write = review.get_voucher(rec.id)
         with patch.object(auth, "get_user_by_token", return_value=self.actor):
-            response = self.call_update(rec.id, stale)
-        self.assertEqual(response.status_code, 409)
+            with self.assertRaises(entry_workflow.EntryConflict) as conflict:
+                self.api["api_update"](self.request, rec.id, stale)
+        latest = review.get_voucher(rec.id)
+        self.assertEqual(conflict.exception.latest["updated_at"], before_stale_write.updated_at.isoformat())
+        self.assertEqual(conflict.exception.latest["current"], json.loads(before_stale_write.current_json))
+        self.assertEqual(latest.current_json, before_stale_write.current_json)
 
     def test_malformed_company_items_and_item_uuid_map_to_422(self):
         rec = self.new_record()
@@ -253,19 +259,24 @@ class ItemAccountApiTests(unittest.TestCase):
         malformed_id = self.call_save(rec.id, self.payload(rec, items=[row]))
         self.assertEqual(malformed_id.status_code, 422)
 
-    def test_partial_account_and_unregistered_company_cannot_confirm_but_empty_account_can(self):
+    def test_raw_confirmation_allows_partial_or_missing_item_accounts_without_publishing_rules(self):
         partial = self.new_record()
         row = json.loads(partial.current_json)["items"][0]
         row.update(account_code="00600", account_name="")
         partial_result = self.call_save(partial.id, self.payload(partial, action="confirm", items=[row]))
-        self.assertEqual(partial_result.status_code, 409)
+        self.assertIsInstance(partial_result, dict)
+        self.assertEqual(partial_result["status"], ReviewStatus.confirmed)
+        self.assertEqual(partial_result["entries_status"], "none")
+        with Session(self.engine) as session:
+            self.assertEqual(session.exec(select(ItemAccountMapping)).all(), [])
 
-        unregistered = self.new_record()
-        row = json.loads(unregistered.current_json)["items"][0]
+        missing = self.new_record()
+        row = json.loads(missing.current_json)["items"][0]
         row.update(account_code="00600", account_name="文具費")
-        no_company = self.call_save(unregistered.id, self.payload(unregistered, action="confirm",
+        no_company = self.call_save(missing.id, self.payload(missing, action="confirm",
             company_index=None, items=[row], company_id=None))
-        self.assertEqual(no_company.status_code, 409)
+        self.assertIsInstance(no_company, dict)
+        self.assertEqual(no_company["status"], ReviewStatus.confirmed)
 
         empty = self.new_record()
         with patch.object(self.api["importdecl"], "is_import", return_value=False), \

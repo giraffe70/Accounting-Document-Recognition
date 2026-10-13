@@ -1,16 +1,17 @@
 """產製報表：客製 Web 模板兩套（可列印／另存 PDF 的獨立 HTML 頁）。
 
 模板 A：憑證明細彙總表（期別內所有憑證的關鍵欄位 + 合計）
-模板 B：會計傳票格式（每張已確認憑證的借貸分錄，傳統傳票版面）
+模板 B：會計傳票格式（辨識已確認且分錄可供入帳，傳統傳票版面）
 """
 import json
 from html import escape
 
 from app.db.models import ReviewStatus
-from app.services import review
+from app.core import doc_types
+from app.services import review, entry_workflow
 
 _STATUS = {"prepared": "待外觀確認", "queued": "待提取",
-           "pending": "待確認", "confirmed": "已確認"}
+           "pending": "辨識待確認", "confirmed": "辨識已確認"}
 
 TEMPLATES = [
     {"id": "summary", "name": "憑證明細彙總表"},
@@ -115,7 +116,10 @@ def _summary(period: str, company: str) -> str:
 def _journal_voucher(period: str, company: str) -> str:
     recs = review.list_vouchers(status=ReviewStatus.confirmed,
                                 company=company, period=period)
+    recs = [r for r in recs if not doc_types.is_supporting(json.loads(r.current_json).get("doc_type_key", ""))]
     blocks = []
+    excluded_count = sum(not entry_workflow.is_ready(r) for r in recs)
+    recs = [r for r in recs if entry_workflow.is_ready(r)]
     for r in recs:
         c = json.loads(r.current_json)
         erows = []
@@ -134,6 +138,6 @@ def _journal_voucher(period: str, company: str) -> str:
             f"<tbody>{''.join(erows) or '<tr><td colspan=4>（無分錄）</td></tr>'}</tbody></table>"
             f"{_audit(c)}</div>")
     body = (f"<h1>會計傳票</h1><div class='meta'>期別 {_esc(period)}"
-            f"{'　公司 ' + _esc(company) if company else ''}　共 {len(recs)} 張已確認</div>"
-            + "".join(blocks or ["<p>此期別無已確認憑證。</p>"]))
+            f"{'　公司 ' + _esc(company) if company else ''}　共 {len(recs)} 張可供入帳；另有 {excluded_count} 張尚未確認分錄，未納入</div>"
+            + "".join(blocks or ["<p>此期別無可供入帳分錄。</p>"]))
     return _page(f"會計傳票 {period}", body)

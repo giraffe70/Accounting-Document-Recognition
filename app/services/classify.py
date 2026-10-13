@@ -48,7 +48,8 @@ def _voucher_brief(v: Voucher) -> dict:
     result = v.model_dump(mode="json", include={"doc_type", "doc_type_key", "voucher_id", "date", "fields", "buyer", "seller", "items", "subtotal", "tax_amount", "total_amount", "currency", "note", "validation_warnings", "payment_state"})
     # Audit history stays stored; classification needs current evidence, not every past edit.
     result["field_evidence"] = {path: selected for path, records in v.field_evidence.items()
-        if isinstance(records, list) and (selected := [r for r in records if isinstance(r, dict) and r.get("selected")])}
+        if path != "entries" and not path.startswith("entries[")
+        and isinstance(records, list) and (selected := [r for r in records if isinstance(r, dict) and r.get("selected")])}
     from app.services.item_account_mapping import strip_accounting
     return strip_accounting(result)
 
@@ -310,6 +311,7 @@ def _seed_examples(company="", voucher=None, chart=None, policy=None, k=3) -> li
             return []
         return [{"voucher": _voucher_brief(Voucher.model_validate(r["voucher"])), "entries": r["voucher"]["entries"]} for r in records
                 if isinstance(r, dict) and r.get("company") == company and isinstance(r.get("voucher"), dict)
+                and r.get("entries_status") == "ready"
                 and r.get("status") in (ReviewStatus.confirmed.value, "accountant_approved") and _example_valid(r["voucher"], voucher, chart, policy)][:k]
     except (ValueError, TypeError, KeyError) as exc:
         logger.warning("種子案例略過：%s", exc)
@@ -324,6 +326,9 @@ def _retrieve_examples(voucher: Voucher, k=3, *, company="", chart=None, policy=
         pool = []
         for record in approved:
             if record.company != company:
+                continue
+            from app.services.entry_workflow import is_ready
+            if not is_ready(record):
                 continue
             item = json.loads(record.current_json)
             if _example_valid(item, voucher, chart, policy):

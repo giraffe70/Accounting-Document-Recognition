@@ -227,8 +227,13 @@ class PaymentAndItemTests(unittest.TestCase):
         self.assertEqual(prompts.validate_extraction(social, "social_insurance", "ocr_text")["items"][0]["fee_code"], "A01")
 
     def test_journal_rows_keep_primary_source_and_payment_state(self):
-        v = {"entries": [entry(10, "fields.total_amount", debit="6230")], "payment_state": {"status": "paid", "raw_status": "已結清"}}
-        record = SimpleNamespace(current_json=json.dumps(v))
+        debit = entry(10, "fields.total_amount", debit="6230")
+        debit["debit_account_name"] = "其他費用"
+        credit = entry(10, debit="", credit="1110")
+        credit["credit_account_name"] = "銀行存款"
+        v = {"entries": [debit, credit], "payment_state": {"status": "paid", "raw_status": "已結清"}}
+        record = SimpleNamespace(current_json=json.dumps(v), status="confirmed", entries_status="ready",
+                                 company_id=1)
         with patch("app.services.journal.review.list_vouchers", return_value=[record]):
             row = journal.build_journal("2026-10")["rows"][0]
         self.assertEqual(row["amount_source"], "fields.total_amount")

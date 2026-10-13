@@ -40,7 +40,7 @@ def normalize_entries(rows, previous=None, origin="manual", *, split_legacy=Fals
         used.add(identity)
         old = old_rows.get(identity)
         row["entry_id"] = identity
-        row["entry_origin"] = old.get("entry_origin", "manual") if old else origin
+        row["entry_origin"] = (old.get("entry_origin") or "manual") if old else origin
         row["source_entry_index"] = old.get("source_entry_index") if old else index if origin == "observed" else None
         if not old and origin == "manual":
             row["evidence_paths"], row["amount_source"] = [], None
@@ -86,6 +86,9 @@ def checks(data):
             issues.append(f"{prefix}：請指定單一借方或貸方")
         elif not row.get(("debit" if d else "credit") + "_account") or not row.get(("debit" if d else "credit") + "_account_name"):
             issues.append(f"{prefix}：科目代號與名稱未完整")
+        marker = re.sub(r"[\s/／\\。．.！!－—_-]+", "", str(row.get("description") or ""))
+        if marker in ("以下空白", "本頁以下空白", "以下無資料", "以下無明細"):
+            issues.append(f"{prefix}：版面空白標記，請刪除錯誤列")
         try:
             if isinstance(row.get("amount"), bool):
                 raise InvalidOperation
@@ -99,9 +102,6 @@ def checks(data):
             debit += amount
         elif c and not d:
             credit += amount
-        marker = re.sub(r"[\s/／\\。．.！!－—_-]+", "", str(row.get("description") or ""))
-        if marker in ("以下空白", "本頁以下空白", "以下無資料", "以下無明細"):
-            issues.append(f"{prefix}：版面空白標記，請刪除錯誤列")
     difference = debit - credit
     complete = bool(rows) and not issues
     balanced = complete and abs(difference) < Decimal("0.01")
@@ -132,7 +132,7 @@ def source_payload(data, *, accounting=False):
 def source_fingerprint(rec, data=None):
     data = data if data is not None else json.loads(rec.current_json)
     source = {"company": getattr(rec, "company_id", None) or getattr(rec, "company", ""),
-              "document": source_payload(data, accounting=True), "image_path": getattr(rec, "image_path", "")}
+              "document": source_payload(data), "image_path": getattr(rec, "image_path", "")}
     if source["image_path"]:
         path = (config.UPLOAD_DIR / source["image_path"]).resolve()
         if path.is_relative_to(config.UPLOAD_DIR.resolve()) and path.is_file():
@@ -179,7 +179,7 @@ def invalidate(rec, reason, actor=None, before=None, *, stale_proposal=True):
 
 def is_ready(rec):
     data = json.loads(rec.current_json)
-    return (rec.status == ReviewStatus.confirmed and getattr(rec, "entries_status", "none") == "ready"
+    return (getattr(rec, "status", None) == ReviewStatus.confirmed and getattr(rec, "entries_status", "none") == "ready"
             and bool(getattr(rec, "company_id", None)) and not doc_types.is_supporting(data.get("doc_type_key", ""))
             and checks(data)["balance_check"])
 

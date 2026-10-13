@@ -26,6 +26,7 @@ const events = [];
 const nodes = {
   'revCompanySel': { value: '1' },
   'itemsBody': { querySelectorAll: () => [] },
+  'itemsSection': { classList: { toggle: () => {} } },
   'revForm': { querySelectorAll: () => [] },
   'btnSave': { disabled: false, addEventListener: () => {} },
   'btnConfirm': { disabled: false, addEventListener: () => {} },
@@ -35,6 +36,7 @@ const nodes = {
 let currentId = input.currentId ?? 12;
 let currentVoucher = { fields: { amount: 125 }, status: 'pending' };
 let currentVersion = 'original-ts';
+let currentEntryStatus = 'none', currentProposal = {}, currentEntryChecks = {};
 let reviewedItems = input.reviewedItems || {};
 let saveCalls = 0;
 let editBusy = false;
@@ -47,6 +49,15 @@ function $(id) { return nodes[id] || null; }
 function collectForm() { return { fields: { amount: 125 }, entries: [] }; }
 function json() { return { 'Content-Type': 'application/json' }; }
 function applyRecordStatus(record) { events.push({ type: 'status', id: record.id, status: record.status }); }
+function renderEntries(entries = [], debitTotal = null, creditTotal = null, balanceCheck = false) {
+  events.push({ type: 'renderEntries', count: entries.length, debitTotal, creditTotal, balanceCheck });
+}
+function applyEntryState(record) {
+  currentEntryStatus = record.entries_status || 'none';
+  currentProposal = record.entries_proposal || {};
+  currentEntryChecks = record.entries_checks || {};
+  events.push({ type: 'entryState', status: currentEntryStatus, proposal: currentProposal.status || null });
+}
 async function refreshItemMatch() {}
 function selectedCompanyId() { return 1; }
 function renderItems() { events.push({ type: 'renderItems' }); }
@@ -74,8 +85,9 @@ async function fetch(url, options = {}) {
 const context = {
   console, events, nodes, input, get currentId() { return currentId; },
   set currentId(value) { currentId = value; }, currentVoucher, currentVersion,
+  DOC_TYPES: { other: { has_items: false } },
   reviewedItems, editBusy, inferBusy,
-  fileInput, progressText, progress, barFill, $, collectForm, json, applyRecordStatus,
+  fileInput, progressText, progress, barFill, $, collectForm, json, applyRecordStatus, renderEntries, applyEntryState,
   refreshItemMatch, selectedCompanyId, renderItems,
   clearReview, setStage, loadList, alert, toast, fetch,
 };
@@ -141,11 +153,18 @@ function node(id) {
 const $ = node;
 let currentId = null, currentVoucher = {}, currentIsImport = false, editBusy = false, inferBusy = 0, cropping = false, stageAction = '';
 let currentManualEntry = false;
+let currentEntryStatus = 'none', currentProposal = {}, currentEntryChecks = {};
 const currentUser = { role: input.role || 'clerk' };
 const fileInput = { value: 'selected-file' }, progressText = { textContent: '' }, progress = { classList: { remove() {} } }, barFill = { style: {} };
 function setCropMode() {}
 function setStatus() {}
 function setPendingActionVisibility() {}
+function applyEntryState(record) {
+  currentEntryStatus = record.entries_status || 'none';
+  currentProposal = record.entries_proposal || {};
+  currentEntryChecks = record.entries_checks || {};
+  events.push({ type: 'entryState', status: currentEntryStatus, proposal: currentProposal.status || null });
+}
 function populateTypeSel() {}
 function buildActiveFields() {}
 function renderFields() {}
@@ -182,6 +201,7 @@ const context = { console, events, requests, input, nodes, $, currentUser, fileI
   get currentManualEntry() { return currentManualEntry; }, set currentManualEntry(v) { currentManualEntry = v; },
   get currentIsImport() { return currentIsImport; }, set currentIsImport(v) { currentIsImport = v; },
   editBusy, inferBusy, cropping, stageAction, currentVersion: '', reviewedItems: { stale: true },
+  currentEntryStatus, currentProposal, currentEntryChecks, applyEntryState,
   DOC_TYPES: { other: { fields: [] } },
   async loadItemAccountChart() { events.push({ type: 'loadItemAccountChart', company: node('revCompanySel').value }); },
   setCropMode, setStatus, setPendingActionVisibility, populateTypeSel, buildActiveFields, renderFields, renderItems,
@@ -497,7 +517,8 @@ class ConfirmationFrontendTests(unittest.TestCase):
     def test_re_recognition_manual_entry_prompt_cancel_and_accept(self):
         records = {"12": self.review_record(True)}
         cancelled = self.run_review(action="recognize", recordId=12, records=records, acceptConfirm=False)
-        self.assertEqual([e["type"] for e in cancelled["events"]], ["loadItemAccountChart", "loadList", "confirm"])
+        self.assertEqual([e["type"] for e in cancelled["events"]],
+                         ["loadItemAccountChart", "entryState", "loadList", "confirm"])
         self.assertEqual([r["method"] for r in cancelled["requests"]], ["GET"])
 
         accepted = self.run_review(action="recognize", recordId=12, records=records, acceptConfirm=True)

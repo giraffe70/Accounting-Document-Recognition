@@ -82,10 +82,16 @@ class MetadataReportTests(unittest.TestCase):
             "payment_state": {"raw": "已扣款", "normalized": "paid"},
             "items": [{"description": "service", "amount": 10, "fee_code": "B12"}],
             "entries": [{"description": "service expense", "amount": 10,
+                         "debit_account": "6000", "debit_account_name": "費用",
+                         "credit_account": "", "credit_account_name": "",
                          "amount_source": "fields.total_amount",
-                         "evidence_paths": ["fields.total_amount", "items.1.amount"]}],
+                         "evidence_paths": ["fields.total_amount", "items.1.amount"]},
+                        {"description": "cash", "amount": 10,
+                         "debit_account": "", "debit_account_name": "",
+                         "credit_account": "1000", "credit_account_name": "現金"}],
         }
-        record = SimpleNamespace(current_json=json.dumps(voucher, ensure_ascii=False), status="confirmed")
+        record = SimpleNamespace(current_json=json.dumps(voucher, ensure_ascii=False), status="confirmed",
+                                 entries_status="ready", company_id=1)
         with patch.object(reports.review, "list_vouchers", return_value=[record]) as listed:
             summary = reports._summary("2026-10", "Example")
             journal_voucher = reports._journal_voucher("2026-10", "Example")

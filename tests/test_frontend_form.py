@@ -34,10 +34,21 @@ const rows = (input.rows || []).map((row) => ({
   querySelectorAll: (selector) => selector === '[data-item-key]' ? row.inputs : [],
   querySelector: (selector) => selector === '.remember-mapping' ? { checked: row.remember !== false } : null,
 }));
+const entryRows = (input.entryRows || []).map((row) => {
+  const fields = Object.fromEntries(Object.entries(row.fields || {}).map(([key, value]) => [key, { value }]));
+  return {
+    dataset: { entryId: row.entryId, original: row.original || '{}' },
+    querySelector: (selector) => {
+      const match = selector.match(/data-entry-key="([^"]+)"/);
+      return match ? (fields[match[1]] || null) : null;
+    },
+  };
+});
 const nodes = {
   revTypeSel: { value: input.typeKey },
   revCompanySel: { value: String(input.companyId ?? 3) },
   itemsBody: { querySelectorAll: (selector) => selector === 'tr' ? rows : [] },
+  entriesBody: { querySelectorAll: (selector) => selector === 'tr[data-entry-id]' ? entryRows : [] },
   'f-note': { value: input.note || '' },
   addItem: { addEventListener: () => {} },
   ...fieldNodes,
@@ -57,6 +68,7 @@ vm.createContext(context);
 vm.runInContext(`${escCode}\n${formCode}\nglobalThis.result = {
   itemSpecs: itemSpecs(),
   itemHtml: itemRow(input.rowItem || {}),
+  collectedEntries: collectEntries(),
   collected: collectForm(),
 };`, context);
 process.stdout.write(JSON.stringify(context.result));
@@ -202,6 +214,41 @@ class FrontendFormRegressionTests(unittest.TestCase):
                    "inputs": [], "remember": True}],
         )
         self.assertEqual(result["collected"]["items"], [])
+
+    def test_entry_editor_preserves_fixed_id_and_manual_account_code(self):
+        entry = {
+            "entry_id": "fixed-entry-uuid",
+            "entry_origin": "observed",
+            "source_entry_index": 2,
+            "debit_account": "00120",
+            "debit_account_name": "原始科目",
+            "credit_account": "",
+            "credit_account_name": "",
+            "description": "運費",
+            "legacy_field": "keep-entry-metadata",
+        }
+        item = {"item_id": "fixed-item-uuid", "description": "運費", "amount": 660}
+        result = self.run_form(
+            typeKey="other", activeFields=[],
+            voucher={"doc_type_key": "other", "fields": {}, "items": [item], "entries": [entry]},
+            # A non-item type must still retain and show persisted rows during edit.
+            rows=[{"original": json.dumps(item, ensure_ascii=False), "inputs": []}],
+            entryRows=[{"entryId": entry["entry_id"], "original": json.dumps(entry, ensure_ascii=False),
+                        "fields": {"direction": "debit", "account_code": "00120", "account_name": "手填科目",
+                                   "amount": "660", "description": "運費修正", "dept": "", "offset_code": ""}}],
+        )
+        collected = result["collected"]
+        self.assertEqual(collected["items"][0]["item_id"], "fixed-item-uuid")
+        self.assertEqual(len(collected["entries"]), 1)
+        row = collected["entries"][0]
+        self.assertEqual(row["entry_id"], "fixed-entry-uuid")
+        self.assertEqual(row["entry_origin"], "observed")
+        self.assertEqual(row["source_entry_index"], 2)
+        self.assertEqual(row["debit_account"], "00120")
+        self.assertEqual(row["debit_account_name"], "手填科目")
+        self.assertEqual(row["credit_account"], "")
+        self.assertEqual(row["description"], "運費修正")
+        self.assertEqual(row["legacy_field"], "keep-entry-metadata")
 
 
 class ValidationTimingFrontendContractTests(unittest.TestCase):

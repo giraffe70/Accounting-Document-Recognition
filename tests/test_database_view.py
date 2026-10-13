@@ -23,7 +23,10 @@ class DatabaseViewTests(unittest.TestCase):
             INSERT INTO users VALUES (1, '管理員', 'secret-hash', 'secret-salt');
             CREATE TABLE voucher_records (
                 id INTEGER PRIMARY KEY, company TEXT, current_json TEXT,
-                correction_note TEXT DEFAULT '', confirmed_at TEXT
+                correction_note TEXT DEFAULT '', confirmed_at TEXT,
+                entries_status TEXT DEFAULT 'none', entries_confirmed_at TEXT,
+                entries_confirmed_by INTEGER, entries_confirmed_by_name TEXT DEFAULT '',
+                entries_proposal_json TEXT DEFAULT '{}', entries_history TEXT DEFAULT '[]'
             );
             CREATE TABLE companies (id INTEGER PRIMARY KEY, name TEXT, short TEXT, tax_id TEXT, account_chart_key TEXT);
             CREATE TABLE item_account_mappings (id INTEGER PRIMARY KEY, company_id INTEGER, item_name_key TEXT,
@@ -122,11 +125,17 @@ class DatabaseViewTests(unittest.TestCase):
         labels = {column["name"]: column["label"] for column in voucher_columns}
         self.assertEqual(labels["correction_note"], "修正備註")
         self.assertEqual(labels["confirmed_at"], "確認完成時間")
+        self.assertEqual(labels["entries_status"], "分錄狀態")
+        self.assertEqual(labels["entries_confirmed_at"], "分錄確認時間")
+        self.assertEqual(labels["entries_confirmed_by"], "分錄確認者編號")
+        self.assertEqual(labels["entries_confirmed_by_name"], "分錄確認者名稱")
+        self.assertEqual(labels["entries_proposal_json"], "分錄候選內容")
+        self.assertEqual(labels["entries_history"], "分錄異動歷程")
         self.assertIsNone(next(t for t in tables if t["name"] == "empty_table")["date_label"])
         for table in tables:
             columns = self.rows(table=table["name"]).json()["columns"]
             self.assertTrue(all(c["label"] for c in columns))
-        self.assertEqual(sum(len(meta["columns"]) for meta in database_view.TABLE_META.values()), 121)
+        self.assertEqual(sum(len(meta["columns"]) for meta in database_view.TABLE_META.values()), 127)
         voucher_labels = database_view.TABLE_META[("app", "voucher_records")]["columns"]
         for legacy in ("clerk_note", "accountant_note", "dev_note",
                        "clerk_reviewed_at", "accountant_approved_at"):

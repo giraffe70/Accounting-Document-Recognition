@@ -427,7 +427,7 @@ class ItemAccountMappingTests(unittest.TestCase):
             losing_record = session.get(VoucherRecord, conflicts[0][1])
             self.assertEqual(json.loads(losing_record.current_json)["items"][0]["account_code"], "")
 
-    def test_company_change_invalidates_auto_value_and_manual_value_needs_ack(self):
+    def test_company_change_invalidates_auto_value_and_raw_confirmation_keeps_manual_value_pending(self):
         source = self.new_record(company_index=0)
         source_row = json.loads(source.current_json)["items"][0]
         source_row.update(account_code="00600", account_name="文具費")
@@ -448,8 +448,11 @@ class ItemAccountMappingTests(unittest.TestCase):
         current = review.get_voucher(manual.id)
         needs_review = json.loads(current.current_json)["items"][0]
         self.assertTrue(needs_review["account_needs_review"])
-        with self.assertRaises(mapping.MappingConflict):
-            review.save_current(current.id, self.payload(current, action="confirm"), self.actor())
+        confirmed, skipped = review.save_current(current.id, self.payload(current, action="confirm"), self.actor())
+        self.assertEqual(confirmed.status, ReviewStatus.confirmed)
+        self.assertTrue(skipped)
+        needs_review = json.loads(review.get_voucher(manual.id).current_json)["items"][0]
+        self.assertTrue(needs_review["account_needs_review"])
         acknowledgement = {needs_review["item_id"]: {"company_id": self.company_ids[1],
             "item_name_key": "影印紙", "account_code": "00700", "account_name": "差旅費"}}
         current = review.get_voucher(manual.id)
