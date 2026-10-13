@@ -83,6 +83,20 @@ class LineItem(_StrCoerceModel):
     hs_code: Optional[str] = None
     origin_country: Optional[str] = None
     fee_code: Optional[str] = None   # 勞健保費用代號
+    # Application enrichment; deliberately absent from DOC_TYPES extraction fields.
+    item_id: str = ""
+    account_code: str = ""
+    account_name: str = ""
+    mapping_id: Optional[int] = None
+    mapping_version: Optional[int] = None
+    account_source: str = ""
+    account_needs_review: bool = False
+    remember_mapping: bool = True
+    account_company_id: Optional[int] = None
+    account_item_key: str = ""
+    account_updated_by: Optional[int] = None
+    account_updated_by_name: str = ""
+    account_updated_at: str = ""
     model_config = ConfigDict(extra="allow")
 
 

@@ -165,6 +165,7 @@
         <label class="full">摘要／備註<input id="f-note"></label>
 
         <div id="itemsSection">
+        <datalist id="itemAccountCodes"></datalist>
         <div class="row-between mt">
           <h4>明細</h4><button id="addItem" class="btn btn-sm">＋ 新增列</button>
         </div>
@@ -191,6 +192,24 @@
       </div>
     </section>
   </main>
+
+  <dialog id="mappingConflictDialog" class="mapping-dialog">
+    <h3>確認品名共用對應</h3>
+    <p>同公司、同品名已有不同科目，或本張填了多組科目。請選擇只保存本張，或指定往後自動帶入的科目。</p>
+    <table><thead><tr><th>品名</th><th>既有共用科目</th><th>本張科目</th><th>此次處理</th></tr></thead>
+      <tbody id="mappingConflictRows"></tbody></table>
+    <div class="actions"><button id="mappingConflictCancel" class="btn">取消儲存</button>
+      <button id="mappingConflictContinue" class="btn primary">套用選擇並儲存</button></div>
+  </dialog>
+
+  <dialog id="voucherVersionDialog" class="mapping-dialog">
+    <h3>單據已有更新版本</h3>
+    <p>目前輸入尚未儲存。請比對最新內容，選擇保留輸入繼續編輯，或以目前輸入重新儲存。</p>
+    <table><thead><tr><th>欄位</th><th>最新保存內容</th><th>目前輸入</th></tr></thead>
+      <tbody id="voucherVersionRows"></tbody></table>
+    <div class="actions"><button id="voucherVersionCancel" class="btn">保留輸入，取消儲存</button>
+      <button id="voucherVersionContinue" class="btn primary">以目前輸入重新儲存</button></div>
+  </dialog>
 
   <!-- 日記帳 modal -->
   <div id="journalModal" class="modal hidden">
@@ -287,6 +306,6 @@
     <span class="eng-hint" id="engHint"></span>
   </div>
 
-  <script src="/js/app.js?v=20260914-draft-actions"></script>
+  <script src="/js/app.js?v=20261013-item-account-mapping"></script>
 </body>
 </html>

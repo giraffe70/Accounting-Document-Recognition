@@ -266,3 +266,18 @@ table.journal tfoot td { font-weight: 700; background: var(--bg3); }
 
 /* 科目表分公司選擇 */
 .acc-company { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; margin-bottom: 10px; }
+
+/* Per-item accounting and rule conflict review. */
+#itemsSection { overflow-x: auto; }
+table.items-edit { min-width: 780px; }
+table.items-edit td:first-child { min-width: 90px; }
+table.items-edit td:nth-child(2) { min-width: 130px; }
+table.items-edit input[type="checkbox"] { width: auto; }
+table.items-edit .account-status { margin: 4px 0; }
+.mapping-dialog { width: min(1000px, 94vw); max-height: 90vh; overflow: auto;
+  margin: auto; background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 12px; padding: 24px; }
+.mapping-dialog::backdrop { background: rgba(0, 0, 0, .5); }
+.mapping-dialog table { width: 100%; border-collapse: collapse; margin: 16px 0; }
+.mapping-dialog th, .mapping-dialog td { border: 1px solid var(--border); padding: 8px; text-align: left; }
+.mapping-dialog select { max-width: 100%; }
+.mapping-dialog td { white-space: pre-wrap; overflow-wrap: anywhere; }

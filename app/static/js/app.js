@@ -6,6 +6,7 @@
   let jobTimer = null;
   let currentId = null;
   let currentVoucher = {};   // 目前載入的 current（保留 entries 等未編輯欄位）
+  let currentVersion = "", companyRecords = [], accountChart = [], reviewedItems = {};
   let currentManualEntry = false;   // 保留既有人工修正紀錄的重新辨識提醒
   let editBusy = false;
   let currentUser = null;
@@ -369,9 +370,12 @@
     currentId = id;
     if (cropping) setCropMode(false);
     const rec = await (await fetch(`/api/vouchers/${id}`)).json();
+    if (id !== currentId) return;
     if (rec.detail) { alert(errText(rec, "操作失敗")); return; }
     const v = rec.current || {};
     currentVoucher = v;
+    currentVersion = rec.updated_at;
+    reviewedItems = {};
     currentManualEntry = !!rec.manual_entry;
     currentIsImport = !!rec.is_import;
     const autoSplitSource = v.origin?.layout?.auto_split === true;
@@ -408,7 +412,8 @@
     } else if (isPreExtract && rec.source_parent_id != null) {
       $("prepHint").innerHTML += `<br><span class="hint">此單據拆分自來源頁 #${esc(rec.source_parent_id)}${v.origin?.page_no != null ? `（原始頁 p${esc(v.origin.page_no)}）` : ""}。</span>`;
     }
-    $("revCompanySel").value = rec.company || "";
+    $("revCompanySel").value = rec.company_id == null ? "" : String(rec.company_id);
+    loadItemAccountChart();
     const typeKey = v.doc_type_key || "other";
     populateTypeSel(typeKey);
     buildActiveFields(typeKey);
@@ -481,6 +486,7 @@
   function applyRecordStatus(record) {
     if (record.id !== currentId) return;
     if ("manual_entry" in record) currentManualEntry = !!record.manual_entry;
+    if (record.updated_at) currentVersion = record.updated_at;
     setStatus(record.status);
     setPendingActionVisibility(record.status);
   }
@@ -703,30 +709,133 @@
 
   function itemSpecs() {
     const spec = DOC_TYPES[$("revTypeSel").value || currentVoucher.doc_type_key] || DOC_TYPES.other;
-    return (spec && spec.item_fields && spec.item_fields.length) ? spec.item_fields : [
+    const extraction = (spec && spec.item_fields && spec.item_fields.length) ? spec.item_fields : [
       {key:"description",label:"品名",kind:"text"}, {key:"quantity",label:"數量",kind:"number"},
       {key:"unit_price",label:"單價",kind:"number"}, {key:"amount",label:"合計",kind:"number"}];
+    return [{key:"account_code",label:"會計科目",kind:"text"},
+            {key:"account_name",label:"會計名稱",kind:"text"}, ...extraction];
+  }
+  function newItemId() {
+    return globalThis.crypto?.randomUUID?.() || "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g,
+      (c) => { const r = Math.random() * 16 | 0; return (c === "x" ? r : (r & 3 | 8)).toString(16); });
+  }
+  function selectedCompanyId() {
+    const value = $("revCompanySel")?.value;
+    return value ? Number(value) : null;
+  }
+  function normalizedItemName(value) { return String(value || "").trim().replace(/\s+/g, " "); }
+  function itemContext(company, name) { return JSON.stringify([company, normalizedItemName(name)]); }
+  const itemBookkeeping = new Set(["item_id", "mapping_id", "mapping_version", "account_source",
+    "account_needs_review", "remember_mapping", "account_company_id", "account_item_key",
+    "account_updated_by", "account_updated_by_name", "account_updated_at"]);
+  async function loadItemAccountChart() {
+    const company = selectedCompanyId();
+    accountChart = [];
+    const list = $("itemAccountCodes");
+    if (list) list.innerHTML = "";
+    if (company == null) return;
+    const response = await fetch(`/api/accounts?company_id=${company}&strict=true`);
+    if (company !== selectedCompanyId() || !response.ok) return;
+    const chart = (await response.json()).accounts || [];
+    if (company !== selectedCompanyId()) return;
+    accountChart = chart;
+    if (list) list.innerHTML = accountChart.map((a) => `<option value="${esc(a.code)}">${esc(a.name)}</option>`).join("");
   }
   function renderItems(items) {
     const body = $("itemsBody");
     const header = $("itemsSection").querySelector("thead tr");
-    if (header) header.innerHTML = itemSpecs().map((f) => `<th>${esc(f.label)}</th>`).join("") + "<th></th>";
+    if (header) header.innerHTML = itemSpecs().map((f) => `<th>${esc(f.label)}</th>`).join("") + "<th>記住對應／來源</th><th></th>";
     body.innerHTML = (items.length ? items : [{}]).map(itemRow).join("");
     bindItemRows();
   }
   function itemRow(it) {
-    return `<tr data-original="${esc(JSON.stringify(it))}">${itemSpecs().map((f) => {
+    it = {...it, item_id: it.item_id || newItemId()};
+    const company = selectedCompanyId();
+    return `<tr data-original="${esc(JSON.stringify(it))}" data-item-id="${esc(it.item_id)}"
+      data-context="${esc(itemContext(it.account_company_id ?? company, it.account_item_key ?? it.description))}"
+      data-source="${esc(it.account_source || "")}" data-needs-review="${it.account_needs_review ? "1" : "0"}">${itemSpecs().map((f) => {
       let value = it[f.key], type = f.kind === "number" ? "number" : "text";
       if (type === "number" && value != null && value !== "") {
         const number = Number(String(value).replace(/(?:NT)?\$|[,\s，、＄元]/gi, ""));
         if (Number.isFinite(number)) value = number; else type = "text";
       }
-      return `<td><input data-item-key="${esc(f.key)}" data-kind="${f.kind}" type="${type}" value="${esc(value ?? "")}"></td>`;
-    }).join("")}<td><button class="btn btn-sm del">✕</button></td></tr>`;
+      return `<td><input data-item-key="${esc(f.key)}" data-kind="${f.kind}" type="${type}"${f.key === "account_code" ? ' list="itemAccountCodes"' : ""} value="${esc(value ?? "")}"></td>`;
+    }).join("")}<td><label><input type="checkbox" class="remember-mapping" ${it.remember_mapping !== false ? "checked" : ""}>記住對應</label>
+      <div class="account-status hint">${it.account_needs_review ? "科目待核對" : it.account_source === "mapping" ? "由品名對應帶入" : it.account_source === "manual" ? "人工指定" : "尚無對應"}</div>
+      <button class="btn btn-sm keep-account ${it.account_needs_review ? "" : "hidden"}">沿用科目</button>
+      <button class="btn btn-sm use-account ${it.account_needs_review ? "" : "hidden"}">採用新建議</button>
+      </td><td><button class="btn btn-sm del">✕</button></td></tr>`;
   }
   function bindItemRows() {
-    $("itemsBody").querySelectorAll(".del").forEach((b) =>
-      b.addEventListener("click", (e) => { e.target.closest("tr").remove(); }));
+    $("itemsBody").querySelectorAll("tr").forEach((tr) => {
+      if (tr.dataset.bound) return;
+      tr.dataset.bound = "1";
+      tr.querySelector(".del").addEventListener("click", () => { delete reviewedItems[tr.dataset.itemId]; tr.remove(); });
+      tr.querySelector('[data-item-key="description"]')?.addEventListener("change", () => refreshItemMatch(tr).catch((e) => alert(e.message)));
+      ["account_code", "account_name"].forEach((key) => tr.querySelector(`[data-item-key="${key}"]`).addEventListener("input", () => {
+        tr._lookupGeneration = (tr._lookupGeneration || 0) + 1;
+        delete reviewedItems[tr.dataset.itemId];
+        tr.dataset.source = "manual";
+        if (key === "account_code") {
+          const code = tr.querySelector('[data-item-key="account_code"]').value;
+          const known = accountChart.find((a) => a.code === code);
+          if (known) tr.querySelector('[data-item-key="account_name"]').value = known.name;
+        }
+        showItemAccountStatus(tr);
+      }));
+      tr.querySelector(".keep-account").addEventListener("click", () => acknowledgeItemAccount(tr));
+      tr.querySelector(".use-account").addEventListener("click", async () => {
+        await refreshItemMatch(tr);
+        if (!tr._accountMatch) { alert("此公司與品名尚無可用對應，請手填後選擇沿用"); return; }
+        setItemAccount(tr, tr._accountMatch);
+        acknowledgeItemAccount(tr);
+      });
+    });
+  }
+  function showItemAccountStatus(tr) {
+    const pending = tr.dataset.needsReview === "1";
+    tr.querySelector(".account-status").textContent = pending ? "科目待核對" :
+      tr.dataset.source === "mapping" ? "由品名對應帶入" : tr.dataset.source === "manual" ? "人工指定" : "尚無對應";
+    tr.querySelectorAll(".keep-account,.use-account").forEach((b) => b.classList.toggle("hidden", !pending));
+  }
+  function setItemAccount(tr, match) {
+    ["account_code", "account_name"].forEach((key) => { tr.querySelector(`[data-item-key="${key}"]`).value = match?.[key] || ""; });
+    tr.dataset.source = match ? "mapping" : "";
+    tr.dataset.needsReview = "0";
+    showItemAccountStatus(tr);
+  }
+  function acknowledgeItemAccount(tr) {
+    reviewedItems[tr.dataset.itemId] = {company_id: selectedCompanyId(),
+      item_name_key: normalizedItemName(tr.querySelector('[data-item-key="description"]')?.value),
+      account_code: tr.querySelector('[data-item-key="account_code"]').value.trim(),
+      account_name: tr.querySelector('[data-item-key="account_name"]').value.trim()};
+    tr.dataset.needsReview = "0";
+    showItemAccountStatus(tr);
+  }
+  async function refreshItemMatch(tr) {
+    const id = currentId, company = selectedCompanyId(), itemId = tr.dataset.itemId;
+    const name = tr.querySelector('[data-item-key="description"]')?.value || "";
+    const context = itemContext(company, name), changed = tr.dataset.context !== context;
+    const generation = tr._lookupGeneration = (tr._lookupGeneration || 0) + 1;
+    // Invalidate the prior context immediately, before a potentially slow request.
+    if (changed) {
+      delete reviewedItems[itemId];
+      if (tr.dataset.source === "mapping") setItemAccount(tr, null);
+      else if (tr.querySelector('[data-item-key="account_code"]').value || tr.querySelector('[data-item-key="account_name"]').value) {
+        tr.dataset.needsReview = "1"; showItemAccountStatus(tr);
+      }
+      tr.dataset.context = context;
+    }
+    const response = await fetch("/api/item-account-mappings/lookup", {method:"POST", headers:json(),
+      body:JSON.stringify({company_id: company, items:[{item_id:itemId,description:name}]})});
+    if (!response.ok) throw new Error(await responseError(response, "品名對應查詢失敗"));
+    const data = await response.json();
+    if (generation !== tr._lookupGeneration || id !== currentId || company !== selectedCompanyId() || !tr.isConnected ||
+        itemId !== tr.dataset.itemId || context !== itemContext(company, tr.querySelector('[data-item-key="description"]')?.value)) return;
+    tr._accountMatch = data.items?.[0]?.match;
+    const code = tr.querySelector('[data-item-key="account_code"]').value;
+    const accountName = tr.querySelector('[data-item-key="account_name"]').value;
+    if (changed && !code && !accountName && tr._accountMatch) setItemAccount(tr, tr._accountMatch);
   }
   $("addItem").addEventListener("click", () => {
     $("itemsBody").insertAdjacentHTML("beforeend", itemRow({})); bindItemRows();
@@ -743,8 +852,10 @@
       tr.querySelectorAll("[data-item-key]").forEach((el) => {
         item[el.dataset.itemKey] = el.value === "" ? null : el.dataset.kind === "number" && el.type === "number" ? Number(el.value) : el.value;
       });
+      const remember = tr.querySelector?.(".remember-mapping");
+      if (remember) item.remember_mapping = remember.checked;
       return item;
-    }).filter((it) => Object.values(it).some((value) => value != null && value !== ""));
+    }).filter((it) => Object.entries(it).some(([key,value]) => !itemBookkeeping.has(key) && value != null && value !== ""));
     // The server owns common-field mapping; retain every unrendered field/attribute.
     return {...currentVoucher, fields, items, note: $("f-note").value};
   }
@@ -777,25 +888,101 @@
 
   // 暫存與一般儲存共用：歸屬公司、欄位、明細、分錄與摘要必須全數寫入後
   // 才視為成功，避免頁面切換後把失敗誤認成已保存。
-  async function persistCurrentEdits() {
+  async function persistCurrentEdits(action = "temporary") {
     if (!currentId) throw new Error("尚未選取憑證");
-    const id = currentId, form = collectForm();
-    const companyResp = await fetch(`/api/vouchers/${id}/company`, {
-      method: "POST", headers: json(), body: JSON.stringify({ company: $("revCompanySel").value }),
-    });
-    if (!companyResp.ok) throw new Error(await responseError(companyResp, "歸屬公司儲存失敗"));
-    applyRecordStatus(await companyResp.json());
-    const voucherResp = await fetch(`/api/vouchers/${id}`, {
-      method: "PUT", headers: json(), body: JSON.stringify(form),
-    });
-    if (!voucherResp.ok) throw new Error(await responseError(voucherResp, "儲存修正失敗"));
-    const record = await voucherResp.json();
-    applyRecordStatus(record);
-    if (currentId === id) {
-      currentVoucher = record.current || currentVoucher;
+    const id = currentId;
+    await Promise.all(Array.from($("itemsBody").querySelectorAll("tr")).map(refreshItemMatch));
+    let choices = {};
+    while (true) {
+      const voucherResp = await fetch(`/api/vouchers/${id}/save`, {
+        method: "POST", headers: json(), body: JSON.stringify({voucher:collectForm(), action,
+          company_id:selectedCompanyId(), expected_updated_at:currentVersion,
+          reviewed_items:reviewedItems, mapping_choices:choices}),
+      });
+      const record = await voucherResp.json();
+      if (voucherResp.status === 409 && record.conflicts?.length) {
+        const next = await chooseMappingConflicts(record.conflicts);
+        if (!next) throw new Error("已取消儲存，輸入內容仍保留");
+        choices = next;
+        continue;
+      }
+      if (voucherResp.status === 409 && record.latest?.updated_at) {
+        if (!await reviewLatestVoucher(record.latest)) throw new Error("已取消儲存，輸入內容仍保留");
+        currentVersion = record.latest.updated_at;
+        choices = {};
+        continue;
+      }
+      if (!voucherResp.ok) throw new Error(errText(record, "儲存修正失敗"));
+      applyRecordStatus(record);
+      if (currentId === id) {
+        currentVoucher = record.current || currentVoucher;
+        reviewedItems = {};
+        renderItems(currentVoucher.items || []);
+      }
+      if (record.mapping_skipped?.length) alert("單據已儲存，以下明細未建立共用對應：\n" +
+        record.mapping_skipped.map((row) => {
+          const item = record.current.items.find((it) => it.item_id === row.item_id);
+          return `${item?.description || "空白品名"}：${row.reason}`;
+        }).join("\n"));
+      return record;
     }
+  }
 
-    return record;
+  function chooseMappingConflicts(conflicts) {
+    const dialog = $("mappingConflictDialog"), body = $("mappingConflictRows");
+    body.innerHTML = conflicts.map((conflict,index) => `<tr><td>${esc(conflict.item_name)}</td>
+      <td>${conflict.old ? `${esc(conflict.old.account_code)} ${esc(conflict.old.account_name)}${conflict.old.is_active ? "" : "（已停用）"}` : "尚無規則"}</td>
+      <td>${conflict.rows.map((row) => `${esc(row.account_code)} ${esc(row.account_name)}`).join("<br>")}</td>
+      <td><select data-conflict-index="${index}"><option value="local">只修改本張</option>
+      ${conflict.rows.map((row) => `<option value="${esc(row.item_id)}">更新共用規則：${esc(row.account_code)} ${esc(row.account_name)}</option>`).join("")}</select></td></tr>`).join("");
+    return new Promise((resolve) => {
+      let finished = false;
+      const finish = (value) => { if (!finished) { finished = true; dialog.close(); resolve(value); } };
+      $("mappingConflictCancel").onclick = () => finish(null);
+      dialog.oncancel = () => finish(null);
+      dialog.onclose = () => finish(null);
+      $("mappingConflictContinue").onclick = () => {
+        const choices = {};
+        body.querySelectorAll("select").forEach((select) => {
+          const conflict = conflicts[Number(select.dataset.conflictIndex)];
+          choices[conflict.item_name_key] = select.value === "local" ? {action:"local"} : {
+            action:"update", expected_version:conflict.expected_version, item_id:select.value};
+        });
+        finish(choices);
+      };
+      dialog.showModal();
+    });
+  }
+
+  function reviewLatestVoucher(latest) {
+    const local = collectForm(), remote = latest.current || {};
+    const spec = DOC_TYPES[local.doc_type_key] || {};
+    const labels = Object.fromEntries((spec.fields || []).map((f) => [f.key, f.label]));
+    const rows = [];
+    const display = (value) => value == null ? "—" : typeof value === "object" ? JSON.stringify(value) : String(value);
+    const add = (label, saved, input) => {
+      if (display(saved) !== display(input)) rows.push(`<tr><th>${esc(label)}</th><td>${esc(display(saved))}</td><td>${esc(display(input))}</td></tr>`);
+    };
+    const companyName = (id) => { const c = companyRecords.find((c) => c.id === id); return c?.short || c?.name || "未指定"; };
+    add("歸屬公司", companyName(latest.company_id), companyName(selectedCompanyId()));
+    add("單據類型", remote.doc_type, local.doc_type);
+    for (const key of new Set([...Object.keys(remote.fields || {}), ...Object.keys(local.fields || {})]))
+      add(labels[key] || key, remote.fields?.[key], local.fields?.[key]);
+    add("摘要／備註", remote.note, local.note);
+    const itemText = (items) => (items || []).map((row) => [row.description, row.account_code, row.account_name,
+      row.quantity == null ? "" : `數量 ${row.quantity}`, row.amount == null ? "" : `金額 ${row.amount}`].filter(Boolean).join("／")).join("\n");
+    add("明細", itemText(remote.items), itemText(local.items));
+    $("voucherVersionRows").innerHTML = rows.join("") || '<tr><td colspan="3">最新版本已有其他保存紀錄，請確認是否以目前輸入儲存。</td></tr>';
+    const dialog = $("voucherVersionDialog");
+    return new Promise((resolve) => {
+      let finished = false;
+      const finish = (value) => { if (!finished) { finished = true; dialog.close(); resolve(value); } };
+      $("voucherVersionCancel").onclick = () => finish(false);
+      $("voucherVersionContinue").onclick = () => finish(true);
+      dialog.oncancel = () => finish(false);
+      dialog.onclose = () => finish(false);
+      dialog.showModal();
+    });
   }
 
   async function withEditLock(fn) {
@@ -814,7 +1001,7 @@
 
   async function saveDraft(returnToImport = false) {
     try {
-      const saved = await persistCurrentEdits();
+      const saved = await persistCurrentEdits("save");
       if (returnToImport && currentId === saved.id) {
         clearReview();
         fileInput.value = "";
@@ -833,12 +1020,7 @@
 
   async function confirmCurrent() {
     try {
-      const saved = await persistCurrentEdits();
-      const resp = await fetch(`/api/vouchers/${saved.id}/confirm`, {
-        method: "POST", headers: json(), body: JSON.stringify({ expected_updated_at: saved.updated_at }),
-      });
-      if (!resp.ok) throw new Error(await responseError(resp, "確認失敗"));
-      applyRecordStatus(await resp.json());
+      await persistCurrentEdits("confirm");
       toast("已確認，可納入日記帳");
       loadList();
     } catch (err) {
@@ -1065,12 +1247,18 @@
   });
   $("revCompanySel").addEventListener("change", async () => {
     if (!currentId) return;
-    const company = $("revCompanySel").value;
-    const r = await fetch(`/api/vouchers/${currentId}/company`, { method: "POST", headers: json(), body: JSON.stringify({ company }) });
-    if (!r.ok) { alert(`歸屬公司儲存失敗（HTTP ${r.status}）`); return; }
-    applyRecordStatus(await r.json());
-    toast(company ? `歸屬公司已設為 ${company}` : "已清除歸屬公司");
-    loadList();
+    try {
+      await loadItemAccountChart();
+      if ($("revForm").classList.contains("prepared")) {
+        const company = companyRecords.find((c) => c.id === selectedCompanyId());
+        const r = await fetch(`/api/vouchers/${currentId}/company`, { method:"POST",headers:json(),
+          body:JSON.stringify({company:company?.account_chart_key || ""})});
+        if (!r.ok) throw new Error(await responseError(r, "歸屬公司儲存失敗"));
+        applyRecordStatus(await r.json());
+      } else {
+        await Promise.all(Array.from($("itemsBody").querySelectorAll("tr")).map(refreshItemMatch));
+      }
+    } catch (err) { alert(err.message); }
   });
   $("revTypeSel").addEventListener("change", async () => {
     if (!currentId) return;
@@ -1235,9 +1423,9 @@
   async function printVoucher() {
     const preview = window.open("", "_blank");
     if (!preview) { alert("請允許開啟列印視窗"); return; }
-    const response = await fetch(`/api/vouchers/${currentId}`, {method:"PUT",headers:json(),body:JSON.stringify(collectForm())});
-    if (!response.ok) { preview.close(); alert("列印前儲存失敗"); return; }
-    const record = await response.json();
+    let record;
+    try { record = await persistCurrentEdits(); }
+    catch (error) { preview.close(); alert(`列印前儲存失敗：${error.message}`); return; }
     const v = record.current || {}; currentVoucher = v;
     const specs = itemSpecs();
     const items = (v.items || []).map((i) => `<tr>${specs.map((f) => `<td>${f.kind === "number" ? nf(i[f.key]) : esc(i[f.key])}</td>`).join("")}</tr>`).join("");
@@ -1322,10 +1510,12 @@
   let COMPANIES = [];
   async function loadCompanies() {
     const data = await (await fetch("/api/companies")).json();
+    companyRecords = data.companies || [];
     COMPANIES = (data.companies || []).map((c) => c.short || c.name);
     const opts = COMPANIES.map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join("");
     $("uploadCompany").innerHTML = `<option value="">未指定</option>` + opts;
-    $("revCompanySel").innerHTML = `<option value="">未指定</option>` + opts;
+    $("revCompanySel").innerHTML = `<option value="">未指定</option>` + companyRecords.map((c) =>
+      `<option value="${esc(c.id)}">${esc(c.short || c.name)}</option>`).join("");
   }
 
   // ── 左右欄可拖拉調整寬度 ──

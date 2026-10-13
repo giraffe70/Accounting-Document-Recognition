@@ -26,6 +26,18 @@ def validate_tax_id(tax_id: str) -> bool:
 
 def load_companies() -> list:
     global _companies
+    from app.db.models import Company
+    from app.db.session import get_session
+    from app.services.companies import public
+    from sqlalchemy.exc import OperationalError
+    from sqlmodel import select
+    try:
+        with get_session() as session:
+            registered = session.exec(select(Company)).all()
+            if registered:
+                return [public(company) for company in registered]
+    except OperationalError:
+        pass  # Before first startup/migration, the existing JSON remains readable.
     if _companies is None:
         path = config.DATA_DIR / "companies.json"
         if path.exists():

@@ -25,6 +25,10 @@ class DatabaseViewTests(unittest.TestCase):
                 id INTEGER PRIMARY KEY, company TEXT, current_json TEXT,
                 correction_note TEXT DEFAULT '', confirmed_at TEXT
             );
+            CREATE TABLE companies (id INTEGER PRIMARY KEY, name TEXT, short TEXT, tax_id TEXT, account_chart_key TEXT);
+            CREATE TABLE item_account_mappings (id INTEGER PRIMARY KEY, company_id INTEGER, item_name_key TEXT,
+                account_code TEXT, account_name TEXT, created_at TEXT, updated_at TEXT);
+            CREATE TABLE mapping_history (id INTEGER PRIMARY KEY, mapping_id INTEGER, version INTEGER, created_at TEXT);
             CREATE TABLE empty_table (id INTEGER PRIMARY KEY);
         """)
         con.executemany("INSERT INTO voucher_records (id, company, current_json) VALUES (?, ?, ?)",
@@ -122,12 +126,40 @@ class DatabaseViewTests(unittest.TestCase):
         for table in tables:
             columns = self.rows(table=table["name"]).json()["columns"]
             self.assertTrue(all(c["label"] for c in columns))
-        self.assertEqual(sum(len(meta["columns"]) for meta in database_view.TABLE_META.values()), 89)
+        self.assertEqual(sum(len(meta["columns"]) for meta in database_view.TABLE_META.values()), 121)
         voucher_labels = database_view.TABLE_META[("app", "voucher_records")]["columns"]
         for legacy in ("clerk_note", "accountant_note", "dev_note",
                        "clerk_reviewed_at", "accountant_approved_at"):
             self.assertNotIn(legacy, voucher_labels)
-        self.assertEqual(len(database_view.TABLE_META), 8)
+        self.assertEqual(len(database_view.TABLE_META), 11)
+        self.assertEqual(next(t for t in tables if t["name"] == "item_account_mappings")["label"], "品名科目對應")
+        self.assertEqual(next(t for t in tables if t["name"] == "mapping_history")["label"], "品名科目對應歷程")
+
+    def test_item_mapping_timestamps_are_marked_utc(self):
+        self.login()
+        for table, expected in (("item_account_mappings", {"created_at", "updated_at"}),
+                                ("mapping_history", {"created_at"})):
+            columns = self.rows(table=table).json()["columns"]
+            marked = {column["name"] for column in columns if column["utc"]}
+            self.assertEqual(marked, expected)
+
+    def test_app_item_mapping_utc_dates_filter_by_taipei_calendar_day(self):
+        self.login()
+        with closing(sqlite3.connect(self.db)) as con:
+            con.executemany("""INSERT INTO item_account_mappings
+                (id, company_id, item_name_key, account_code, account_name, created_at, updated_at)
+                VALUES (?, 1, ?, '00600', '文具費', ?, ?)""", [
+                    (1, "日界線前", "2026-09-22T15:59:00+00:00", "2026-09-22T15:59:00+00:00"),
+                    (2, "日界線後", "2026-09-22T16:01:00+00:00", "2026-09-22T16:01:00+00:00"),
+                    (3, "隔日較晚", "2026-09-23T02:00:00+00:00", "2026-09-23T02:00:00+00:00"),
+                ])
+            con.commit()
+        before = self.rows(table="item_account_mappings", date_from="2026-09-22",
+                           date_to="2026-09-22").json()
+        after = self.rows(table="item_account_mappings", date_from="2026-09-23",
+                          date_to="2026-09-23").json()
+        self.assertEqual([row["id"] for row in before["rows"]], [1])
+        self.assertEqual([row["id"] for row in after["rows"]], [2, 3])
 
     def test_voucher_date_status_and_keyword_are_combined(self):
         self.login()

@@ -19,12 +19,14 @@ const vm = require('vm');
 const input = JSON.parse(fs.readFileSync(0, 'utf8'));
 const source = input.source;
 const start = source.indexOf('  async function responseError(');
-const end = source.indexOf('  $("btnConfirm").addEventListener("click"', start);
+const end = source.indexOf('  const json = () =>', start);
 if (start < 0 || end < 0) throw new Error('could not locate production confirmation functions');
 const code = source.slice(start, end);
 const events = [];
 const nodes = {
-  'revCompanySel': { value: 'company-1' },
+  'revCompanySel': { value: '1' },
+  'itemsBody': { querySelectorAll: () => [] },
+  'revForm': { querySelectorAll: () => [] },
   'btnSave': { disabled: false, addEventListener: () => {} },
   'btnConfirm': { disabled: false, addEventListener: () => {} },
   'btnReturnImport': { disabled: false, addEventListener: () => {} },
@@ -32,6 +34,9 @@ const nodes = {
 };
 let currentId = input.currentId ?? 12;
 let currentVoucher = { fields: { amount: 125 }, status: 'pending' };
+let currentVersion = 'original-ts';
+let reviewedItems = input.reviewedItems || {};
+let saveCalls = 0;
 let editBusy = false;
 let inferBusy = 0;
 const fileInput = { value: 'selected-file' };
@@ -42,6 +47,9 @@ function $(id) { return nodes[id] || null; }
 function collectForm() { return { fields: { amount: 125 }, entries: [] }; }
 function json() { return { 'Content-Type': 'application/json' }; }
 function applyRecordStatus(record) { events.push({ type: 'status', id: record.id, status: record.status }); }
+async function refreshItemMatch() {}
+function selectedCompanyId() { return 1; }
+function renderItems() { events.push({ type: 'renderItems' }); }
 function clearReview() { events.push({ type: 'clearReview' }); currentId = null; }
 function setStage(stage) { events.push({ type: 'setStage', stage }); }
 function loadList() { events.push({ type: 'loadList' }); }
@@ -54,41 +62,40 @@ function response(ok, status, body) {
 async function fetch(url, options = {}) {
   const parsed = options.body ? JSON.parse(options.body) : null;
   events.push({ type: 'fetch', url, method: options.method || 'GET', body: parsed });
-  const path = url.endsWith('/company') ? 'company' :
-    url.endsWith('/confirm') ? 'confirm' :
-    options.method === 'PUT' ? 'put' : 'other';
-  if (path === input.failAt) return response(false, input.failStatus || 500, { detail: `${path} failed` });
-  if (path === 'company') return response(true, 200, { id: 12, status: 'pending', updated_at: 'company-ts' });
-  if (path === 'put') {
-    if (input.switchCurrentOnPut) currentId = input.switchCurrentOnPut;
-    return response(true, 200, {
-      id: 12, status: 'pending', updated_at: 'put-ts', current: currentVoucher,
-    });
-  }
-  if (path === 'confirm') {
-    const status = input.confirmStatus || 200;
-    return response(status >= 200 && status < 300, status,
-      status === 200 ? { id: 12, status: 'confirmed', updated_at: 'confirm-ts' } : { detail: 'stale record' });
-  }
-  throw new Error(`unexpected request ${options.method || 'GET'} ${url}`);
+  if (!url.endsWith('/save')) throw new Error(`unexpected request ${options.method || 'GET'} ${url}`);
+  const status = input.saveStatuses?.[saveCalls] || input.saveStatus || 200;
+  saveCalls += 1;
+  if (status === 409 && input.latest) return response(false, 409, { latest: input.latest });
+  if (status < 200 || status >= 300) return response(false, status, { detail: 'stale record' });
+  return response(true, status, { id: 12, status: parsed.action === 'confirm' ? 'confirmed' : 'pending',
+    updated_at: 'saved-ts', current: currentVoucher });
 }
 
 const context = {
   console, events, nodes, input, get currentId() { return currentId; },
-  set currentId(value) { currentId = value; }, currentVoucher, editBusy, inferBusy,
+  set currentId(value) { currentId = value; }, currentVoucher, currentVersion,
+  reviewedItems, editBusy, inferBusy,
   fileInput, progressText, progress, barFill, $, collectForm, json, applyRecordStatus,
+  refreshItemMatch, selectedCompanyId, renderItems,
   clearReview, setStage, loadList, alert, toast, fetch,
 };
 vm.createContext(context);
-vm.runInContext(`${code}\nglobalThis.api = { confirmCurrent, saveDraft };`, context);
+vm.runInContext(`${code}
+globalThis.reviewLatestVoucher = async (latest) => {
+  events.push({ type: 'reviewLatestVoucher', latest });
+  return !!input.acceptLatest;
+};
+globalThis.api = { confirmCurrent, saveDraft, persistCurrentEdits };`, context);
 (async () => {
   if (input.action === 'confirm') await vm.runInContext('confirmCurrent()', context);
+  else if (input.action === 'temporary') await vm.runInContext('persistCurrentEdits()', context);
   else await vm.runInContext(`saveDraft(${input.returnToImport ? 'true' : 'false'})`, context);
   process.stdout.write(JSON.stringify({
     events,
     fileValue: context.fileInput.value,
     dirValue: context.nodes.dirInput.value,
     currentId: vm.runInContext('currentId', context),
+    currentVersion: vm.runInContext('currentVersion', context),
   }));
 })().catch((error) => { console.error(error.stack || error); process.exit(1); });
 """
@@ -174,7 +181,9 @@ const context = { console, events, requests, input, nodes, $, currentUser, fileI
   get currentVoucher() { return currentVoucher; }, set currentVoucher(v) { currentVoucher = v; },
   get currentManualEntry() { return currentManualEntry; }, set currentManualEntry(v) { currentManualEntry = v; },
   get currentIsImport() { return currentIsImport; }, set currentIsImport(v) { currentIsImport = v; },
-  editBusy, inferBusy, cropping, stageAction, DOC_TYPES: { other: { fields: [] } },
+  editBusy, inferBusy, cropping, stageAction, currentVersion: '', reviewedItems: { stale: true },
+  DOC_TYPES: { other: { fields: [] } },
+  async loadItemAccountChart() { events.push({ type: 'loadItemAccountChart', company: node('revCompanySel').value }); },
   setCropMode, setStatus, setPendingActionVisibility, populateTypeSel, buildActiveFields, renderFields, renderItems,
   renderTaxcheck, renderDatecheck, renderAmountcheck, renderEntries, setupImage, renderPages, sourceHintHtml, sourceTrace,
   esc, loadList, alert, toast, confirm, json, persistCurrentEdits, withInferProgress, fetch };
@@ -187,6 +196,8 @@ vm.runInContext(reviewCode + '\nglobalThis.api = { openReview, clearReview, appl
     await context.api.openReview(input.recordId);
     out.currentId = currentId;
     out.manualEntry = currentManualEntry;
+    out.currentVersion = context.currentVersion;
+    out.reviewedItems = context.reviewedItems;
     out.absentNodes = [...removed].every((id) => !nodes[id]);
   } else if (input.action === 'role') {
     context.api.applyRole();
@@ -380,7 +391,8 @@ class ConfirmationFrontendTests(unittest.TestCase):
 
     @staticmethod
     def review_record(manual_entry=False):
-        return {"id": 12, "status": "pending", "manual_entry": manual_entry, "current": {"fields": {}, "items": [], "entries": []}}
+        return {"id": 12, "status": "pending", "manual_entry": manual_entry, "company_id": 3,
+                "updated_at": "version-12", "current": {"fields": {}, "items": [], "entries": []}}
 
     @staticmethod
     def requests(result):
@@ -390,64 +402,80 @@ class ConfirmationFrontendTests(unittest.TestCase):
     def event_types(result):
         return [event["type"] for event in result["events"]]
 
-    def test_confirm_persists_company_and_content_then_uses_voucher_timestamp(self):
+    def test_confirm_uses_one_atomic_save_with_confirm_action(self):
         result = self.run_flow(action="confirm")
 
         requests = self.requests(result)
-        self.assertEqual([request["url"].rsplit("/", 1)[-1] for request in requests], [
-            "company", "12", "confirm",
-        ])
-        self.assertEqual([request["method"] for request in requests], ["POST", "PUT", "POST"])
-        self.assertEqual(requests[-1]["body"], {"expected_updated_at": "put-ts"})
+        self.assertEqual([request["url"] for request in requests], ["/api/vouchers/12/save"])
+        self.assertEqual([request["method"] for request in requests], ["POST"])
+        self.assertEqual(requests[0]["body"]["action"], "confirm")
+        self.assertEqual(requests[0]["body"]["company_id"], 1)
+        self.assertEqual(requests[0]["body"]["expected_updated_at"], "original-ts")
         self.assertIn("已確認", " ".join(e["message"] for e in result["events"] if e["type"] == "toast"))
 
-    def test_confirm_does_not_run_when_any_persist_step_fails(self):
-        for failed_step, expected_count in (("company", 1), ("put", 2)):
-            with self.subTest(failed_step=failed_step):
-                result = self.run_flow(action="confirm", failAt=failed_step)
-                self.assertEqual(len(self.requests(result)), expected_count)
-                self.assertNotIn("confirm", [r["url"].rsplit("/", 1)[-1] for r in self.requests(result)])
-                self.assertFalse(any(e["type"] == "toast" for e in result["events"]))
-                self.assertTrue(any(e["type"] == "alert" for e in result["events"]))
-
-    def test_confirm_conflict_is_not_reported_as_success(self):
-        result = self.run_flow(action="confirm", confirmStatus=409)
-
-        self.assertEqual(self.requests(result)[-1]["url"], "/api/vouchers/12/confirm")
-        self.assertFalse(any(e["type"] == "toast" and "已確認" in e["message"] for e in result["events"]))
-        self.assertTrue(any(e["type"] == "alert" and "確認失敗" in e["message"] for e in result["events"]))
-
-    def test_draft_and_return_to_import_never_call_confirm(self):
-        draft = self.run_flow(action="draft")
-        self.assertEqual(len(self.requests(draft)), 2)
-        self.assertFalse(any(request["url"].endswith("/confirm") for request in self.requests(draft)))
-        self.assertFalse(any(event["type"] in {"clearReview", "setStage"} for event in draft["events"]))
-
+    def test_save_return_and_default_temporary_send_the_right_action(self):
+        saved = self.run_flow(action="draft")
         returned = self.run_flow(action="draft", returnToImport=True)
-        self.assertEqual(len(self.requests(returned)), 2)
-        self.assertFalse(any(request["url"].endswith("/confirm") for request in self.requests(returned)))
+        temporary = self.run_flow(action="temporary")
+        self.assertEqual(saved["events"][0]["body"]["action"], "save")
+        self.assertEqual(returned["events"][0]["body"]["action"], "save")
+        self.assertEqual(temporary["events"][0]["body"]["action"], "temporary")
+        self.assertEqual(len(self.requests(saved)), 1)
+        self.assertFalse(any(event["type"] in {"clearReview", "setStage"} for event in saved["events"]))
         self.assertLess(self.event_types(returned).index("clearReview"), self.event_types(returned).index("setStage"))
-        self.assertIn({"type": "setStage", "stage": "import"}, returned["events"])
         self.assertEqual(returned["fileValue"], "")
         self.assertEqual(returned["dirValue"], "")
 
-    def test_return_to_import_waits_for_all_saves_and_same_record(self):
-        for failed_step in ("company", "put"):
-            with self.subTest(failed_step=failed_step):
-                result = self.run_flow(action="draft", returnToImport=True, failAt=failed_step)
+    def test_failed_save_and_conflict_keep_review_input_open(self):
+        for status in (500, 409):
+            with self.subTest(status=status):
+                result = self.run_flow(action="draft", returnToImport=True, saveStatus=status)
+                self.assertEqual(len(self.requests(result)), 1)
                 self.assertFalse(any(e["type"] in {"clearReview", "setStage"} for e in result["events"]))
                 self.assertEqual(result["fileValue"], "selected-file")
                 self.assertEqual(result["dirValue"], "directory-selection")
-                self.assertTrue(any(e["type"] == "alert" for e in result["events"]))
+                self.assertEqual(result["currentId"], 12)
+                self.assertTrue(any(e["type"] == "alert" and "儲存失敗" in e["message"] for e in result["events"]))
 
-        switched = self.run_flow(action="draft", returnToImport=True, switchCurrentOnPut=99)
-        self.assertFalse(any(e["type"] in {"clearReview", "setStage"} for e in switched["events"]))
-        self.assertEqual(switched["fileValue"], "selected-file")
+    def test_latest_version_conflict_cancel_keeps_inputs_and_does_not_retry(self):
+        latest = {"updated_at": "latest-ts", "company_id": 1,
+                  "current": {"fields": {"amount": 200}, "items": []}}
+        result = self.run_flow(action="draft", returnToImport=True,
+                               saveStatuses=[409], latest=latest, acceptLatest=False)
+
+        requests = self.requests(result)
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0]["body"]["expected_updated_at"], "original-ts")
+        self.assertEqual(result["currentId"], 12)
+        self.assertEqual(result["currentVersion"], "original-ts")
+        self.assertEqual(result["fileValue"], "selected-file")
+        self.assertEqual(result["dirValue"], "directory-selection")
+        self.assertFalse(any(e["type"] in {"clearReview", "setStage"} for e in result["events"]))
+
+    def test_latest_version_conflict_accept_retries_same_local_payload_at_latest_version(self):
+        latest = {"updated_at": "latest-ts", "company_id": 1,
+                  "current": {"fields": {"amount": 200}, "items": []}}
+        result = self.run_flow(action="draft", saveStatuses=[409, 200], latest=latest, acceptLatest=True)
+
+        requests = self.requests(result)
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(result["currentVersion"], "latest-ts")
+        self.assertEqual(requests[0]["body"]["expected_updated_at"], "original-ts")
+        self.assertEqual(requests[1]["body"]["expected_updated_at"], "latest-ts")
+        first_payload, retry_payload = requests[0]["body"], requests[1]["body"]
+        self.assertEqual(first_payload["action"], retry_payload["action"])
+        self.assertEqual(first_payload["company_id"], retry_payload["company_id"])
+        self.assertEqual(first_payload["voucher"], retry_payload["voucher"])
+        self.assertEqual(first_payload["reviewed_items"], retry_payload["reviewed_items"])
 
     def test_review_opens_and_role_visibility_works_without_removed_elements(self):
         opened = self.run_review(action="open", recordId=12, records={"12": self.review_record(True)})
         self.assertEqual(opened["currentId"], 12)
         self.assertTrue(opened["manualEntry"])
+        self.assertEqual(opened["currentVersion"], "version-12")
+        self.assertEqual(opened["reviewedItems"], {})
+        chart_loads = [e for e in opened["events"] if e["type"] == "loadItemAccountChart"]
+        self.assertEqual(chart_loads, [{"type": "loadItemAccountChart", "company": "3"}])
         self.assertTrue(opened["absentNodes"])
 
         clerk = self.run_review(action="role", role="clerk")
@@ -469,7 +497,7 @@ class ConfirmationFrontendTests(unittest.TestCase):
     def test_re_recognition_manual_entry_prompt_cancel_and_accept(self):
         records = {"12": self.review_record(True)}
         cancelled = self.run_review(action="recognize", recordId=12, records=records, acceptConfirm=False)
-        self.assertEqual([e["type"] for e in cancelled["events"]], ["loadList", "confirm"])
+        self.assertEqual([e["type"] for e in cancelled["events"]], ["loadItemAccountChart", "loadList", "confirm"])
         self.assertEqual([r["method"] for r in cancelled["requests"]], ["GET"])
 
         accepted = self.run_review(action="recognize", recordId=12, records=records, acceptConfirm=True)

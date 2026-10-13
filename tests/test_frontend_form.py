@@ -32,9 +32,11 @@ const fieldNodes = Object.fromEntries(Object.entries(input.fieldInputs || {}).ma
 const rows = (input.rows || []).map((row) => ({
   dataset: { original: row.original || '{}' },
   querySelectorAll: (selector) => selector === '[data-item-key]' ? row.inputs : [],
+  querySelector: (selector) => selector === '.remember-mapping' ? { checked: row.remember !== false } : null,
 }));
 const nodes = {
   revTypeSel: { value: input.typeKey },
+  revCompanySel: { value: String(input.companyId ?? 3) },
   itemsBody: { querySelectorAll: (selector) => selector === 'tr' ? rows : [] },
   'f-note': { value: input.note || '' },
   addItem: { addEventListener: () => {} },
@@ -46,6 +48,9 @@ const context = {
   DOC_TYPES: input.docTypes,
   currentVoucher: input.voucher,
   activeFields: input.activeFields,
+  selectedCompanyId: () => input.companyId ?? 3,
+  itemContext: (company, name) => JSON.stringify([company, String(name || '').trim().replace(/\s+/g, ' ')]),
+  newItemId: () => 'generated-item-id',
   $: (id) => nodes[id] || null,
 };
 vm.createContext(context);
@@ -158,6 +163,45 @@ class FrontendFormRegressionTests(unittest.TestCase):
         item = result["collected"]["items"][0]
         self.assertEqual(item["quantity"], "about 3")
         self.assertEqual(item["legacyattr"], hostile)
+
+    def test_account_fields_lead_each_row_and_manual_codes_keep_leading_zeroes(self):
+        inputs = [
+            {"dataset": {"itemKey": "account_code", "kind": "text"}, "type": "text", "value": "00120"},
+            {"dataset": {"itemKey": "account_name", "kind": "text"}, "type": "text", "value": "手填科目"},
+            {"dataset": {"itemKey": "description", "kind": "text"}, "type": "text", "value": "零件"},
+        ]
+        result = self.run_form(
+            typeKey="other", activeFields=[],
+            voucher={"doc_type_key": "other", "fields": {}, "items": []},
+            rows=[{"original": "{}", "inputs": inputs, "remember": False}],
+            rowItem={"account_code": "00120", "account_name": "手填科目", "description": "零件",
+                     "remember_mapping": False},
+        )
+
+        specs = result["itemSpecs"]
+        self.assertEqual([field["key"] for field in specs[:2]], ["account_code", "account_name"])
+        self.assertLess(result["itemHtml"].index('data-item-key="account_code"'),
+                        result["itemHtml"].index('data-item-key="description"'))
+        self.assertIn('data-item-key="account_code" data-kind="text" type="text" list="itemAccountCodes" value="00120"',
+                      result["itemHtml"])
+        self.assertIn('class="remember-mapping" >記住對應', result["itemHtml"])
+        item = result["collected"]["items"][0]
+        self.assertEqual(item["account_code"], "00120")
+        self.assertEqual(item["account_name"], "手填科目")
+        self.assertFalse(item["remember_mapping"])
+
+    def test_empty_metadata_only_item_is_filtered(self):
+        result = self.run_form(
+            typeKey="other", activeFields=[],
+            voucher={"doc_type_key": "other", "fields": {}, "items": []},
+            rows=[{"original": json.dumps({"item_id": "empty-id", "mapping_id": None,
+                                            "mapping_version": None, "account_source": "",
+                                            "account_needs_review": False, "account_updated_by": None,
+                                            "account_updated_by_name": "", "account_updated_at": None},
+                   ensure_ascii=False),
+                   "inputs": [], "remember": True}],
+        )
+        self.assertEqual(result["collected"]["items"], [])
 
 
 class ValidationTimingFrontendContractTests(unittest.TestCase):

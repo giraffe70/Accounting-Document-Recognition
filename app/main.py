@@ -18,7 +18,7 @@ from app.db.models import ReviewStatus, VoucherRecord
 from app.db.session import init_db
 from app.models.schemas import ConfigUpdate, Voucher
 from app.services import (accounts, auth, backup, classify, database_view, importdecl, journal,
-                          reports, review, sysconfig, taxid)
+                          reports, review, sysconfig, taxid, companies, item_account_mapping)
 
 _LOG_FMT = "[%(asctime)s] %(levelname)s %(name)s: %(message)s"
 logging.basicConfig(level=logging.INFO, format=_LOG_FMT)
@@ -35,6 +35,12 @@ app = FastAPI(title="憑證辨識系統 API")
 @app.exception_handler(review.RecognitionProtected)
 async def recognition_protected_handler(request, exc):
     return JSONResponse({"ok": False, "detail": str(exc)}, status_code=409)
+
+
+@app.exception_handler(item_account_mapping.MappingConflict)
+async def mapping_conflict_handler(request, exc):
+    return JSONResponse({"ok": False, "detail": str(exc), "conflicts": exc.conflicts,
+                         "latest": exc.latest}, status_code=409)
 
 
 init_db()
@@ -217,10 +223,29 @@ def api_companies():
 
 
 @app.get("/api/accounts")
-def api_get_accounts(company: str = ""):
+def api_get_accounts(company: str = "", company_id: int | None = None, strict: bool = False):
     """該公司的科目表（各公司科目代號不同；未自訂者回退通用表）。"""
-    return {"accounts": accounts.load_accounts(company), "company": company,
+    if company_id is not None:
+        with review.get_session() as session:
+            registered = companies.resolve(session, company_id=company_id)
+            if not registered:
+                return JSONResponse({"detail": "歸屬公司不存在"}, status_code=422)
+            company = registered.account_chart_key
+    return {"accounts": accounts.load_accounts(company, strict=strict), "company": company,
             "with_chart": accounts.companies_with_chart()}
+
+
+@app.post("/api/item-account-mappings/lookup")
+def api_lookup_item_accounts(payload: dict = Body(...)):
+    with review.get_session() as session:
+        company_id = payload.get("company_id")
+        if company_id is not None and (not isinstance(company_id, int) or isinstance(company_id, bool) or
+                not companies.resolve(session, company_id=company_id)):
+            return JSONResponse({"detail": "歸屬公司不存在"}, status_code=422)
+        rows = payload.get("items") or []
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            return JSONResponse({"detail": "明細格式不合法"}, status_code=422)
+        return {"company_id": company_id, "items": item_account_mapping.lookup(session, company_id, rows)}
 
 
 @app.post("/api/accounts")
@@ -407,6 +432,7 @@ async def _save_upload(file: UploadFile) -> Path:
 def _rec_to_dict(rec: VoucherRecord, full: bool = False) -> dict:
     d = {
         "id": rec.id, "source_file": rec.source_file, "company": rec.company,
+        "company_id": rec.company_id,
         "record_role": rec.record_role, "source_parent_id": rec.source_parent_id,
         "period": rec.period, "status": rec.status, "confidence": rec.confidence,
         "structure_model": rec.structure_model, "ocr_provider": rec.ocr_provider,
@@ -414,7 +440,8 @@ def _rec_to_dict(rec: VoucherRecord, full: bool = False) -> dict:
         "confirmed_at": rec.confirmed_at.isoformat() if rec.confirmed_at else "",
         "manual_entry": bool(rec.manual_entry),
         # 人工是否動過欄位：重新辨識會覆蓋 current_json，前端據此先問過使用者
-        "edited": rec.ai_json != rec.current_json,
+        "edited": item_account_mapping.strip_accounting(json.loads(rec.ai_json)) !=
+                  item_account_mapping.strip_accounting(json.loads(rec.current_json)),
         "created_at": rec.created_at.isoformat() if rec.created_at else "",
         "updated_at": rec.updated_at.isoformat() if rec.updated_at else "",
     }
@@ -494,11 +521,41 @@ def api_delete(request: Request, rec_id: int, scope: str = "record"):
 
 
 @app.put("/api/vouchers/{rec_id}")
-def api_update(rec_id: int, voucher: dict = Body(...)):
-    rec = review.update_current(rec_id, voucher)
+def api_update(request: Request, rec_id: int, voucher: dict = Body(...)):
+    from datetime import datetime
+    expected = voucher.pop("expected_updated_at", None)
+    try:
+        expected = datetime.fromisoformat(expected) if expected is not None else None
+        rec = review.update_current(rec_id, voucher, expected_updated_at=expected,
+            _actor=auth.get_user_by_token(request.cookies.get("session")), _require_account_version=True)
+    except ValueError as exc:
+        if isinstance(exc, (review.RecognitionProtected, item_account_mapping.MappingConflict)):
+            raise
+        return JSONResponse({"detail": str(exc)}, status_code=422)
     if not rec:
         return JSONResponse({"detail": "查無此紀錄"}, status_code=404)
     return _rec_to_dict(rec, full=True)
+
+
+@app.post("/api/vouchers/{rec_id}/save")
+def api_save_current(request: Request, rec_id: int, payload: dict = Body(...)):
+    from sqlalchemy.exc import IntegrityError, OperationalError
+    actor = auth.get_user_by_token(request.cookies.get("session"))
+    if not actor:
+        return JSONResponse({"detail": "未登入"}, status_code=401)
+    try:
+        rec, skipped = review.save_current(rec_id, payload, actor)
+    except ValueError as exc:
+        if isinstance(exc, (item_account_mapping.MappingConflict, review.RecognitionProtected)):
+            raise
+        return JSONResponse({"detail": str(exc)}, status_code=422)
+    except (IntegrityError, OperationalError) as exc:
+        if isinstance(exc, OperationalError) and "locked" not in str(exc).lower():
+            raise
+        return JSONResponse({"detail": "資料正被更新，請重新查詢後儲存", "conflicts": []}, status_code=409)
+    if not rec:
+        return JSONResponse({"detail": "查無此紀錄"}, status_code=404)
+    return {**_rec_to_dict(rec, full=True), "mapping_skipped": skipped}
 
 
 @app.post("/api/vouchers/{rec_id}/confirm")

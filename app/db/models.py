@@ -5,11 +5,25 @@
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
 
 from sqlmodel import Field, SQLModel
+from sqlalchemy import Column, ForeignKey, Integer, UniqueConstraint
+
+
+def utc_now():
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+class Company(SQLModel, table=True):
+    __tablename__ = "companies"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str = ""
+    short: str = ""
+    tax_id: str = ""
+    account_chart_key: str = Field(index=True, unique=True)
 
 
 class ReviewStatus(str, Enum):
@@ -40,6 +54,7 @@ class VoucherRecord(SQLModel, table=True):
     source_parent_id: Optional[int] = Field(default=None, foreign_key="voucher_records.id")
     recognition_history: str = "[]"
     company: str = ""                      # 中意/仲彬/天干（多公司支援）
+    company_id: Optional[int] = Field(default=None, foreign_key="companies.id", index=True)
     period: str = ""                       # 所屬期別 YYYY-MM（供日記帳彙整）
 
     status: ReviewStatus = Field(default=ReviewStatus.pending, index=True)
@@ -62,3 +77,41 @@ class VoucherRecord(SQLModel, table=True):
 
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
+
+
+class ItemAccountMapping(SQLModel, table=True):
+    __tablename__ = "item_account_mappings"
+    __table_args__ = (UniqueConstraint("company_id", "item_name_key", name="uq_company_item"),)
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id")
+    doc_type_key: str = ""
+    item_name: str = ""
+    item_name_key: str
+    account_code: str = ""
+    account_name: str = ""
+    source_voucher_id: Optional[int] = Field(default=None, sa_column=Column(
+        Integer, ForeignKey("voucher_records.id", ondelete="SET NULL"), nullable=True))
+    source_item_id: str = ""
+    created_by: Optional[int] = Field(default=None, foreign_key="users.id")
+    created_by_name: str = ""
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_by: Optional[int] = Field(default=None, foreign_key="users.id")
+    updated_by_name: str = ""
+    updated_at: datetime = Field(default_factory=utc_now)
+    is_active: bool = True
+    version: int = 1
+
+
+class MappingHistory(SQLModel, table=True):
+    __tablename__ = "mapping_history"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    mapping_id: int = Field(foreign_key="item_account_mappings.id", index=True)
+    version: int
+    before_json: str = "null"
+    after_json: str = "{}"
+    source_voucher_id: Optional[int] = Field(default=None, sa_column=Column(
+        Integer, ForeignKey("voucher_records.id", ondelete="SET NULL"), nullable=True))
+    source_item_id: str = ""
+    actor_id: Optional[int] = Field(default=None, foreign_key="users.id")
+    actor_name: str = ""
+    created_at: datetime = Field(default_factory=utc_now)

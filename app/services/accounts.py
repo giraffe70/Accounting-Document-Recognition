@@ -15,6 +15,20 @@ _ACCOUNTS_FILE = config.DATA_DIR / "accounts.json"
 _DEFAULT_KEY = "_default"
 
 
+def _company_key(company):
+    if not company:
+        return company
+    from app.db.session import get_session
+    from app.services.companies import resolve
+    from sqlalchemy.exc import OperationalError
+    try:
+        with get_session() as session:
+            registered = resolve(session, company)
+            return registered.account_chart_key if registered else company
+    except OperationalError:
+        return company
+
+
 def _load_all() -> dict:
     if not _ACCOUNTS_FILE.exists():
         return {}
@@ -38,17 +52,19 @@ def _clean(accounts: list) -> list:
     return out
 
 
-def load_accounts(company: str = "") -> list:
+def load_accounts(company: str = "", *, strict: bool = False) -> list:
     """取該公司的科目表；該公司沒有自己的表時回退到 _default。"""
     all_ = _load_all()
+    company = _company_key(company)
     if company and all_.get(company):
         return all_[company]
-    return all_.get(_DEFAULT_KEY, [])
+    return [] if strict else all_.get(_DEFAULT_KEY, [])
 
 
 def save_accounts(accounts: list, company: str = "") -> list:
     """整表覆蓋儲存該公司的科目表（company 留空＝通用表）。"""
     all_ = _load_all()
+    company = _company_key(company)
     clean = _clean(accounts)
     all_[company or _DEFAULT_KEY] = clean
     _ACCOUNTS_FILE.write_text(json.dumps(all_, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -57,7 +73,10 @@ def save_accounts(accounts: list, company: str = "") -> list:
 
 def companies_with_chart() -> list:
     """有自訂科目表的公司別（供前端下拉標示）。"""
-    return [k for k in _load_all() if k != _DEFAULT_KEY]
+    keys = [k for k in _load_all() if k != _DEFAULT_KEY]
+    from app.services.taxid import load_companies
+    return list(dict.fromkeys([*keys, *(c.get("short") or c.get("name") for c in load_companies()
+                                      if c.get("account_chart_key") in keys)]))
 
 
 def as_prompt_list(company: str = "") -> str:

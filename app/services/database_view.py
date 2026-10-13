@@ -53,6 +53,39 @@ TABLE_META = {
             "created_at": "建立時間", "updated_at": "更新時間",
         },
     },
+    ("app", "companies"): {
+        "label": "公司資料", "description": "公司名稱、統編及科目表設定。",
+        "columns": {
+            "id": "公司編號", "name": "公司名稱", "short": "公司簡稱",
+            "tax_id": "統一編號", "account_chart_key": "科目表識別碼",
+        },
+    },
+    ("app", "item_account_mappings"): {
+        "label": "品名科目對應", "description": "按公司及正規化品名保存的科目對應規則；單據類型供追溯。",
+        "date_label": "規則更新日期", "date_column": "updated_at",
+        "utc_columns": ("created_at", "updated_at"),
+        "columns": {
+            "id": "規則編號", "company_id": "公司編號", "doc_type_key": "來源單據類型",
+            "item_name": "品名", "item_name_key": "正規化品名",
+            "account_code": "科目代碼", "account_name": "科目名稱",
+            "source_voucher_id": "來源憑證編號", "source_item_id": "來源明細編號",
+            "created_by": "建立者編號", "created_by_name": "建立者名稱",
+            "created_at": "建立時間", "updated_by": "更新者編號",
+            "updated_by_name": "更新者名稱", "updated_at": "更新時間",
+            "is_active": "啟用狀態", "version": "規則版本",
+        },
+    },
+    ("app", "mapping_history"): {
+        "label": "品名科目對應歷程", "description": "品名科目對應規則各版本的異動前後內容及來源。",
+        "date_label": "歷程建立日期", "date_column": "created_at",
+        "utc_columns": ("created_at",),
+        "columns": {
+            "id": "歷程編號", "mapping_id": "規則編號", "version": "規則版本",
+            "before_json": "異動前內容", "after_json": "異動後內容",
+            "source_voucher_id": "來源憑證編號", "source_item_id": "來源明細編號",
+            "actor_id": "操作者編號", "actor_name": "操作者名稱", "created_at": "建立時間",
+        },
+    },
     ("validation", "datasets"): {
         "label": "驗證資料集", "description": "用於測試辨識效果的一批來源檔案及頁面。",
         "date_label": "資料集建立日期", "date_column": "created_at",
@@ -140,11 +173,12 @@ def table_info(database, table):
     }
 
 
-def date_expression(database, date_column):
+def date_expression(database, date_column, table=None):
     if date_column == "current_json.date":
         return "date(CASE WHEN json_valid(\"current_json\") THEN json_extract(\"current_json\", '$.date') END)"
     column = quote(date_column)
-    return f"date({column}, '+8 hours')" if database == "validation" else f"date({column})"
+    utc = database == "validation" or date_column in TABLE_META.get((database, table), {}).get("utc_columns", ())
+    return f"date({column}, '+8 hours')" if utc else f"date({column})"
 
 
 def databases():
@@ -223,7 +257,7 @@ def list_rows(database: str, table: str, q: str = Query("", max_length=200),
             clauses.append("(" + " OR ".join(predicates) + ")" if predicates else "0")
             params = [q] * len(visible)
         if date_from or date_to:
-            expression = date_expression(database, meta["date_column"])
+            expression = date_expression(database, meta["date_column"], table)
             if date_from:
                 clauses.append(f"{expression} >= ?")
                 params.append(date_from.isoformat())

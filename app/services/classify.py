@@ -49,7 +49,8 @@ def _voucher_brief(v: Voucher) -> dict:
     # Audit history stays stored; classification needs current evidence, not every past edit.
     result["field_evidence"] = {path: selected for path, records in v.field_evidence.items()
         if isinstance(records, list) and (selected := [r for r in records if isinstance(r, dict) and r.get("selected")])}
-    return result
+    from app.services.item_account_mapping import strip_accounting
+    return strip_accounting(result)
 
 
 def _accounting_context(v: Voucher, policy: dict) -> dict:

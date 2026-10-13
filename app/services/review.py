@@ -4,14 +4,31 @@ import os
 import shutil
 from datetime import datetime
 from typing import Optional
+from contextlib import nullcontext
 
 from sqlmodel import select
-from sqlalchemy import update
+from sqlalchemy import update, delete
 
 from app import config
-from app.db.models import ReviewStatus, VoucherRecord
+from app.db.models import ReviewStatus, VoucherRecord, ItemAccountMapping, MappingHistory
 from app.db.session import get_session
 from app.models.schemas import Voucher
+from app.services import companies, item_account_mapping as mapping
+
+_UNSET = object()
+
+
+def _check_item_confirmation(data, company_id):
+    for row in data.get("items", []):
+        code, name = row.get("account_code"), row.get("account_name")
+        if not code and not name:
+            continue
+        if not code or not name:
+            raise RecognitionProtected("明細科目代號與名稱未完整，可先儲存草稿")
+        if not company_id:
+            raise RecognitionProtected("明細已有科目，請指定歸屬公司後確認")
+        if row.get("account_needs_review"):
+            raise mapping.MappingConflict("明細科目待核對，請選擇沿用或重新帶入後確認")
 
 
 def _ocr_cache_directory(rec):
@@ -33,8 +50,8 @@ def save_voucher(voucher: Voucher, company: str = "",
                  status: ReviewStatus = ReviewStatus.pending, *, source_parent_id=None) -> VoucherRecord:
     """辨識完成後落地紀錄。ai_json 與 current_json 初始相同。
     status 預設 pending（已辨識待確認）；匯入外觀確認階段傳 prepared（僅判類型/轉正）。"""
-    payload = voucher.model_dump()
-    blob = json.dumps(payload, ensure_ascii=False)
+    payload = mapping.strip_accounting(voucher.model_dump())
+    blob = json.dumps(mapping.strip_accounting(payload), ensure_ascii=False)
     rec = VoucherRecord(
         source_file=voucher.source_file,
         record_role=voucher.origin.get("record_role", "voucher"),
@@ -49,6 +66,10 @@ def save_voucher(voucher: Voucher, company: str = "",
         structure_model=voucher.structure_model,
     )
     with get_session() as s:
+        registered = companies.resolve(s, company)
+        rec.company_id = registered.id if registered else None
+        mapping.prepare_items(s, payload, rec.company_id, model_result=True)
+        rec.current_json = json.dumps(payload, ensure_ascii=False)
         s.add(rec)
         s.commit()
         s.refresh(rec)
@@ -133,7 +154,10 @@ def _save_recognition(rec_id, voucher):
         selected_manual_type = any(r.get("source") == "manual" and r.get("selected") for r in previous.get("field_evidence", {}).get("doc_type_key", []))
         if selected_manual_type and previous.get("doc_type_key") != voucher.doc_type_key:
             raise RecognitionProtected("單據類型已有人工確認，新模型結果類型不同，請重新載入")
-        data = voucher.model_dump()
+        data = mapping.strip_accounting(voucher.model_dump())
+        if any(row.get("account_source") == "manual" and
+               (row.get("account_code") or row.get("account_name")) for row in previous.get("items", [])):
+            data["items"] = deepcopy(previous["items"])
         evidence = deepcopy(previous.get("field_evidence") or {})
         for path, records in evidence.items():
             manual = next((r for r in reversed(records) if r.get("source") == "manual" and r.get("selected")), None)
@@ -157,11 +181,13 @@ def _save_recognition(rec_id, voucher):
         data["origin"] = previous.get("origin", {})
         data["source_file"] = rec.source_file
         data = pipeline.canonicalize_voucher(data)
+        mapping.prepare_items(session, data, rec.company_id, previous=previous,
+                              previous_company_id=rec.company_id, model_result=True, rec_id=rec.id)
         history = json.loads(rec.recognition_history or "[]")
-        history.append({"at": datetime.now().isoformat(), "versions": model_invocation.source_versions(), "model_result": voucher.model_dump()})
+        history.append({"at": datetime.now().isoformat(), "versions": model_invocation.source_versions(), "model_result": mapping.strip_accounting(voucher.model_dump())})
         rec.recognition_history = json.dumps(history, ensure_ascii=False)
         if rec.status in (ReviewStatus.prepared, ReviewStatus.queued) and not (json.loads(rec.ai_json).get("fields") or {}):
-            rec.ai_json = json.dumps(voucher.model_dump(), ensure_ascii=False)
+            rec.ai_json = json.dumps(mapping.strip_accounting(voucher.model_dump()), ensure_ascii=False)
         rec.current_json = json.dumps(data, ensure_ascii=False)
         rec.confidence, rec.structure_model, rec.ocr_provider = str(voucher.confidence or ""), voucher.structure_model, voucher.ocr_provider
         rec.period = _period_of(data.get("date", "")) or rec.period
@@ -173,9 +199,13 @@ def _save_recognition(rec_id, voucher):
 
 
 def update_current(rec_id: int, voucher_dict: dict, *, mark_manual: bool = True,
-                   expected_updated_at: Optional[datetime] = None) -> Optional[VoucherRecord]:
+                   expected_updated_at: Optional[datetime] = None, _session=None,
+                   _company_id=_UNSET, _reviewed=None, _actor=None,
+                   _require_account_version=False) -> Optional[VoucherRecord]:
     """人工修正欄位（不動 ai_json，只更新 current_json）。"""
-    with get_session() as s:
+    with (nullcontext(_session) if _session is not None else get_session()) as s:
+        if _session is None and _actor is not None:
+            s.connection().exec_driver_sql("BEGIN IMMEDIATE")
         rec = s.get(VoucherRecord, rec_id)
         if not rec:
             return None
@@ -187,12 +217,24 @@ def update_current(rec_id: int, voucher_dict: dict, *, mark_manual: bool = True,
             _check_model_write(rec)
         from app.core import pipeline
         previous = json.loads(rec.current_json)
+        previous["items"] = [mapping.defaults(row) for row in previous.get("items") or []]
         old_fields = previous.get("fields") or {}
         voucher_dict = {**previous, **voucher_dict}
+        old_company_id = getattr(rec, "company_id", None)
+        selected_company = old_company_id if _company_id is _UNSET else _company_id
+        mapping.prepare_items(s, voucher_dict, selected_company, previous=previous,
+            previous_company_id=old_company_id, reviewed=_reviewed, rec_id=getattr(rec, "id", None))
+        if _require_account_version and expected_updated_at is None:
+            old_by_id = {r["item_id"]: r for r in previous["items"]}
+            if any((r.get("account_code", ""), r.get("account_name", "")) !=
+                    (old_by_id.get(r["item_id"], {}).get("account_code", ""), old_by_id.get(r["item_id"], {}).get("account_name", ""))
+                    for r in voucher_dict.get("items", [])):
+                raise mapping.MappingConflict("修改明細科目時請提供 expected_updated_at 或使用新的儲存端點", latest={
+                    "updated_at": rec.updated_at.isoformat(), "current": previous, "company_id": old_company_id})
         voucher_dict["origin"] = previous.get("origin", {})
         # Browser copies can lag behind earlier saves; audit history is server-owned.
         from copy import deepcopy
-        voucher_dict["field_evidence"] = deepcopy(previous.get("field_evidence") or {})
+        voucher_dict["field_evidence"] = mapping.remap_evidence(previous, voucher_dict.get("items") or [])
         if mark_manual:
             voucher_dict["validation_warnings"] = list(previous.get("validation_warnings") or [])
             voucher_dict["classification_meta"] = deepcopy(previous.get("classification_meta") or {})
@@ -211,9 +253,10 @@ def update_current(rec_id: int, voucher_dict: dict, *, mark_manual: bool = True,
                         item["selected"] = False
                     evidence.setdefault("fields." + key, []).append({"source": "manual", "value": value, "selected": True})
             for index, row in enumerate(voucher_dict.get("items") or []):
-                old_rows = previous.get("items") or []
-                old_row = old_rows[index] if index < len(old_rows) else {}
+                old_row = next((r for r in previous.get("items", []) if r.get("item_id") == row.get("item_id")), {})
                 for key, value in row.items():
+                    if key in mapping.ACCOUNT_FIELDS:
+                        continue
                     if old_row.get(key) != value:
                         path = f"items[{index}].{key}"
                         if any(r.get("source") == "manual" and r.get("selected") and r.get("value") == value
@@ -229,7 +272,7 @@ def update_current(rec_id: int, voucher_dict: dict, *, mark_manual: bool = True,
                     for item in evidence.get(key, []):
                         item["selected"] = False
                     evidence.setdefault(key, []).append({"source": "manual", "value": voucher_dict.get(key), "selected": True})
-            if (len(voucher_dict.get("items") or []) != len(previous.get("items") or [])
+            if ([r.get("item_id") for r in voucher_dict.get("items", [])] != [r.get("item_id") for r in previous.get("items", [])]
                     or voucher_dict.get("note") != previous.get("note")
                     or voucher_dict.get("doc_type_key") != previous.get("doc_type_key")):
                 changed = True
@@ -238,6 +281,8 @@ def update_current(rec_id: int, voucher_dict: dict, *, mark_manual: bool = True,
                 meta.update(status="candidate", stale=True)
                 meta["warnings"] = list(dict.fromkeys([*(meta.get("warnings") or []), "資料已人工修改，原分錄待重新確認"]))
         voucher_dict = pipeline.canonicalize_voucher(voucher_dict)
+        if _actor is not None:
+            mapping.audit_items(s, voucher_dict, previous, _actor)
         previous_normalized = pipeline.canonicalize_voucher(deepcopy(previous))
         if not mark_manual or voucher_dict != previous_normalized:
             _invalidate_confirmation(rec)
@@ -245,9 +290,82 @@ def update_current(rec_id: int, voucher_dict: dict, *, mark_manual: bool = True,
         rec.period = _period_of(voucher_dict.get("date", "")) or rec.period
         rec.updated_at = datetime.now()
         s.add(rec)
-        s.commit()
-        s.refresh(rec)
+        if _session is None:
+            s.commit()
+            s.refresh(rec)
         return rec
+
+
+def save_current(rec_id, payload, actor):
+    """Save content, company, notes, rule history and confirmation atomically."""
+    action = payload.get("action", "temporary")
+    if action not in ("temporary", "save", "confirm"):
+        raise ValueError("儲存操作不合法")
+    voucher = payload.get("voucher")
+    if not isinstance(voucher, dict) or ("fields" in voucher and not isinstance(voucher["fields"], dict)):
+        raise ValueError("單據欄位格式不合法")
+    if "items" in voucher and (not isinstance(voucher["items"], list) or
+                              any(not isinstance(row, dict) for row in voucher["items"])):
+        raise ValueError("明細格式不合法")
+    for row in voucher.get("items", []):
+        if "remember_mapping" in row and not isinstance(row["remember_mapping"], bool):
+            raise ValueError("記住對應必須為勾選值")
+    for key in ("mapping_choices", "reviewed_items"):
+        value = payload.get(key, {})
+        if not isinstance(value, dict) or any(not isinstance(v, dict) for v in value.values()):
+            raise ValueError("科目選擇格式不合法")
+    if "manual_entry" in payload and not isinstance(payload["manual_entry"], bool):
+        raise ValueError("人工輸入標記格式不合法")
+    if "correction_note" in payload and not isinstance(payload["correction_note"], str):
+        raise ValueError("備註格式不合法")
+    with get_session() as session:
+        # Serialize SQLite writers before reading versions (including concurrent first inserts).
+        session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+        rec = session.get(VoucherRecord, rec_id)
+        if not rec:
+            return None, []
+        expected = payload.get("expected_updated_at")
+        if expected != rec.updated_at.isoformat():
+            raise mapping.MappingConflict("單據已被修改，請重新載入後儲存", latest={
+                "updated_at": rec.updated_at.isoformat(), "company_id": rec.company_id,
+                "current": json.loads(rec.current_json)})
+        if rec.record_role == "source_page":
+            raise RecognitionProtected("來源頁不參與明細儲存，請操作子憑證")
+        if action == "confirm" and rec.status not in (ReviewStatus.pending, ReviewStatus.confirmed):
+            raise RecognitionProtected("請先完成內容辨識，再確認憑證")
+        selected_id = payload.get("company_id", rec.company_id)
+        if selected_id is not None and (not isinstance(selected_id, int) or isinstance(selected_id, bool)):
+            raise ValueError("歸屬公司 ID 格式不合法")
+        registered = companies.resolve(session, company_id=selected_id) if selected_id is not None else None
+        if selected_id is not None and not registered:
+            raise ValueError("歸屬公司不存在")
+        old_company_id = rec.company_id
+        previous = json.loads(rec.current_json)
+        rec = update_current(rec_id, payload.get("voucher") or {}, _session=session,
+                             _company_id=selected_id, _reviewed=payload.get("reviewed_items"))
+        if old_company_id != selected_id:
+            _invalidate_confirmation(rec)
+        rec.company_id = selected_id
+        if registered:
+            rec.company = registered.short or registered.name
+        elif "company_id" in payload:
+            rec.company = ""
+        for key in ("correction_note", "manual_entry"):
+            if key in payload:
+                setattr(rec, key, payload[key])
+        data = json.loads(rec.current_json)
+        mapping.audit_items(session, data, previous, actor)
+        if action == "confirm":
+            _check_item_confirmation(data, rec.company_id)
+        skipped = mapping.publish(session, rec, data, actor, payload.get("mapping_choices")) if action != "temporary" else []
+        rec.current_json = json.dumps(data, ensure_ascii=False)
+        if action == "confirm":
+            rec.status = ReviewStatus.confirmed
+            rec.confirmed_at = rec.confirmed_at or datetime.now()
+        session.add(rec)
+        session.commit()
+        session.refresh(rec)
+        return rec, skipped
 
 
 def confirm_record(rec_id: int, expected_updated_at: str) -> Optional[VoucherRecord]:
@@ -262,6 +380,7 @@ def confirm_record(rec_id: int, expected_updated_at: str) -> Optional[VoucherRec
             raise RecognitionProtected("請先完成內容辨識，再確認憑證")
         if not rec.updated_at or rec.updated_at.isoformat() != expected_updated_at:
             raise RecognitionProtected("資料已被修改，請重新載入後確認")
+        _check_item_confirmation(json.loads(rec.current_json), rec.company_id)
         if rec.status == ReviewStatus.confirmed:
             return rec
         now = datetime.now()
@@ -287,9 +406,16 @@ def set_company(rec_id: int, company: str) -> Optional[VoucherRecord]:
         if not rec:
             return None
         company = company or ""
+        registered = companies.resolve(s, company)
+        selected_id = registered.id if registered else None
         if rec.company != company:
             _invalidate_confirmation(rec)
+            data = json.loads(rec.current_json)
+            mapping.prepare_items(s, data, selected_id, previous=json.loads(rec.current_json),
+                                  previous_company_id=rec.company_id, rec_id=rec.id)
+            rec.current_json = json.dumps(data, ensure_ascii=False)
         rec.company = company
+        rec.company_id = selected_id
         rec.updated_at = datetime.now()
         s.add(rec)
         s.commit()
@@ -715,9 +841,10 @@ def alignment_pairs():
     """已確認紀錄中，AI 原始值與人工修正值不同者 → 模型對齊/微調訊號。"""
     pairs = []
     for rec in list_vouchers(status=ReviewStatus.confirmed):
-        if rec.ai_json != rec.current_json:
-            pairs.append({"id": rec.id, "ai": json.loads(rec.ai_json),
-                          "corrected": json.loads(rec.current_json)})
+        ai = mapping.strip_accounting(json.loads(rec.ai_json))
+        corrected = mapping.strip_accounting(json.loads(rec.current_json))
+        if ai != corrected:
+            pairs.append({"id": rec.id, "ai": ai, "corrected": corrected})
     return pairs
 
 
@@ -903,7 +1030,16 @@ def delete_vouchers(rec_id: int, scope: str, *, is_admin: bool = False, actor: s
                 orphan.source_parent_id = None
                 s.add(orphan)
         for target in targets.values():
-            s.delete(target)
+            for rule in s.exec(select(ItemAccountMapping).where(ItemAccountMapping.source_voucher_id == target.id)).all():
+                rule.source_voucher_id = None
+                s.add(rule)
+            for history in s.exec(select(MappingHistory).where(MappingHistory.source_voucher_id == target.id)).all():
+                history.source_voucher_id = None
+                s.add(history)
+        s.flush()
+        # A single statement removes parents and their children together, even with
+        # immediate SQLite foreign-key enforcement on the legacy self-reference.
+        s.execute(delete(VoucherRecord).where(VoucherRecord.id.in_(list(targets))))
         s.commit()
     removed, failed = _cleanup_deleted_files(deleted)
     _write_delete_audit(actor, scope, rec_id, deleted)

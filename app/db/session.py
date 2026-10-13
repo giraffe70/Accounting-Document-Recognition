@@ -1,5 +1,7 @@
 """資料庫連線與初始化（SQLite）。"""
 from sqlmodel import Session, SQLModel, create_engine
+import json
+from sqlalchemy import event
 
 from app import config
 
@@ -9,12 +11,18 @@ _engine = create_engine(
 )
 
 
+@event.listens_for(_engine, "connect")
+def _foreign_keys(connection, _record):
+    connection.execute("PRAGMA foreign_keys=ON")
+
+
 def init_db():
     # 確保 model 已載入再建表
     from app.db import models  # noqa: F401
 
     SQLModel.metadata.create_all(_engine)
     _migrate()
+    _migrate_account_mappings()
 
 
 # 已由 correction_note、confirmed_at 與新狀態取代的舊審核欄位（遷移後移除）。
@@ -40,6 +48,7 @@ def _migrate():
         "recognition_history": ("VARCHAR", "'[]'"),
         "correction_note": ("VARCHAR", "''"),
         "confirmed_at": ("DATETIME", "NULL"),
+        "company_id": ("INTEGER", "NULL"),
     }
     with _engine.begin() as conn:
         info = list(conn.exec_driver_sql("PRAGMA table_info(voucher_records)"))
@@ -78,6 +87,48 @@ def _migrate():
         for col in _LEGACY_COLUMNS:
             if col in cols:
                 conn.exec_driver_sql(f"ALTER TABLE voucher_records DROP COLUMN {col}")
+        conn.exec_driver_sql("CREATE INDEX IF NOT EXISTS ix_voucher_records_company_id ON voucher_records(company_id)")
+
+
+def _migrate_account_mappings():
+    from uuid import UUID, uuid4
+    from app.db.models import VoucherRecord
+    from app.services import companies, item_account_mapping as mapping
+    from sqlmodel import select
+    registration = config.DATA_DIR / "companies.json"
+    registrations = json.loads(registration.read_text(encoding="utf-8")) if registration.exists() else []
+    with Session(_engine) as session:
+        companies.seed(session, registrations)
+        for rec in session.exec(select(VoucherRecord)).all():
+            if rec.company_id is None:
+                company = companies.resolve(session, rec.company)
+                if company:
+                    rec.company_id = company.id
+            try:
+                data = json.loads(rec.current_json)
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(data, dict):
+                continue
+            rows = data.get("items") or []
+            if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+                continue
+            for index, row in enumerate(rows):
+                row = mapping.defaults(row)
+                try:
+                    row["item_id"] = str(UUID(row["item_id"]))
+                except (TypeError, ValueError, AttributeError):
+                    row["item_id"] = str(uuid4())
+                if any(previous.get("item_id") == row["item_id"] for previous in rows[:index]):
+                    row["item_id"] = str(uuid4())
+                row.setdefault("account_company_id", rec.company_id)
+                row.setdefault("account_item_key", mapping.item_key(row.get("description")))
+                rows[index] = row
+            if rows:
+                data["items"] = rows
+                rec.current_json = json.dumps(data, ensure_ascii=False)
+            session.add(rec)
+        session.commit()
 
 
 def get_session() -> Session:

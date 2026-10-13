@@ -47,7 +47,7 @@ def authenticate(username: str, password: str):
             return None
         _, ph = _hash(password, user.salt)
         if hmac.compare_digest(ph, user.password_hash):
-            return {"username": user.username, "role": user.role, "name": user.name}
+            return {"id": user.id, "username": user.username, "role": user.role, "name": user.name}
         return None
 
 
