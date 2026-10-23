@@ -107,32 +107,56 @@ def check_amounts(voucher: dict) -> dict:
     return {"ok": True, "warn": ""}
 
 
-def check_date(date_str: str) -> dict:
+def _ocr_date_warnings(s: str, y: int, m: int, evidence) -> list:
+    """以 OCR 印出的民國日期／發票期別核對目前日期；只警告，不改值。
+
+    人工確認或 QR 取得的日期視為已核對，不再用 OCR 候選提示。
+    """
+    records = (evidence or {}).get("fields.date") or []
+    selected = [r for r in records if r.get("selected")]
+    if any(r.get("source") in ("manual", "qr") for r in selected):
+        return []
+    warnings = []
+    for r in records:
+        if r.get("source") != "ocr_candidate":
+            continue
+        if r.get("kind") == "roc_date" and r.get("value") != s:
+            warnings.append(f"日期與 OCR 原文不一致：目前 {s}，OCR 讀到 {r.get('raw') or r.get('value')}"
+                            f"（西元 {r.get('value')}），請對照原圖")
+        elif r.get("kind") == "invoice_period" and (y != r.get("year") or m not in (r.get("months") or [])):
+            months = "、".join(str(n) for n in r.get("months") or [])
+            warnings.append(f"日期與發票期別不一致：目前 {s}，OCR 期別為民國 {r.get('roc_year')} 年 {months} 月"
+                            f"（西元 {r.get('year')} 年），請對照原圖")
+    return warnings
+
+
+def check_date(date_str: str, evidence: dict | None = None) -> dict:
     """憑證日期合理性檢查。
 
-    民國轉西元算錯（如 1900+114=2014 而非 1911+114=2025）不會被任何既有檢查攔下，
-    但 period 會跟著錯 → 該憑證從當期日記帳與報表中無聲消失。這是本系統最危險的
-    錯誤類型，故單獨標示出來讓審核者當場看到。
+    日期錯誤（如模型自行換算民國年）會讓 period 跟著錯 → 該憑證從當期日記帳與報表中
+    無聲消失，故單獨標示出來讓審核者當場看到。除了合理範圍外，另用 OCR 印出的
+    民國日期與發票期別（`evidence` 為單據的 field_evidence）交叉核對。
+    回傳 `warn` 為合併文字，`warnings` 為逐項警告。
     """
     from datetime import date as _date
 
     s = (date_str or "").strip()
     if not s:
-        return {"ok": True, "warn": ""}
+        return {"ok": True, "warn": "", "warnings": []}
     try:
         y, m, d = (int(x) for x in s.split("-")[:3])
         v = _date(y, m, d)
     except (ValueError, TypeError):
-        return {"ok": False, "warn": f"日期格式無法解析：{s}"}
-    today = _date.today()
-    days = (v - today).days
+        warning = f"日期格式無法解析：{s}"
+        return {"ok": False, "warn": warning, "warnings": [warning]}
+    warnings = []
+    days = (v - _date.today()).days
     if days > 90:
-        return {"ok": False, "warn": f"日期在未來（{s}），請確認"}
-    if days < -365 * 5:
-        roc = y - 1911
-        hint = f"；若單據上是民國 {y - 1900} 年，正確西元應為 {y - 1900 + 1911}" if 1990 <= y <= 2020 else ""
-        return {"ok": False, "warn": f"日期距今超過 5 年（{s}，民國 {roc} 年），請確認{hint}"}
-    return {"ok": True, "warn": ""}
+        warnings.append(f"日期在未來（{s}），請確認")
+    elif days < -365 * 5:
+        warnings.append(f"日期距今超過 5 年（{s}，民國 {y - 1911} 年），請對照原圖確認")
+    warnings.extend(_ocr_date_warnings(s, y, m, evidence))
+    return {"ok": not warnings, "warn": "；".join(warnings), "warnings": warnings}
 
 
 def check_voucher(voucher: dict) -> dict:

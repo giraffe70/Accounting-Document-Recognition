@@ -73,12 +73,19 @@ class RequestBudgetTests(unittest.TestCase):
         return messages, source, prepared, source_bytes
 
     def test_visual_frame_accounts_for_checked_qwen_grid(self) -> None:
-        frame = model_coordinates.visual_frame(
-            (1653, 2339), self.profile["processor"]
+        processors = (
+            model_coordinates.CHECKED_PROCESSORS["0.35.0"],
+            model_coordinates.CHECKED_PROCESSORS["0.40.4"],
         )
+        for size in ((1653, 2339), (320, 200)):
+            with self.subTest(size=size):
+                frames = [model_coordinates.visual_frame(size, processor) for processor in processors]
+                self.assertEqual(frames[0], frames[1])
+                self.assertEqual(len(frames[0]["padding"]), 4)
 
-        self.assertEqual(frame["visual_size"], [1484, 2128])
-        self.assertEqual(frame["visual_size"][0] * frame["visual_size"][1] // 28**2, 4028)
+        large = model_coordinates.visual_frame((1653, 2339), processors[0])
+        self.assertEqual(large["visual_size"], [1484, 2128])
+        self.assertEqual(large["visual_size"][0] * large["visual_size"][1] // 28**2, 4028)
 
     def test_preflight_reserves_output_and_safety_for_both_output_limits(self) -> None:
         chat = _ChatOllama()

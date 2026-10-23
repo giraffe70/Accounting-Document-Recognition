@@ -51,6 +51,8 @@ def _warning_issue(warning: Any) -> dict | None:
         return None
     if "大寫" in text and ("衝突" in text or "不一致" in text):
         return _issue("amount_conflict", "amount", "review", "fields.amount_words", text)
+    if text.startswith(("日期與 OCR 原文不一致：", "日期與發票期別不一致：")):
+        return _issue("date_ocr_conflict", "date", "review", "date", text)
     if "金額兜不攏" in text or "合計" in text and "不一致" in text:
         return _issue("amount_conflict", "amount", "review", "total_amount", text)
     if "金額無法解析" in text or "數字無法解析" in text:

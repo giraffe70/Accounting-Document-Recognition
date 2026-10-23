@@ -469,7 +469,7 @@ def _rec_to_dict(rec: VoucherRecord, full: bool = False) -> dict:
         d["is_import"] = importdecl.is_import(d["current"])
         # 進口報單鎖定：賣方為國外供應商/海關，統編免核
         d["taxcheck"] = None if d["is_import"] else taxid.check_voucher(d["current"])
-        d["datecheck"] = taxid.check_date(d["current"].get("date", ""))
+        d["datecheck"] = taxid.check_date(d["current"].get("date", ""), d["current"].get("field_evidence"))
         d["amountcheck"] = taxid.check_amounts(d["current"])
     else:
         cur = json.loads(rec.current_json)

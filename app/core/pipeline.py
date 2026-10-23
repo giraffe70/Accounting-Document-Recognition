@@ -328,9 +328,10 @@ def extract_evidence(image_path: str, type_key: str, chat, ocr_lines: list, ocr_
     if confirmed_fields:
         confirmed_fields = prompts.validate_extraction({"fields": confirmed_fields}, type_key, mode, list(confirmed_fields))["fields"]
         _merge_evidence_fields(data, confirmed_fields, "manual")
-    from app.core import supplement
+    from app.core import supplement, date_evidence
     evidence_text = ocr_text + "\n" + supplement.spatial_text(ocr_lines)
     model_invocation.invocation_trace.add({"kind":"ocr_semantic_rows", "text":evidence_text})
+    date_evidence.record(data, evidence_text, type_key)  # evidence only; the model value is not rewritten
     supplement.normalize_candidates(data, type_key, evidence_text, context.get("qr"), confirmed_fields, confirmed_paths)
     normalized = _build_voucher(deepcopy(data), type_key, normalize_word_total=False)
     data["fields"] = normalized.fields
@@ -703,7 +704,8 @@ def _build_voucher(data: dict, type_key: str, *, derive_entries: bool = True, no
     f = _clean_fields(raw_fields)
     spec = doc_types.get(type_key)
     # Refresh checks of current values after edits; keep acquisition/conflict diagnostics.
-    generated_prefixes = ("金額兜不攏：", "營業稅額 ", "日期格式無法解析：", "日期在未來（", "日期距今超過 5 年（")
+    generated_prefixes = ("金額兜不攏：", "營業稅額 ", "日期格式無法解析：", "日期在未來（", "日期距今超過 5 年（",
+                          "日期與 OCR 原文不一致：", "日期與發票期別不一致：")
     warnings = [w for w in data.get("validation_warnings") or []
                 if not w.startswith(generated_prefixes) and "金額無法解析" not in w
                 and w not in ("seller 統編檢查碼錯誤", "buyer 統編檢查碼錯誤",
@@ -818,9 +820,9 @@ def _build_voucher(data: dict, type_key: str, *, derive_entries: bool = True, no
     amount_check = taxid.check_amounts(payload)
     if amount_check.get("ok") is False:
         payload["validation_warnings"].append(amount_check["warn"])
-    date_check = taxid.check_date(payload["date"])
+    date_check = taxid.check_date(payload["date"], evidence)
     if date_check.get("ok") is False:
-        payload["validation_warnings"].append(date_check["warn"])
+        payload["validation_warnings"].extend(date_check.get("warnings") or [date_check["warn"]])
     for side, check in checks.items():
         if check.get("checksum_valid") is False:
             payload["validation_warnings"].append(side + " 統編檢查碼錯誤")

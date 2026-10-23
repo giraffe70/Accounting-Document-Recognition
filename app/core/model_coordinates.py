@@ -31,6 +31,19 @@ CHECKED_PROCESSORS = {"0.35.0": {
         "https://raw.githubusercontent.com/ggml-org/llama.cpp/b11081/tools/mtmd/clip-model.h": "f4df467f21eb5ac4954010a3be30f26586ebe7fa77f6000e65a943215be011e2",
         "https://raw.githubusercontent.com/ggml-org/llama.cpp/b11081/tools/mtmd/mtmd-image.cpp": "7dc760e4f85e38e11d11268ae412c3b6c0a32389c6c584ca34dd7b4a679f950b",
     },
+}, "0.40.4": {
+    # Ollama pins b11521; Qwen limits, smart resize and PAD_CEIL match b11081.
+    "kind": "qwen_smart_resize", "server_version": "0.40.4", "factor": 28,
+    "min_pixels": 802816, "max_pixels": 3211264, "padding_mode": "ceil_center",
+    "source_url": "https://raw.githubusercontent.com/ggml-org/llama.cpp/b11521/tools/mtmd/mtmd-image.cpp",
+    "source_sha256": "132f8a6fa2044ecf4a831186294ac31b73590b1702df8119eca1959295fd17f7",
+    "provenance": {
+        "https://raw.githubusercontent.com/ollama/ollama/v0.40.4/llm/llama_server.go": "be96301d662bf18527fe0d481c15a4631ff47055c6db7ce1400feb264315c6bf",
+        "https://raw.githubusercontent.com/ollama/ollama/v0.40.4/LLAMA_CPP_VERSION": "5b13bf6cbfbf31f3c0d52716c71261fde64615e45bc33353bda67795230d4968",
+        "https://raw.githubusercontent.com/ggml-org/llama.cpp/b11521/tools/mtmd/clip.cpp": "4c6f11fa5609cb512dbecbd77822073e02bc2e88c243e7a87f99b8442d035ce1",
+        "https://raw.githubusercontent.com/ggml-org/llama.cpp/b11521/tools/mtmd/clip-model.h": "79ea127ef005ca13d6d837b22f084dc9322580df7da8833aed6d97fb8ed8b49a",
+        "https://raw.githubusercontent.com/ggml-org/llama.cpp/b11521/tools/mtmd/mtmd-image.cpp": "132f8a6fa2044ecf4a831186294ac31b73590b1702df8119eca1959295fd17f7",
+    },
 }}
 
 

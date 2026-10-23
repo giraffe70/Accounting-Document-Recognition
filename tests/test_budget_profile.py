@@ -35,11 +35,11 @@ class BudgetProfileTests(unittest.TestCase):
         self.TEST_TMP_DIR.mkdir(parents=True, exist_ok=True)
         request_budget._tokenizers.clear()
 
-    def _identity(self) -> dict:
+    def _identity(self, server_version="0.35.0") -> dict:
         return {
             "provider": "ollama",
             "backend_url": "http://offline.test",
-            "server_version": "0.35.0",
+            "server_version": server_version,
             "model": "qwen2.5vl:7b",
             "model_digest": "sha256:synthetic-model-digest",
         }
@@ -129,7 +129,7 @@ class BudgetProfileTests(unittest.TestCase):
             self._assert_not_ready(folder, identity=wrong_digest)
 
             wrong_version = self._identity()
-            wrong_version["server_version"] = "0.36.0"
+            wrong_version["server_version"] = "0.40.4"
             self._assert_not_ready(folder, identity=wrong_version)
 
             wrong_template = self._show()
@@ -214,6 +214,81 @@ class BudgetProfileTests(unittest.TestCase):
                 request_budget._sha(json.dumps(profile_without_id, sort_keys=True)),
             )
             self.assertTrue((folder / "manifest.json").is_file())
+
+    def test_0404_prepare_and_runtime_roundtrip_uses_checked_processor(self) -> None:
+        tokenizer_json = json.dumps({
+            "model": {"vocab": {"a": 0}, "merges": []}, "added_tokens": [],
+        }).encode()
+        config_json = b'{"synthetic":true}'
+        responses = [SimpleNamespace(content=tokenizer_json), SimpleNamespace(content=config_json)]
+        for response in responses:
+            response.raise_for_status = Mock()
+        identity = self._identity("0.40.4")
+        info = {
+            "general.architecture": "qwen25vl",
+            "qwen25vl.vision.patch_size": 14,
+            "qwen25vl.vision.spatial_merge_size": 2,
+            "tokenizer.ggml.pre": "qwen2",
+            "tokenizer.ggml.tokens": ["a"],
+            "tokenizer.ggml.merges": [],
+        }
+        show = {**self._show(), "model_info": info}
+
+        with tempfile.TemporaryDirectory(dir=self.TEST_TMP_DIR) as temporary:
+            folder = Path(temporary)
+            with (
+                patch("requests.get", side_effect=responses) as get,
+                patch.object(request_budget, "_metadata", return_value=(identity, show)),
+            ):
+                prepared = request_budget.prepare_profile(
+                    "qwen2.5vl:7b", backend_url="http://offline.test", asset_dir=folder
+                )
+
+            self.assertEqual(get.call_count, 2)
+            self.assertEqual(prepared["server_version"], "0.40.4")
+            self.assertEqual(prepared["processor"], model_coordinates.CHECKED_PROCESSORS["0.40.4"])
+            prepared_without_id = {key: value for key, value in prepared.items() if key != "profile_id"}
+            self.assertEqual(
+                prepared["profile_id"],
+                request_budget._sha(json.dumps(prepared_without_id, sort_keys=True)),
+            )
+
+            self._runtime(folder, identity=identity, show=show)
+            loaded, tokenizer = request_budget.runtime_profile(_OllamaChat())
+
+        self.assertEqual(loaded["server_version"], "0.40.4")
+        self.assertEqual(loaded["profile_id"], prepared["profile_id"])
+        self.assertEqual(loaded["processor"], model_coordinates.CHECKED_PROCESSORS["0.40.4"])
+        self.assertIsNotNone(tokenizer)
+
+    def test_unknown_0405_prepare_preserves_existing_manifest_and_cached_assets(self) -> None:
+        with tempfile.TemporaryDirectory(dir=self.TEST_TMP_DIR) as temporary:
+            folder = Path(temporary)
+            original_profile = self._write_manifest(folder)
+            original_files = {path.name: path.read_bytes() for path in folder.iterdir()}
+            identity = self._identity("0.40.5")
+            info = {
+                "general.architecture": "qwen25vl",
+                "qwen25vl.vision.patch_size": 14,
+                "qwen25vl.vision.spatial_merge_size": 2,
+                "tokenizer.ggml.pre": "qwen2",
+                "tokenizer.ggml.tokens": ["a"],
+                "tokenizer.ggml.merges": [],
+            }
+            show = {**self._show(), "model_info": info}
+            with (
+                patch("requests.get", side_effect=AssertionError("cached assets should be reused")) as get,
+                patch.object(request_budget, "_metadata", return_value=(identity, show)),
+                self.assertRaises(request_budget.BudgetError) as caught,
+            ):
+                request_budget.prepare_profile(
+                    "qwen2.5vl:7b", backend_url="http://offline.test", asset_dir=folder
+                )
+
+            self.assertEqual(caught.exception.code, "budget_profile_not_ready")
+            get.assert_not_called()
+            self.assertEqual({path.name: path.read_bytes() for path in folder.iterdir()}, original_files)
+            self.assertEqual(json.loads((folder / "manifest.json").read_text(encoding="utf-8")), original_profile)
 
     def test_preflight_rejects_1024_context_without_downgrading(self) -> None:
         profile = {

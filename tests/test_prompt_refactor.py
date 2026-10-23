@@ -18,6 +18,12 @@ class PromptContractTests(unittest.TestCase):
                     example = prompts.extraction_example(type_key, mode)
                     self.assertEqual(prompts.validate_extraction(example, type_key, mode), example)
 
+    def test_extract_prompt_forbids_model_side_year_conversion(self):
+        for mode in ("image", "ocr_text"):
+            text = prompts.build_extract_prompt("invoice", mode)
+            self.assertIn("日期照印出原文輸出", text)
+            self.assertIn("不得自行換算民國或西元年", text)
+
     def test_route_prompt_uses_mode_rotation_rule_and_ocr_context(self):
         image_prompt = prompts.build_route_prompt("image", ocr_text="OCR clues", hint="top heading")
         text_prompt = prompts.build_route_prompt("ocr_text", ocr_text="OCR clues", hint="top heading")
