@@ -62,7 +62,7 @@ async function runListSelectionScenario() {
   const listContext = {
     console, currentStage: 'prepared', currentId: null, DOC_TYPES: {}, STATUS_CLASS: {}, STATUS_LABEL: {},
     STAGE_STATUS: { prepared: 'prepared' },
-    $: (id) => nodes[id],
+    $: (id) => nodes[id] || (nodes[id] = { value: "", checked: false, addEventListener() {} }),
     document: { querySelectorAll: (selector) => selector === '.mchk:checked' ? nodes.listBody.checks.filter((cb) => cb.checked) : [] },
     fetch: async () => ({ json: async () => ({ items: rowData }) }),
     queueViewModel: (items) => ({ vouchers: items, emptyText: 'empty' }),
@@ -99,11 +99,17 @@ async function runListSelectionScenario() {
   const afterFirst = events.filter((x) => x === 'loadList').length;
   await api.pollImportJob('a');
   const afterDuplicate = events.filter((x) => x === 'loadList').length;
+  responseByUrl['/api/import-jobs/awaiting-review'] = { body: { id: 'awaiting-review', status: 'awaiting_review', total_pages: 1, done_pages: 1, pages: [
+    { id: 13, file_name: 'review.png', page_no: 1, status: 'preview_ready', phase: 'awaiting_review', source_page_id: 95, voucher_ids: [96] },
+  ] } };
+  api.trackImportJob({ id: 'awaiting-review', status: 'awaiting_review' });
+  await api.pollImportJob('awaiting-review');
+  const awaitingReviewStoppedPolling = !importJobTimers.has('awaiting-review');
   const pollReviewClicks = events.filter((event) => Array.isArray(event) && (event[0] === 'setStage' || event[0] === 'openReview'));
   const dirtyPreserved = context.recognitionDirty;
   const reviewButtons = jobNode.querySelectorAll('[data-import-review-id]');
   reviewButtons.forEach((button) => button.handler());
-  const dirtyClicksBlocked = events.filter((event) => typeof event === 'string' && event.startsWith('alert:請先儲存目前修改')).length === 2;
+  const dirtyClicksBlocked = events.filter((event) => typeof event === 'string' && event.startsWith('alert:請先儲存目前修改')).length === 3;
   context.recognitionDirty = false;
   reviewButtons.forEach((button) => button.handler());
   const reviewClicks = events.filter((event) => Array.isArray(event) && (event[0] === 'setStage' || event[0] === 'openReview'));
@@ -135,6 +141,7 @@ async function runListSelectionScenario() {
     requests, timers: Array.from(timers.values()).map((t) => t.delay), timerJobIds: timersBeforeLogout,
     jobIds, restoredStatus, seen: seenIds,
     loadListAfterPage: afterFirst, loadListAfterDuplicate: afterDuplicate,
+    awaitingReviewStoppedPolling,
     dirtyPreserved, dirtyClicksBlocked, currentIdPreserved: context.currentId, createdUrls, revokedUrls,
     staleTimerAfterLogout: importJobTimers.has('late'), authHtml, html: normalHtml, reviewButtonIds: reviewButtons.map((button) => Number(button.dataset.importReviewId)), reviewClicks,
     pollReviewClicks, selectedIdsAfterRefresh: await runListSelectionScenario(),

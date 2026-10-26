@@ -17,6 +17,7 @@
   let currentUser = null;
   let currentIsImport = false;
   let DOC_TYPES = {};   // 各單據類型欄位契約（/api/doc-types）
+  let appearanceRows = [];
   let cropping = false; // 裁切模式中
 
   // 後端錯誤轉人看得懂的字串：detail 可能是字串、FastAPI 422 的物件陣列、或整包物件。
@@ -67,6 +68,7 @@
   async function runBatch(files) {
     const fd = new FormData(); files.forEach((f) => fd.append("files", f));
     fd.append("company", $("uploadCompany").value);
+    fd.append("mode", $("uploadMode").value);
     try {
       const data = await (await fetch("/api/import-jobs", { method: "POST", body: fd })).json();
       if (!data.ok) throw new Error(errText(data, "匯入失敗"));
@@ -78,9 +80,11 @@
   const IMPORT_STATUS_LABEL = {
     queued: "排隊中", running: "處理中", cancelling: "取消中", interrupted: "已中斷",
     completed: "完成", partial_failed: "部分失敗", failed: "失敗", cancelled: "已取消",
+    awaiting_review: "待人工確認",
   };
   const IMPORT_PHASE_LABEL = {
     rendering: "頁面轉圖", orientation: "方向判斷", ocr: "文字辨識", layout: "版面分析", saving: "保存中",
+    preview: "準備預覽", layout_queued: "切分排隊中", preview_ready: "預覽已就緒",
   };
   function importJobLabel(value) { return IMPORT_STATUS_LABEL[value] || IMPORT_PHASE_LABEL[value] || value || ""; }
 
@@ -109,9 +113,9 @@
         const preview = page.preview_url || job.files?.get(page.file_name);
         const resultIds = Array.isArray(page.voucher_ids) ? page.voucher_ids : [];
         const reviewId = Number(resultIds[0] || page.source_page_id);
-        const reviewButton = page.status === "completed" && Number.isSafeInteger(reviewId) && reviewId > 0
+        const reviewButton = ["completed", "preview_ready"].includes(page.status) && Number.isSafeInteger(reviewId) && reviewId > 0
           ? `<button class="btn btn-sm" data-import-review-id="${reviewId}">外觀確認</button>` : "";
-        return `<div class="import-job-page"><span>${esc(page.file_name)}${page.page_no == null ? "" : ` · p${esc(page.page_no)}`}</span><span>${esc(importJobLabel(page.phase || page.status))}</span>${preview ? `<a href="${esc(preview)}" target="_blank" rel="noopener">預覽</a>` : ""}${reviewButton}${page.error ? `<span class="bad">${esc(page.error)}</span>` : ""}</div>`;
+        return `<div class="import-job-page">${preview ? `<img src="${esc(preview)}" alt="頁面縮圖" loading="lazy" style="width:64px;height:80px;object-fit:contain">` : ""}<span>${esc(page.file_name)}${page.page_no == null ? "" : ` · p${esc(page.page_no)}`}</span><span>${esc(importJobLabel(page.phase || page.status))}</span>${preview ? `<a href="${esc(preview)}" target="_blank" rel="noopener">預覽</a>` : ""}${reviewButton}${page.error ? `<span class="bad">${esc(page.error)}</span>` : ""}</div>`;
       }).join("");
       const actions = job.status === "running" || job.status === "queued" ? `<button class="btn btn-sm" data-job-action="cancel" data-job-id="${esc(job.id)}">取消</button>` :
         job.status === "interrupted" || job.status === "cancelled" ? `<button class="btn btn-sm" data-job-action="resume" data-job-id="${esc(job.id)}">續跑</button>` :
@@ -149,7 +153,7 @@
       const seen = importSeenPages.get(id) || new Set();
       let added = false;
       (job.pages || []).forEach((page) => {
-        const key = page.id != null ? `id:${page.id}` : `${page.file_name}:${page.page_no}:${page.source_page_id}`;
+        const key = page.id != null ? `id:${page.id}:${page.status}:${(page.voucher_ids || []).join(",")}` : `${page.file_name}:${page.page_no}:${page.source_page_id}`;
         if (!seen.has(key) && (page.source_page_id || (page.voucher_ids || []).length) && page.status !== "failed") { seen.add(key); added = true; }
       });
       importSeenPages.set(id, seen);
@@ -226,7 +230,7 @@
   $("btnScanImport").addEventListener("click", async () => {
     const names = Array.from($("scanFiles").querySelectorAll("input:checked")).map((i) => i.value);
     if (!names.length) { alert("請勾選要匯入的檔案"); return; }
-    const d = await (await fetch("/api/scan-source/import", { method: "POST", headers: json(), body: JSON.stringify({ filenames: names, company: $("uploadCompany").value, background: true }) })).json();
+    const d = await (await fetch("/api/scan-source/import", { method: "POST", headers: json(), body: JSON.stringify({ filenames: names, company: $("uploadCompany").value, background: true, mode: $("uploadMode").value }) })).json();
     if (!d.ok) { alert(errText(d, "匯入失敗")); return; }
     toast(`開始匯入 ${d.total_files || names.length} 個檔案…`); trackImportJob(d);
   });
@@ -248,6 +252,7 @@
     $("btnExtractAll").classList.toggle("hidden", stage !== "queued");
     $("confirmationFilter").classList.toggle("hidden", stage !== "pending");
     $("btnMerge").classList.toggle("hidden", !(stage === "prepared" || stage === "queued"));
+    $("appearanceBatch").classList.toggle("hidden", stage !== "prepared");
     if (!isImport) { $("queueTitle").textContent = STAGE_TITLE[stage] || "佇列"; loadList(); }
     refreshStats();
   }
@@ -291,6 +296,8 @@
     let hidden = 0, skipped = 0;
     const vouchers = all.filter((r) => {
       if (!isSourceRecord(r)) return true;
+      // 人工模式保留不可變來源頁，另有可編輯單據；跨階段篩選時兩者未必同時回傳。
+      if (r.origin?.preparation?.mode === "manual_review") { hidden += 1; return false; }
       const t = sourceTrace(r, counts[r.id] || 0);
       if (stage === "prepared" && t.state === "review") return true;
       hidden += 1; if (t.state === "skipped") skipped += 1;
@@ -322,6 +329,7 @@
     const data = await (await fetch(url)).json();
     const view = queueViewModel(data.items || [], currentStage);
     const rows = view.vouchers;
+    appearanceRows = rows;
     const body = $("listBody");
     $("listEmpty").textContent = view.emptyText;
     if (!rows.length) { body.innerHTML = ""; $("listTable").classList.add("hidden"); $("listEmpty").classList.remove("hidden"); updateMergeBtn(); refreshStats(); return; }
@@ -335,13 +343,13 @@
       // 否則清單只剩一排數字看不出是什麼單
       // 以欄位契約的正式標籤為準；current_json.doc_type 是模型回傳的字串，可能簡略或走樣
       const spec = DOC_TYPES[r.doc_type_key];
-      const type = esc((spec && spec.label) || r.doc_type) || "（未判類型）";
+      const type = esc((spec && spec.label) || r.doc_type) || "自動判斷類型";
       const manual = r.manual_entry ? ` <span class="att-badge" title="欄位已人工修正確認">✍ 人工修正</span>` : "";
       const sourceTag = r.source_parent_id != null
         ? ` <span class="att-badge" title="此單據拆分自原始掃描頁">來自${r.origin?.page_no != null ? ` p${esc(r.origin.page_no)}` : ` #${esc(r.source_parent_id)}`}</span>` : "";
       return `
       <tr data-id="${r.id}" class="${r.id === currentId ? "sel" : ""}" title="${esc(r.source_file || "")}">
-        <td>${chk}${esc(r.voucher_id) || "—"}${att}${sourceTag}<div class="row-sub">${type}${manual}</div></td>
+        <td>${chk}${currentStage === "prepared" && r.has_image ? `<img src="/api/vouchers/${r.id}/image?expected_updated_at=${encodeURIComponent(r.updated_at)}" alt="單據縮圖" loading="lazy" style="width:72px;height:88px;object-fit:contain;vertical-align:middle">` : ""}${esc(r.voucher_id) || "—"}${att}${sourceTag}<div class="row-sub">${type}${manual}</div></td>
         <td>${esc(r.company) || "—"}</td>
         <td>${esc(r.date) || "—"}</td>
         <td>${nf(r.total_amount)}</td>
@@ -356,6 +364,32 @@
     updateMergeBtn();
     refreshStats();
   }
+
+  async function batchAppearance(operation) {
+    if (editBusy || recognitionDirty) { alert("請先儲存目前修改"); return; }
+    const selected = new Set(Array.from(document.querySelectorAll(".mchk:checked"), cb => Number(cb.dataset.id)));
+    const rows = appearanceRows.filter(row => !selected.size || selected.has(row.id));
+    if (!rows.length) return;
+    if (operation === "confirm" && (!$("batchDirection").checked || !$("batchSingle").checked)) {
+      alert("請先確認所選頁面全部方向正確，且全部一頁一張；多張混貼頁請逐頁選擇切分方式。"); return;
+    }
+    const items = rows.map(row => ({id:row.id,expected_updated_at:row.updated_at,
+      direction_confirmed:true,document_mode:"single",doc_type_key:$("batchType").value}));
+    try {
+      const response = await fetch("/api/vouchers/appearance-batch", {method:"POST",headers:json(),body:JSON.stringify({operation,items})});
+      const data = await response.json();
+      if (!response.ok) throw new Error(errText(data,"批次操作失敗"));
+      const errors = (data.items || []).filter(item => !item.ok);
+      if (errors.length) alert(errors.map(item => `#${item.id}：${item.detail}`).join("\n"));
+      else toast(`已完成 ${items.length} 張`);
+      $("batchDirection").checked = false; $("batchSingle").checked = false;
+      if (currentId && rows.some(row => row.id === currentId)) await openReview(currentId);
+      await loadList(); await restoreImportJobs();
+    } catch (err) { alert(err.message); }
+  }
+  $("btnBatchRotL").addEventListener("click", () => batchAppearance("rotate_ccw"));
+  $("btnBatchRotR").addEventListener("click", () => batchAppearance("rotate_cw"));
+  $("btnBatchAppearance").addEventListener("click", () => batchAppearance("confirm"));
 
   // 合併多頁為一張（主頁＋附頁）
   $("btnMerge").addEventListener("click", async () => {
@@ -480,6 +514,14 @@
     const isPrepared = rec.status === "prepared";
     const isQueued = rec.status === "queued";
     const isPreExtract = isPrepared || isQueued;   // 尚未萃取欄位：隱藏編輯器
+    const prep = v.origin?.preparation;
+    const manualMode = prep?.mode === "manual_review";
+    const timings = v.recognition_diagnostics?.timings;
+    $("fastTiming").classList.toggle("hidden", !timings);
+    $("fastTiming").textContent = timings ? [["首次預覽",timings.first_preview_seconds],["人工確認等待",timings.human_wait_seconds],["本次辨識",timings.recognition_seconds],["OCR",timings.ocr_seconds],["補讀OCR",timings.supplement_ocr_seconds],["上傳至今",timings.overall_seconds]].filter(([,value]) => value != null).map(([label,value]) => `${label} ${Number(value).toFixed(1)} 秒`).join(" · ") : "";
+    $("manualPreparation").classList.toggle("hidden", !(manualMode && isPrepared));
+    $("directionConfirmed").checked = false;
+    $("documentMode").value = prep?.document_mode || "single";
     $("revForm").classList.toggle("prepared", isPreExtract);
     $("prepHint").classList.toggle("hidden", !isPreExtract && !autoSplitSource);
     $("btnConfirmRecognize").classList.toggle("hidden", !isPreExtract);
@@ -492,6 +534,7 @@
       stageAction = "confirm";
       $("btnConfirmRecognize").textContent = "✅ 確認外觀（加入掃描清單）";
       $("prepHint").innerHTML = "<b>② 外觀確認</b>：確認上方「單據類型」正確，並用工具列旋轉／裁切／分割整理影像；完成後按「✅ 確認外觀」加入③掃描清單。";
+      if (manualMode) $("prepHint").innerHTML = "<b>② 外觀確認</b>：先整理方向與裁切，確認單據張數後再開始辨識。類型未指定時會自動判斷。";
     } else if (isQueued) {
       stageAction = "recognize";
       $("btnConfirmRecognize").textContent = "🔍 辨識此張";
@@ -504,7 +547,7 @@
     }
     $("revCompanySel").value = rec.company_id == null ? "" : String(rec.company_id);
     loadItemAccountChart();
-    const typeKey = v.doc_type_key || "other";
+    const typeKey = manualMode && isPreExtract && !prep.type_confirmed ? "" : v.doc_type_key || "other";
     populateTypeSel(typeKey);
     buildActiveFields(typeKey);
     renderFields(v.fields || {});
@@ -589,6 +632,7 @@
     if (record.id !== currentId) return;
     if ("manual_entry" in record) currentManualEntry = !!record.manual_entry;
     if (record.updated_at) currentVersion = record.updated_at;
+    if (record.current?.origin) currentVoucher.origin = record.current.origin;
     setStatus(record.status);
     setPendingActionVisibility(record.status);
     applyRecognitionState(record);
@@ -613,7 +657,7 @@
 
   function populateTypeSel(typeKey) {
     const el = $("revTypeSel");
-    el.innerHTML = Object.entries(DOC_TYPES)
+    el.innerHTML = (currentVoucher.origin?.preparation?.mode === "manual_review" && $("revForm").classList.contains("prepared") ? '<option value="">自動判斷類型</option>' : "") + Object.entries(DOC_TYPES)
       .map(([k, t]) => `<option value="${k}">${esc(t.label)}</option>`).join("");
     el.value = typeKey;
   }
@@ -627,10 +671,13 @@
     const id = currentId, tk = $("revTypeSel").value;
     try {
       if (!$("revForm").classList.contains("prepared")) await persistCurrentEdits();
-      const typeResp = await fetch(`/api/vouchers/${id}/set-type`, { method: "POST", headers: json(), body: JSON.stringify({ doc_type_key: tk, expected_updated_at:currentVersion }) });
-      if (!typeResp.ok) throw new Error(await responseError(typeResp, "類型儲存失敗"));
-      const typeRecord = await typeResp.json();
-      currentVersion = typeRecord.updated_at || currentVersion;
+      const autoFastType = currentVoucher.origin?.preparation?.mode === "manual_review" && !currentVoucher.origin.preparation.type_confirmed && !tk;
+      if (!autoFastType && (currentVoucher.origin?.preparation?.mode !== "manual_review" || tk !== (currentVoucher.doc_type_key || ""))) {
+        const typeResp = await fetch(`/api/vouchers/${id}/set-type`, { method: "POST", headers: json(), body: JSON.stringify({ doc_type_key: tk, expected_updated_at:currentVersion }) });
+        if (!typeResp.ok) throw new Error(await responseError(typeResp, "類型儲存失敗"));
+        const typeRecord = await typeResp.json();
+        currentVersion = typeRecord.updated_at || currentVersion;
+      }
       const d = await withInferProgress("內容辨識中…", () =>
         fetch(`/api/vouchers/${id}/recognize`, { method: "POST", headers: json() }).then((r) => r.json()));
       if (!d.ok) throw new Error(errText(d, "辨識失敗"));
@@ -1239,7 +1286,8 @@
     img.onload = () => { resetZoom(); drawBoxes({}); };   // 旋轉後清框（不再對齊）
     img.src = `/api/vouchers/${currentId}/image?t=${Date.now()}`;
     if (currentVoucher) currentVoucher.boxes = {};
-    toast("已旋轉，按「🔄 重新辨識」更新欄位與框");
+    if (currentVoucher.origin?.preparation?.mode === "manual_review") await openReview(currentId);
+    toast("已旋轉，請重新確認目前影像方向");
   }
   $("btnRotL").addEventListener("click", () => rotateImage("ccw"));
   $("btnRotR").addEventListener("click", () => rotateImage("cw"));
@@ -1260,7 +1308,8 @@
     if (!resp.ok) { alert(await responseError(resp, "微調失敗")); return; }
     if (!(await resp.json()).ok) { alert("微調失敗"); return; }
     await refreshCurrentStatus();
-    reloadImage(); toast(`已微調 ${angle}°，按「🔄 重新辨識」更新`);
+    reloadImage(); if (currentVoucher.origin?.preparation?.mode === "manual_review") await openReview(currentId);
+    toast(`已微調 ${angle}°，請重新確認目前影像方向`);
   });
 
   // ── 裁切 / 分割模式 ──
@@ -1317,8 +1366,8 @@
     if (splitMode) {
       setCropMode(false);
       const srcId = currentId;
-      const d = await withInferProgress("分割中…（判類型／自動轉正）", () =>
-        fetch(`/api/vouchers/${srcId}/split`, { method: "POST", headers: json(), body: JSON.stringify({ box }) }).then((r) => r.json()));
+      const d = await withInferProgress("分割工作副本中…", () =>
+        fetch(`/api/vouchers/${srcId}/split`, { method: "POST", headers: json(), body: JSON.stringify({ box, expected_updated_at:currentVersion }) }).then((r) => r.json()));
       if (!d.ok) { alert(errText(d, "分割失敗")); return; }
       toast("已建立新憑證（原圖該區已塗白）"); loadList();
       if (d.source_blank) {
@@ -1334,7 +1383,8 @@
       if (!r.ok) { alert("裁切失敗"); return; }
       if (!(await r.json()).ok) { alert("裁切失敗"); return; }
       await refreshCurrentStatus();
-      reloadImage(); toast("已裁切，按「🔄 重新辨識」更新");
+      reloadImage(); if (currentVoucher.origin?.preparation?.mode === "manual_review") await openReview(currentId);
+      toast("已裁切，請重新確認目前影像方向");
     }
   });
   function clearReview() {
@@ -1346,9 +1396,13 @@
   async function confirmAppearance() {
     if (!currentId) return;
     const tk = $("revTypeSel").value;
-    const d = await (await fetch(`/api/vouchers/${currentId}/confirm-appearance`, { method: "POST", headers: json(), body: JSON.stringify({ doc_type_key: tk }) })).json();
+    const manual = currentVoucher.origin?.preparation?.mode === "manual_review";
+    if (manual && !$("directionConfirmed").checked) { alert("請先確認目前影像方向正確"); return; }
+    const mode = manual ? $("documentMode").value : "single";
+    const d = await (await fetch(`/api/vouchers/${currentId}/confirm-appearance`, { method: "POST", headers: json(), body: JSON.stringify({ doc_type_key: tk,expected_updated_at:currentVersion,direction_confirmed:manual && $("directionConfirmed").checked,document_mode:mode }) })).json();
     if (!d.ok) { alert(errText(d, "確認失敗")); return; }
-    toast("已加入掃描清單"); clearReview(); loadList();
+    if (mode === "manual_split") { toast("請使用「裁切為新憑證」框選每張單據"); await openReview(currentId); return; }
+    toast(d.layout_pending ? "已排入自動切分" : "已加入掃描清單"); clearReview(); loadList(); restoreImportJobs();
   }
 
   $("btnReRecognize").addEventListener("click", runRecognize);
@@ -1620,6 +1674,7 @@
     loadCompanies();
     restoreImportJobs();
     try { DOC_TYPES = (await (await fetch("/api/doc-types")).json()).types || {}; } catch (e) { DOC_TYPES = {}; }
+    $("batchType").innerHTML = '<option value="">自動判斷類型</option>' + Object.entries(DOC_TYPES).map(([key,type]) => `<option value="${esc(key)}">${esc(type.label)}</option>`).join("");
     setStage("import"); refreshStats(); openFromHash();
     refreshEngine(); startEnginePoll();
   }

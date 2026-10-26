@@ -100,12 +100,13 @@ def render_page(file_path, page_no, token):
     folder = config.UPLOAD_DIR / "_pages" / token
     folder.mkdir(parents=True, exist_ok=True)
     if Path(file_path).suffix.lower() != ".pdf":
-        import shutil
         import uuid
-        target = folder / ("source" + Path(file_path).suffix.lower())
-        temporary = folder / ("r" + uuid.uuid4().hex[:12] + ".tmp")
+        from PIL import Image, ImageOps
+        target = folder / "source.png"
+        temporary = folder / ("r" + uuid.uuid4().hex[:12] + ".png")
         try:
-            shutil.copyfile(file_path, temporary)
+            with Image.open(file_path) as image:
+                ImageOps.exif_transpose(image).convert("RGB").save(temporary)
             os.replace(temporary, target)
         finally:
             temporary.unlink(missing_ok=True)
@@ -133,11 +134,35 @@ def render_page(file_path, page_no, token):
     return str(target)
 
 
-def prepare_page(source, file_path, page_no, *, token=None, group_id=None):
+def prepare_manual_page(source, file_path, page_no, *, token, group_id=None):
+    """Render-only preparation: never instantiate OCR, a router or a model."""
+    import uuid
+    from copy import deepcopy
+    from app import config
+    from app.core import page_layout, preparation, text_evidence
+    folder = config.UPLOAD_DIR / "_pages" / token
+    folder.mkdir(parents=True, exist_ok=True)
+    text_evidence.pdf_descriptor(source, file_path, page_no, folder)
+    origin = {**page_layout.origin(source, {"box":[0,0,1000,1000]}, page_no),
+              "source_token":token, "source_group_id":group_id or uuid.uuid4().hex}
+    if managed_upload_name(file_path):
+        origin["upload_file"] = managed_upload_name(file_path)
+    origin["preparation"] = preparation.fresh(pdf=Path(file_path).suffix.lower()==".pdf")
+    parent = Voucher(origin={**deepcopy(origin),"record_role":"source_page",
+                             "layout":{"auto_split":False,"content_kind":"unknown","regions":[],"issues":[]}},
+                     quality={"version":1,"state":"unassessed","content_kind":"unknown","issues":[]})
+    child = Voucher(origin=deepcopy(origin), quality={"version":1,"state":"unassessed","content_kind":"unknown","issues":[]})
+    for voucher in (parent, child):
+        voucher.source_image = str(source)
+        voucher.source_file = f"{Path(file_path).name} p{page_no}"
+    return [parent, child]
+
+
+def prepare_page(source, file_path, page_no, *, token=None, group_id=None, confirmed_preparation=None):
     """One immutable page, with stable identities supplied by resumable imports."""
     import uuid
     from app import config
-    from app.core import page_layout, invocation_trace, model_invocation, work_progress
+    from app.core import page_layout, invocation_trace, model_invocation, work_progress, image_evidence
     token = token or uuid.uuid4().hex
     group = {"source_group_id": group_id or uuid.uuid4().hex}
     if managed_upload_name(file_path):
@@ -147,7 +172,15 @@ def prepare_page(source, file_path, page_no, *, token=None, group_id=None):
     with invocation_trace.capture(folder / "trace.json"), ocr_cache.scope(folder / "ocr_cache"):
         invocation_trace.add({"kind": "snapshot", "versions": model_invocation.source_versions(), "settings": settings_store.get_settings()})
         input_path = page_layout.crop(source, {"box": [0, 0, 1000, 1000]}, folder / "input.png", max_edge=1180)
-        layout = page_layout.detect(input_path, native_path=source)
+        if confirmed_preparation is not None:
+            from app.core import text_evidence
+            from PIL import Image
+            evidence = text_evidence.read(source, folder=folder, preparation=confirmed_preparation, purpose="layout")
+            with Image.open(input_path) as preview:
+                lines = image_evidence.map_lines(evidence["lines"], evidence["size"], preview.size)
+            layout = page_layout.detect(input_path, native_path=source, ocr_lines=lines, ocr_text=evidence["text"], orientation_confirmed=True)
+        else:
+            layout = page_layout.detect(input_path, native_path=source)
         work_progress.emit("saving")
         source_origin = {**page_layout.origin(source, {"box": [0, 0, 1000, 1000]}, page_no),
                          "record_role": "source_page", "source_token": token, "layout": layout, **group}
@@ -164,7 +197,13 @@ def prepare_page(source, file_path, page_no, *, token=None, group_id=None):
                                "layout_fallback": layout.get("fallback_reason"), **group},
                     "quality": {"version": 1, "state": "unassessed", "content_kind": layout["content_kind"], "issues": []}})
                 child.source_file, child.source_image = parent.source_file, crop_path
+                if confirmed_preparation is not None:
+                    from app.core import preparation, text_evidence
+                    child.origin["preparation"] = preparation.fresh()
+                    text_evidence.inherit(source, crop_path, region, folder=folder)
                 child.field_evidence["doc_type_key"] = [{"source": "route", "value": region["type"], "reason": region["reason"], "selected": True}]
+                if confirmed_preparation is not None:
+                    child.field_evidence["doc_type_key"][0].update(text_identity_sha256=ocr_cache.digest(text_evidence.identity(crop_path)),structure_setting=settings_store.get_settings()["structure"])
                 out.append(child)
         return out
 
@@ -224,7 +263,7 @@ def prepare_image(image_path: str, hint: str = "", auto_rotate: bool = True) -> 
 
 
 @ocr_cache.scoped
-def extract_for_type(image_path: str, type_key: str, hint: str = "", company: str = "", *, confirmed_fields=None, native_path=None, confirmed_type=False, confirmed_paths=None) -> Voucher:
+def extract_for_type(image_path: str, type_key: str, hint: str = "", company: str = "", *, confirmed_fields=None, native_path=None, confirmed_type=False, confirmed_paths=None, text_record=None, fast_mode=False) -> Voucher:
     """依「已確認的類型」在「已準備好的影像」上萃取欄位＋精準框。
     不再判類型／不再自動轉正（外觀確認階段已完成）。"""
     settings = settings_store.get_settings()
@@ -234,13 +273,22 @@ def extract_for_type(image_path: str, type_key: str, hint: str = "", company: st
     ocr = None
     ocr_used = "（無，VLM 直讀）"
     try:
-        if ocr_provider not in ("disabled", "none"):
+        if ocr_provider not in ("disabled", "none") and text_record is None:
             ocr = model_factory.get_ocr(ocr_provider)
     except Exception as exc:  # noqa: BLE001
         logger.warning("OCR 不可用，改用 VLM 直讀：%s", exc)
 
     ocr_lines, ocr_text, image_conditions = [], "", None
-    if ocr is not None:
+    if text_record is not None:
+        from app.core import text_evidence, image_evidence
+        from PIL import Image
+        if not text_evidence.validate(text_record, native_path or image_path):
+            raise ValueError("文字證據與目前影像不一致")
+        with Image.open(image_path) as image:
+            ocr_lines = image_evidence.map_lines(text_record["lines"], text_record["size"], image.size)
+        ocr_text = text_record["text"]
+        ocr_used = "pdf_text/pdfium" if text_record["source"] == "pdf_text" else "（無，VLM 直讀）" if text_record["source"] == "none" else settings["ocr"]
+    elif ocr is not None:
         try:
             with activity.stage("ocr", settings["ocr"]):
                 from app.core import image_evidence
@@ -262,7 +310,7 @@ def extract_for_type(image_path: str, type_key: str, hint: str = "", company: st
     chat = model_factory.get_chat_model(struct_provider, struct_model, temperature=0.0)
     voucher = extract_evidence(image_path, type_key, chat, ocr_lines, ocr_text, hint=hint, company=company,
                                confirmed_fields=confirmed_fields, native_path=native_path, image_conditions=image_conditions,
-                               confirmed_type=confirmed_type, confirmed_paths=confirmed_paths)
+                               confirmed_type=confirmed_type, confirmed_paths=confirmed_paths, fast_mode=fast_mode)
     voucher.ocr_provider = ocr_used
     voucher.structure_model = settings["structure"]
     voucher.source_image = image_path
@@ -343,7 +391,7 @@ def _validate_image_extraction(obj: dict, type_key: str, mode: str, image_path: 
 
 
 def extract_evidence(image_path: str, type_key: str, chat, ocr_lines: list, ocr_text: str,
-                     *, mode="image", hint="", company="", confirmed_fields=None, native_path=None, image_conditions=None, confirmed_type=False, confirmed_paths=None) -> Voucher:
+                     *, mode="image", hint="", company="", confirmed_fields=None, native_path=None, image_conditions=None, confirmed_type=False, confirmed_paths=None, fast_mode=False) -> Voucher:
     from app.core import barcode, prompts, model_invocation, model_coordinates, classification_evidence, request_budget
     from copy import deepcopy
     type_key, classification = classification_evidence.resolve(type_key,ocr_text,protected=confirmed_type or bool(confirmed_fields) or bool(confirmed_paths))
@@ -357,6 +405,7 @@ def extract_evidence(image_path: str, type_key: str, chat, ocr_lines: list, ocr_
     context["confirmed_type"] = confirmed_type or bool(confirmed_fields) or bool(confirmed_paths)
     context["confirmed_paths"] = list(confirmed_paths or [])
     context["ocr_lines"] = ocr_lines
+    context["fast_mode"] = fast_mode
     if ocr_lines:
         from PIL import Image
         with Image.open(image_path) as source_image:

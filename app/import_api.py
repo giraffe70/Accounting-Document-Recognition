@@ -14,7 +14,7 @@ def owner(request):
 
 
 @router.post("")
-async def create(request: Request, files: list[UploadFile] = File(...), company: str = Form("")):
+async def create(request: Request, files: list[UploadFile] = File(...), company: str = Form(""), mode: str = Form("manual_review")):
     from app.main import _save_upload
     paths = []
     try:
@@ -22,7 +22,7 @@ async def create(request: Request, files: list[UploadFile] = File(...), company:
         for file in files:
             path = await _save_upload(file)
             paths.append({"path": str(path), "name": file.filename})
-        return JSONResponse(import_jobs.create_job(paths, user_id, company), status_code=202)
+        return JSONResponse(import_jobs.create_job(paths, user_id, company, mode=mode), status_code=202)
     except ValueError as exc:
         for item in paths:
             from pathlib import Path

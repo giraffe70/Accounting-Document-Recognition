@@ -216,7 +216,7 @@ def needs_fresh_ocr(type_key, requested, groups, lines, region, *, source_size):
     if not requested and not groups:
         return False, "no_target"
     text = "\n".join(str(r.get("text") or "") for r in lines)
-    clear = bool(lines) and all(float(r.get("score", 1)) >= .8 for r in lines)
+    clear = bool(lines) and all(r.get("source") == "pdf_text" or float(r.get("score", 1)) >= .8 for r in lines)
     for key in requested:
         label = LABELS.get(type_key, {}).get(key)
         if not label or not re.search(label, text, re.I):

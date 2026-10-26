@@ -25,27 +25,33 @@ class ImportFrontendTests(unittest.TestCase):
         self.assertEqual(result["loadListAfterDuplicate"], 1)
         self.assertEqual(result["dirtyPreserved"], True)
         self.assertEqual(result["currentIdPreserved"], 77)
-        self.assertEqual(result["seen"], ["id:10", "id:11"])
+        self.assertEqual(result["seen"], ["id:10:completed:91", "id:11:completed:"])
+        self.assertTrue(result["awaitingReviewStoppedPolling"])
         self.assertEqual(result["pollReviewClicks"], [])
         self.assertTrue(result["dirtyClicksBlocked"])
-        self.assertEqual(result["reviewButtonIds"], [91, 92])
-        self.assertEqual(result["reviewClicks"], [["setStage", "prepared"], ["openReview", 91], ["setStage", "prepared"], ["openReview", 92]])
+        self.assertEqual(result["reviewButtonIds"], [91, 92, 96])
+        self.assertEqual(result["reviewClicks"], [["setStage", "prepared"], ["openReview", 91], ["setStage", "prepared"], ["openReview", 92], ["setStage", "prepared"], ["openReview", 96]])
         self.assertEqual(result["selectedIdsAfterRefresh"], ["2"])
 
     def test_each_job_polls_independently_and_actions_target_job(self):
         result = self.run_synthetic()
-        self.assertEqual(result["jobIds"], ["a", "b", "failed-job", "restored"])
+        self.assertEqual(result["jobIds"], ["a", "b", "failed-job", "restored", "awaiting-review"])
         self.assertEqual(result["restoredStatus"], "interrupted")
         self.assertEqual(result["timerJobIds"], ["a", "b"])
         self.assertTrue(all(delay == 1500 for delay in result["timers"]))
         self.assertIn({"url": "/api/import-jobs/a/retry-failed", "method": "POST"}, result["requests"])
         self.assertIn({"url": "/api/import-jobs/a/cancel", "method": "POST"}, result["requests"])
 
-    def test_upload_page_omits_import_job_status_and_preview_panel(self):
+    def test_upload_mode_defaults_to_manual_review_and_is_sent_with_import(self):
         html = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
-        self.assertNotIn('id="importJobs"', html)
+        self.assertIn('id="importJobs"', html)
         self.assertIn('id="dropZone"', html)
         self.assertIn('data-stage="prepared"', html)
+        self.assertRegex(html, r'<select id="uploadMode"[^>]*>\s*<option value="manual_review">')
+        self.assertIn('<option value="automatic">', html)
+        javascript = (ROOT / "app/static/js/app.js").read_text(encoding="utf-8")
+        self.assertIn('fd.append("mode", $("uploadMode").value);', javascript)
+        self.assertIn('mode: $("uploadMode").value', javascript)
 
     def test_auth_errors_stop_polling_and_logout_invalidates_in_flight_response(self):
         result = self.run_synthetic()

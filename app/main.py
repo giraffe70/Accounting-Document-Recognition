@@ -170,6 +170,7 @@ def api_engine_status():
         if key == "ocr":
             info["available"] = ocr_ok["available"]
             info["detail"] = ocr_ok["detail"]
+            info["model"] = " / ".join(dict.fromkeys(ocr_ok.get("actual_models",{}).values())) or "PaddleOCR（待載入）"
         else:
             info["available"] = True
             info["loaded"] = ps["by_name"].get(model)     # None＝未載入（閒置卸載）
@@ -344,7 +345,7 @@ def api_scan_list():
 
 
 @app.post("/api/scan-source/import")
-def api_scan_import(request: Request, filenames: list = Body(..., embed=True), company: str = Body("", embed=True), background: bool = Body(False, embed=True)):
+def api_scan_import(request: Request, filenames: list = Body(..., embed=True), company: str = Body("", embed=True), background: bool = Body(False, embed=True), mode: str = Body("automatic", embed=True)):
     """從掃描來源目錄匯入選定檔案（外觀準備，落 prepared）。"""
     d = _scan_dir()
     if d is None:
@@ -354,7 +355,7 @@ def api_scan_import(request: Request, filenames: list = Body(..., embed=True), c
     valid = [p for p in paths if Path(p["path"]).is_file() and Path(p["path"]).suffix.lower() in config.ALLOWED_SUFFIXES]
     if not valid:
         return JSONResponse({"ok": False, "detail": "無有效檔案可匯入"}, status_code=400)
-    created = import_jobs.create_job(valid, import_api.owner(request), company)
+    created = import_jobs.create_job(valid, import_api.owner(request), company, mode=mode)
     if background:
         return JSONResponse(created, status_code=202)
     return {"ok": True, "job_id": created["id"], "total": len(valid)}
@@ -394,7 +395,7 @@ async def api_batch(request: Request, files: list[UploadFile] = File(...), compa
             errors.append(f"{file.filename}: {exc}")
     if not paths:
         return JSONResponse({"ok": False, "detail": "無有效檔案可匯入", "errors": errors}, status_code=400)
-    created = import_jobs.create_job(paths, import_api.owner(request), company)
+    created = import_jobs.create_job(paths, import_api.owner(request), company, mode="automatic")
     return {"ok": True, "job_id": created["id"], "total": len(paths), "errors": errors}
 
 
@@ -630,10 +631,12 @@ def api_crop(request: Request, rec_id: int, box: list = Body(..., embed=True), e
 
 
 @app.post("/api/vouchers/{rec_id}/split")
-def api_split(rec_id: int, box: list = Body(..., embed=True)):
+def api_split(request: Request, rec_id: int, box: list = Body(..., embed=True), expected_updated_at: str = Body(None, embed=True)):
     """一頁多張憑證：裁一塊建立為新憑證紀錄，並把該區從原圖塗白。"""
     try:
-        rec = review.split_voucher(rec_id, box)
+        rec = review.split_voucher(rec_id, box, expected_updated_at=expected_updated_at, actor=auth.get_user_by_token(request.cookies.get("session")))
+    except (review.RecognitionProtected, entry_workflow.EntryConflict):
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.exception("分割辨識失敗")
         return JSONResponse({"ok": False, "detail": f"分割失敗：{exc}"}, status_code=500)
@@ -669,11 +672,28 @@ def api_set_type(request: Request, rec_id: int, doc_type_key: str = Body(..., em
     return {"ok": True, **_rec_to_dict(rec, full=True)} if rec else JSONResponse({"detail": "找不到紀錄"}, status_code=404)
 
 
+@app.post("/api/vouchers/appearance-batch")
+def api_appearance_batch(request: Request, items: list[dict] = Body(..., embed=True), operation: str = Body(..., embed=True)):
+    if len(items) > 500:
+        return JSONResponse({"detail":"每次最多操作500筆"},status_code=400)
+    return review.appearance_batch(items,operation,actor=auth.get_user_by_token(request.cookies.get("session")))
+
+
 @app.post("/api/vouchers/{rec_id}/confirm-appearance")
-def api_confirm_appearance(rec_id: int, doc_type_key: str = Body("", embed=True)):
+def api_confirm_appearance(request: Request, rec_id: int, doc_type_key: str = Body("", embed=True), expected_updated_at: str = Body(None, embed=True), direction_confirmed: bool = Body(False, embed=True), document_mode: str = Body("single", embed=True)):
     """外觀確認完成 → 加入掃描清單（prepared → queued）。可帶 doc_type_key 先修正類型。"""
-    rec = review.confirm_appearance(rec_id, doc_type_key)
-    return {"ok": True, "id": rec.id} if rec else JSONResponse({"detail": "找不到紀錄"}, status_code=404)
+    from app.services import import_jobs
+    try:
+        rec = review.confirm_appearance(rec_id, doc_type_key,expected_updated_at=expected_updated_at,
+            direction_confirmed=direction_confirmed,document_mode=document_mode,actor=auth.get_user_by_token(request.cookies.get("session")))
+    except import_jobs.JobNotFound as exc:
+        return JSONResponse({"detail":str(exc)},status_code=404)
+    except import_jobs.JobConflict as exc:
+        return JSONResponse({"detail":str(exc)},status_code=409)
+    if not rec:
+        return JSONResponse({"detail":"找不到紀錄"},status_code=404)
+    pending = json.loads(rec.current_json).get("origin",{}).get("preparation",{}).get("layout_pending",False)
+    return JSONResponse({"ok":True,"id":rec.id,"status":rec.status.value,"layout_pending":pending},status_code=202 if pending else 200)
 
 
 @app.post("/api/vouchers/{rec_id}/recognize")

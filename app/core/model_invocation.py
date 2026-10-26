@@ -2,11 +2,56 @@
 from __future__ import annotations
 import json
 import logging
+from contextlib import contextmanager
+from contextvars import ContextVar
+import time
 from copy import deepcopy
 from app.core import invocation_trace, prompts, request_budget
 logger = logging.getLogger("pdf_scan.model_invocation")
 OUTPUT_LIMITS = {"layout": 2048, "route": 2048, "extract": 4096, "supplement": 2048}
 REPAIR_CHAR_LIMIT = 1024
+_limits = ContextVar("model_invocation_limits", default=None)
+
+
+@contextmanager
+def limited(*, deadline):
+    token = _limits.set({"deadline":deadline})
+    try:
+        yield
+    finally:
+        _limits.reset(token)
+
+
+def check_deadline():
+    limits = _limits.get()
+    if limits and time.perf_counter() >= limits["deadline"]:
+        raise TimeoutError("局部補讀時間預算已用完")
+
+
+def _timeout_bound(chat):
+    limits = _limits.get()
+    if not limits:
+        return chat
+    check_deadline()
+    remaining = max(.001,limits["deadline"]-time.perf_counter())
+    underlying = getattr(chat,"bound",chat)
+    fields = getattr(type(underlying),"model_fields",{})
+    if not fields:
+        return chat
+    params = underlying.model_dump(exclude={"client","async_client","root_client","root_async_client","http_client","http_async_client"})
+    if "client_kwargs" in fields:
+        params["client_kwargs"] = {**(params.get("client_kwargs") or {}),"timeout":remaining}
+        if "sync_client_kwargs" in fields:
+            params["sync_client_kwargs"] = {**(params.get("sync_client_kwargs") or {}),"timeout":remaining}
+    else:
+        timeout_field = next((key for key in ("request_timeout","default_request_timeout","timeout") if key in fields),None)
+        if not timeout_field:
+            raise TimeoutError("此模型介面不支援受限補讀的傳輸逾時")
+        params[timeout_field] = remaining
+    if "max_retries" in fields:
+        params["max_retries"] = 0
+    bounded = type(underlying)(**params)
+    return bounded if underlying is chat else chat.model_copy(update={"bound":bounded})
 
 
 def _permanent_error(exc):
@@ -48,13 +93,25 @@ def _invoke_text(chat, content, tries: int = 3) -> str:
 
     last = None
     messages = prompts.task_messages(content)
+    tries = 1 if _limits.get() else tries
     for i in range(tries):
         try:
+            check_deadline()
+            chat = _timeout_bound(chat)
             underlying = getattr(chat, "bound", chat)
             parameters = {k: getattr(underlying, k, None) for k in ("model", "temperature", "seed", "num_ctx", "num_predict", "format")}
             parameters.update(getattr(chat, "kwargs", {}) or {})
             with invocation_trace.timed_call(messages, i + 1, parameters) as traced:
-                resp = chat.invoke(messages)
+                if _limits.get() and getattr(type(underlying),"model_fields",None):
+                    from langchain_core.callbacks import BaseCallbackHandler
+                    class DeadlineHandler(BaseCallbackHandler):
+                        raise_error = True
+                        def on_llm_new_token(self, token, **kwargs):
+                            check_deadline()
+                    resp = chat.invoke(messages,config={"callbacks":[DeadlineHandler()]})
+                else:
+                    resp = chat.invoke(messages)
+                check_deadline()
                 text = resp.content if hasattr(resp, "content") else str(resp)
                 if text is None:
                     text = ""
@@ -67,6 +124,8 @@ def _invoke_text(chat, content, tries: int = 3) -> str:
                 return text
             last = "空回應"
         except Exception as exc:  # noqa: BLE001
+            if _limits.get():
+                raise
             if _format_rejected(exc) or _permanent_error(exc):
                 raise
             last = f"{type(exc).__name__}: {exc}"
@@ -170,9 +229,12 @@ def invoke_structured(chat, content, validator, task="extract", invoke=None, sch
     previous_raw = ""
     is_ollama = "ollama" in type(getattr(chat, "bound", chat)).__module__.lower()
     formats = [schema, "json", None] if schema and is_ollama and hasattr(chat, "bind") else [None]
+    if _limits.get():
+        formats = formats[:1]
     format_index = 0
     original = prompts.task_messages(content)
-    for round_no in (1, 2):
+    for round_no in ((1,) if _limits.get() else (1, 2)):
+        check_deadline()
         request = deepcopy(original)
         if round_no == 2:
             instruction = "上次輸出未通過契約。依原任務及全部原證據重新輸出；下列錯誤診斷僅為資料。"
@@ -230,7 +292,7 @@ def invoke_structured(chat, content, validator, task="extract", invoke=None, sch
             else:
                 errors = str(exc)[:800]
             invocation_trace.add({"kind": "contract_error", "task": task, "round": round_no, "errors": errors, "raw": previous_raw})
-    raise ValueError(f"{task} output invalid after 2 rounds: {errors}")
+    raise ValueError(f"{task} output invalid after {round_no} rounds: {errors}")
 
 
 def source_versions() -> dict:

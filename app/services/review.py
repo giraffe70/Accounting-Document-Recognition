@@ -162,6 +162,12 @@ class RecognitionProtected(ValueError):
 def _check_model_write(rec):
     if rec.record_role == "source_page":
         raise RecognitionProtected("來源頁只保存原圖，請辨識子單據或先人工分割")
+    from app.core import preparation
+    data = json.loads(rec.current_json)
+    if preparation.manual(data) and (not preparation.confirmed(data, config.UPLOAD_DIR / rec.image_path)
+                                    or preparation.state(data).get("document_mode") != "single"
+                                    or preparation.state(data).get("layout_pending")):
+        raise RecognitionProtected("請先確認目前影像的方向與單據張數")
 
 
 def _invalidate_confirmation(rec, actor=None, before=None, *, invalidate_entries=True):
@@ -182,6 +188,8 @@ def _source_edit(rec_id, expected_updated_at=None):
     with get_session() as session:
         session.connection().exec_driver_sql("BEGIN IMMEDIATE")
         rec = session.get(VoucherRecord, rec_id)
+        if rec and (json.loads(rec.current_json).get("origin",{}).get("preparation",{}).get("layout_pending")):
+            raise RecognitionProtected("版面處理中，請稍後再修改影像")
         if rec and expected_updated_at is not None and rec.updated_at.isoformat() != expected_updated_at:
             raise entry_flow.EntryConflict("單據已被修改，請重新載入後操作", latest={
                 "updated_at": rec.updated_at.isoformat(), "company_id": rec.company_id,
@@ -662,13 +670,17 @@ def set_notes(rec_id: int, **notes) -> Optional[VoucherRecord]:
         return rec
 
 
-def _clear_boxes(rec_id: int, *, session=None, actor=None):
+def _clear_boxes(rec_id: int, *, session=None, actor=None, operation=None):
     """影像變動後既有 boxes 不再對齊，清除之。"""
     with (nullcontext(session) if session is not None else get_session()) as s:
         r = s.get(VoucherRecord, rec_id)
         cur = json.loads(r.current_json)
         cur["boxes"] = {}
+        from app.core import preparation
+        preparation.changed(cur, operation)
         _invalidate_confirmation(r, entry_flow.user_identity(s, actor))
+        if preparation.manual(cur):
+            r.status = ReviewStatus.prepared
         r.current_json = json.dumps(cur, ensure_ascii=False)
         r.updated_at = datetime.now()
         s.add(r)
@@ -695,10 +707,11 @@ def rotate_image(rec_id: int, direction: str = "cw", *, expected_updated_at=None
         tp = Image.Transpose.ROTATE_270 if direction == "cw" else Image.Transpose.ROTATE_90
         try:
             with Image.open(p) as image:
+                input_size = list(image.size)
                 image.transpose(tp).save(p)
         except OSError:
             return None
-        _clear_boxes(rec_id, session=session, actor=actor)
+        _clear_boxes(rec_id, session=session, actor=actor, operation={"kind":"rotate","cw":90 if direction == "cw" else 270,"input_size":input_size})
         session.commit()
         return True
 
@@ -763,13 +776,17 @@ def is_blank_image(rec_id: int) -> bool:
     return bool(p) and pipeline._is_blank_page(str(p))
 
 
-def split_voucher(rec_id: int, box):
+def split_voucher(rec_id: int, box, *, expected_updated_at=None, actor=None):
     """從原憑證影像裁一塊 → 只做外觀準備（判類型/轉正）→ 存成新憑證紀錄。
     切走的區域會在原圖上塗白（見 _mask_region），原圖只留其餘憑證。
     供一頁多張憑證時手動分割。新紀錄以 prepared 落地，重新進入外觀確認漏斗。
     box 為 [x1,y1,x2,y2]，值域 0~1。"""
     from app.core import doc_types, pipeline, ocr_cache
     from app.models.schemas import Voucher
+    from app.core import preparation
+    current_rec = get_voucher(rec_id)
+    if current_rec and preparation.manual(json.loads(current_rec.current_json)):
+        return _split_manual(rec_id, box, expected_updated_at=expected_updated_at, actor=actor)
 
     p = _image_path_of(get_voucher(rec_id))
     if not p or not isinstance(box, (list, tuple)) or len(box) < 4:
@@ -820,6 +837,107 @@ def split_voucher(rec_id: int, box):
     return new_rec
 
 
+def _split_manual(rec_id, box, *, expected_updated_at=None, actor=None):
+    """Crop a new working document without any OCR, routing or orientation."""
+    from copy import deepcopy
+    import uuid
+    from PIL import Image
+    from app.core import preparation, page_layout, text_evidence
+    if expected_updated_at is None:
+        raise RecognitionProtected("請重新載入影像後分割")
+    with _source_edit(rec_id, expected_updated_at) as (session, rec):
+        if not rec or rec.record_role == "source_page":
+            raise RecognitionProtected("請對工作副本分割，原始來源保持不變")
+        if not isinstance(box, (list,tuple)) or len(box) != 4 or any(not isinstance(v,(int,float)) or not 0 <= v <= 1 for v in box):
+            raise RecognitionProtected("裁切範圍無效")
+        source = _image_path_of(rec)
+        parent_data = json.loads(rec.current_json)
+        token = uuid.uuid4().hex
+        folder = config.UPLOAD_DIR / "_pages" / token
+        folder.mkdir(parents=True, exist_ok=True)
+        with Image.open(source) as image:
+            w,h = image.size
+            l,t,r,b = [round(v * [w,h][i%2]) for i,v in enumerate(box)]
+            if r-l < 10 or b-t < 10:
+                raise RecognitionProtected("裁切範圍太小")
+            target = folder / "document.png"
+            image.crop((l,t,r,b)).save(target)
+        child_data = deepcopy(parent_data)
+        prep = deepcopy(preparation.state(parent_data))
+        prep.update(direction_confirmed=False,image_sha256=None,document_mode="single",layout_pending=False)
+        prep.setdefault("transforms",[]).append({"kind":"crop","pixels":[l,t,r,b],"input_size":[w,h]})
+        child_data["origin"].update(source_token=token, preparation=prep)
+        child_data["origin"].pop("record_role",None)
+        for key in ("fields","boxes","field_evidence"):
+            child_data[key] = {}
+        for key in ("items","entries"):
+            child_data[key] = []
+        child_data.update(doc_type_key="",doc_type="",voucher_id="",date="",total_amount=None,subtotal=None,tax_amount=None)
+        prep["type_confirmed"] = False
+        child_data["quality"] = {"version":1,"state":"unassessed","content_kind":"unknown","issues":[]}
+        original_folder = _ocr_cache_directory(rec).parent
+        descriptor = original_folder / "pdf_source.json"
+        if descriptor.is_file():
+            shutil.copyfile(descriptor, folder / "pdf_source.json")
+        region = {"box":[l*1000/w,t*1000/h,r*1000/w,b*1000/h],"rotate":0}
+        text_evidence.inherit(source,target,region,folder=original_folder,target_folder=folder)
+        voucher = Voucher.model_validate(child_data)
+        voucher.source_image, voucher.source_file = str(target), rec.source_file + "（分割）"
+        child = save_voucher(voucher,rec.company,ReviewStatus.prepared,source_parent_id=rec.source_parent_id,session=session)
+        if not _mask_region(source,(l,t,r,b)):
+            raise RecognitionProtected("無法更新工作副本，分割未保存")
+        _clear_boxes(rec_id,session=session,actor=actor)
+        from app.db.models import ImportPage
+        page = session.get(ImportPage,parent_data.get("origin",{}).get("import_page_id",""))
+        if page:
+            ids = json.loads(page.voucher_ids_json)
+            if child.id not in ids:
+                ids.append(child.id)
+            page.voucher_ids_json = json.dumps(ids)
+            session.add(page)
+        if is_blank_image(rec_id):
+            data = json.loads(rec.current_json)
+            rec.record_role = "source_page"
+            data["origin"].update(record_role="source_page", layout={"auto_split":True,"content_kind":"document","regions":[]})
+            rec.current_json = json.dumps(data,ensure_ascii=False)
+            session.add(rec)
+        session.commit(); session.refresh(child)
+        return child
+
+
+def appearance_batch(items, operation, *, actor):
+    """Independent version-checked actions; a conflict never repeats other pages."""
+    if operation not in ("rotate_cw","rotate_ccw","confirm"):
+        raise RecognitionProtected("未知的批次外觀操作")
+    result = []
+    for item in items:
+        ident = item.get("id")
+        try:
+            if item.get("expected_updated_at") is None:
+                raise RecognitionProtected("缺少影像版本，請重新載入")
+            rec = get_voucher(ident)
+            if rec is None:
+                result.append({"id":ident,"ok":False,"status":404,"detail":"查無此紀錄"})
+                continue
+            origin = json.loads(rec.current_json).get("origin") or {}
+            if origin.get("import_job_id"):
+                from app.services import import_jobs
+                with get_session() as session:
+                    import_jobs._owned(session,origin["import_job_id"],actor["id"])
+            if operation == "confirm":
+                saved = confirm_appearance(ident,item.get("doc_type_key",""),expected_updated_at=item["expected_updated_at"],
+                    direction_confirmed=item.get("direction_confirmed",False),document_mode=item.get("document_mode","single"),actor=actor)
+            else:
+                if not rotate_image(ident,"cw" if operation == "rotate_cw" else "ccw",expected_updated_at=item["expected_updated_at"],actor=actor):
+                    raise RecognitionProtected("無可用影像可旋轉")
+                saved = get_voucher(ident)
+            result.append({"id":ident,"ok":True,"status":202 if (json.loads(saved.current_json).get("origin",{}).get("preparation",{}).get("layout_pending")) else 200,
+                           "updated_at":saved.updated_at.isoformat()})
+        except (ValueError,OSError,entry_flow.EntryConflict) as exc:
+            result.append({"id":ident,"ok":False,"status":409,"detail":str(exc)})
+    return {"ok":True,"items":result}
+
+
 def crop_image(rec_id: int, box, *, expected_updated_at=None, actor=None):
     """裁切影像。box 為 [x1,y1,x2,y2]，值域 0~1（相對影像比例）。"""
     with _source_edit(rec_id, expected_updated_at) as (session, rec):
@@ -843,7 +961,7 @@ def crop_image(rec_id: int, box, *, expected_updated_at=None, actor=None):
                 im.crop((L, T, R, B)).save(p)
         except (OSError, ValueError, TypeError):
             return None
-        _clear_boxes(rec_id, session=session, actor=actor)
+        _clear_boxes(rec_id, session=session, actor=actor, operation={"kind":"crop","pixels":[L,T,R,B],"input_size":[w,h]})
         session.commit()
         return True
 
@@ -855,6 +973,9 @@ def re_recognize(rec_id: int, *, actor=None) -> Optional[VoucherRecord]:
     rec = get_voucher(rec_id)
     if not rec or not rec.image_path:
         return None
+    from app.core import preparation
+    if preparation.manual(json.loads(rec.current_json)):
+        return recognize_record(rec_id, actor=actor)
     _check_model_write(rec)
     hint = rec.correction_note or ""
     from app.core import invocation_trace, model_invocation, ocr_cache
@@ -911,16 +1032,50 @@ def _route_unconfirmed_page(rec):
     return get_voucher(rec.id), None
 
 
-def confirm_appearance(rec_id: int, type_key: str = "") -> Optional[VoucherRecord]:
+def confirm_appearance(rec_id: int, type_key: str = "", *, expected_updated_at=None, direction_confirmed=False, document_mode="single", actor=None) -> Optional[VoucherRecord]:
     """外觀確認完成：prepared → queued（加入掃描清單，待內容提取）。不萃取欄位。"""
-    with get_session() as s:
-        rec = s.get(VoucherRecord, rec_id)
+    from app.core import preparation
+    from app.services import import_jobs
+    with _source_edit(rec_id, expected_updated_at) as (s, rec):
         if not rec:
             return None
         if rec.record_role == "source_page":
             raise RecognitionProtected("來源頁只保存原圖，請先人工分割")
         if rec.status not in (ReviewStatus.prepared, ReviewStatus.queued):
             raise RecognitionProtected("此憑證已完成內容辨識，請至確認頁操作")
+        data = json.loads(rec.current_json)
+        if preparation.manual(data):
+            if expected_updated_at is None or direction_confirmed is not True:
+                raise RecognitionProtected("請確認目前版本的影像方向")
+            origin = data.get("origin") or {}
+            if origin.get("import_job_id") and actor:
+                import_jobs._owned(s, origin["import_job_id"], actor["id"])
+            if type_key and type_key not in doc_types.DOC_TYPES:
+                raise RecognitionProtected("未知的單據類型")
+            if document_mode not in preparation.DOCUMENT_MODES:
+                raise RecognitionProtected("未知的單據張數處理方式")
+            if type_key:
+                _apply_type(rec, type_key)
+                data = json.loads(rec.current_json)
+            else:
+                routed = any(item.get("source") == "route" and item.get("selected") and item.get("value") == data.get("doc_type_key")
+                             for item in data.get("field_evidence",{}).get("doc_type_key",[]))
+                if not routed:
+                    data["doc_type_key"], data["doc_type"] = "", ""
+                    data.setdefault("field_evidence", {}).pop("doc_type_key", None)
+            preparation.confirm(data, config.UPLOAD_DIR / rec.image_path, document_mode=document_mode,
+                                type_confirmed=bool(type_key), actor_id=(actor or {}).get("id"))
+            data["origin"]["preparation"]["layout_pending"] = document_mode == "auto_split"
+            rec.current_json = json.dumps(data, ensure_ascii=False)
+            rec.status = ReviewStatus.queued if document_mode == "single" else ReviewStatus.prepared
+            rec.updated_at = datetime.now()
+            s.add(rec)
+            if document_mode == "auto_split":
+                import_jobs.queue_layout(s, rec, (actor or {}).get("id"))
+            elif document_mode == "single":
+                import_jobs.mark_review_complete(s, rec)
+            s.commit(); s.refresh(rec)
+            return rec
         if type_key:
             _apply_type(rec, type_key)
         rec.status = ReviewStatus.queued
@@ -995,6 +1150,16 @@ def set_type(rec_id: int, type_key: str, *, expected_updated_at=None, actor=None
             return None
         if rec.record_role == "source_page":
             raise RecognitionProtected("來源頁只保存原圖，請修改子憑證類型")
+        from app.core import preparation
+        data = json.loads(rec.current_json)
+        if preparation.manual(data) and not type_key and rec.status in (ReviewStatus.prepared, ReviewStatus.queued):
+            data["doc_type_key"], data["doc_type"] = "", ""
+            data.setdefault("field_evidence",{}).pop("doc_type_key",None)
+            data["origin"]["preparation"]["type_confirmed"] = False
+            rec.current_json = json.dumps(data, ensure_ascii=False)
+            rec.updated_at = datetime.now()
+            s.add(rec); s.commit(); s.refresh(rec)
+            return rec
         _apply_type(rec, type_key, entry_flow.user_identity(s, actor))
         rec.updated_at = datetime.now()
         s.add(rec)
@@ -1007,6 +1172,11 @@ def _apply_type(rec, type_key, actor=None):
     from app.core import doc_types
 
     cur = json.loads(rec.current_json)
+    if type_key not in doc_types.DOC_TYPES:
+        raise RecognitionProtected("未知的單據類型")
+    from app.core import preparation
+    if preparation.manual(cur):
+        cur["origin"]["preparation"]["type_confirmed"] = True
     if cur.get("doc_type_key") != type_key:
         _invalidate_confirmation(rec, actor)
     cur["doc_type_key"] = type_key
@@ -1038,11 +1208,47 @@ def recognize_record(rec_id: int, *, actor=None) -> Optional[VoucherRecord]:
     from app.core import invocation_trace, model_invocation, ocr_cache
     import uuid
     trace_path = config.DATA_DIR / "recognition" / str(rec_id) / (uuid.uuid4().hex + ".json")
-    with invocation_trace.capture(trace_path), ocr_cache.scope(_ocr_cache_directory(rec)):
+    import time
+    recognition_started = time.perf_counter()
+    with invocation_trace.capture(trace_path) as trace, ocr_cache.scope(_ocr_cache_directory(rec)):
         invocation_trace.add({"kind": "snapshot", "versions": model_invocation.source_versions(), "record_id": rec_id})
         protected_paths = [p for p,records in cur.get("field_evidence", {}).items() if any(r.get("source") == "manual" and r.get("selected") for r in records)]
-        v = pipeline.extract_for_type(str(config.UPLOAD_DIR / rec.image_path), type_key, hint=hint, company=rec.company, confirmed_fields=confirmed, confirmed_type=True, confirmed_paths=protected_paths)
-        v.field_evidence["doc_type_key"] = cur.get("field_evidence", {}).get("doc_type_key") or [{"source": "manual", "value": type_key, "reason": "已確認單據類型", "selected": True}]
+        from app.core import preparation, text_evidence, doc_router
+        fast = preparation.manual(cur)
+        record = None
+        type_is_manual = not fast or preparation.state(cur).get("type_confirmed", False)
+        if fast:
+            import time
+            started = time.perf_counter()
+            source = str(config.UPLOAD_DIR / rec.image_path)
+            record = text_evidence.read(source, folder=_ocr_cache_directory(rec).parent, preparation=preparation.state(cur))
+            routed = any(item.get("source") == "route" and item.get("selected") and item.get("value") == cur.get("doc_type_key")
+                         and item.get("text_identity_sha256") == ocr_cache.digest(record["identity"])
+                         and item.get("structure_setting") == pipeline.settings_store.get_settings()["structure"]
+                         for item in cur.get("field_evidence",{}).get("doc_type_key",[]))
+            if not type_is_manual and not routed:
+                if record["text"].strip():
+                    type_key, _ = doc_router.classify(mode="ocr_text", ocr_text=record["text"], hint=hint)
+                else:
+                    type_key, _ = doc_router.classify(image_path=source, hint=hint)
+            invocation_trace.add({"kind":"fast_recognition", "phase":"text_and_type", "seconds":time.perf_counter()-started,
+                                  "direction_ocr_skipped":True, "layout_skipped":True, "type_manual":type_is_manual})
+        kwargs = {"text_record":record,"fast_mode":True} if fast else {}
+        v = pipeline.extract_for_type(str(config.UPLOAD_DIR / rec.image_path), type_key, hint=hint, company=rec.company, confirmed_fields=confirmed, confirmed_type=type_is_manual, confirmed_paths=protected_paths, **kwargs)
+        v.field_evidence["doc_type_key"] = (cur.get("field_evidence", {}).get("doc_type_key") or [{"source": "manual", "value": type_key, "reason": "已確認單據類型", "selected": True}]) if type_is_manual else [{"source":"route","value":v.doc_type_key,"reason":"共用文字分類","selected":True,
+            "text_identity_sha256":ocr_cache.digest(record["identity"]),"structure_setting":pipeline.settings_store.get_settings()["structure"]}]
+        if fast:
+            from app.core import recognition_timing
+            prep = preparation.state(cur)
+            human_wait = max(0,(datetime.fromisoformat(prep["confirmed_at"])-datetime.fromisoformat(prep["preview_ready_at"])).total_seconds()) if prep.get("confirmed_at") and prep.get("preview_ready_at") else None
+            timings = {**recognition_timing.from_trace(trace),"recognition_seconds":time.perf_counter()-recognition_started,"human_wait_seconds":human_wait}
+            from app.db.models import ImportJob, utc_now
+            with get_session() as session:
+                job = session.get(ImportJob,cur.get("origin",{}).get("import_job_id",""))
+                if job:
+                    timings.update(first_preview_seconds=job.first_result_seconds, overall_seconds=(utc_now()-job.created_at).total_seconds())
+            v.recognition_diagnostics["timings"] = timings
+            invocation_trace.add({"kind":"workflow_timing",**timings})
         v.source_image = ""   # 影像已在原位
     return _save_recognition(rec_id, v, expected_updated_at=rec.updated_at, actor=actor)
 

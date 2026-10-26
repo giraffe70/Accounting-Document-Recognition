@@ -125,7 +125,7 @@ def _prompt_evidence(evidence):
                 if image_evidence._contains(box, r["box"])]} for box in groups]}
 
 
-def detect(image_path, *, mode="image", ocr_lines=None, ocr_text="", model_setting=None, native_path=None):
+def detect(image_path, *, mode="image", ocr_lines=None, ocr_text="", model_setting=None, native_path=None, orientation_confirmed=False):
     from app.core import pipeline, activity, barcode, page_ocr, work_progress
     settings=settings_store.get_settings()
     setting=model_setting or settings["structure"]
@@ -134,7 +134,7 @@ def detect(image_path, *, mode="image", ocr_lines=None, ocr_text="", model_setti
     with Image.open(image_path) as image:
         size=image.size
     rotation, transforms=0,{}
-    if ocr_lines is None and settings_store.parse_setting(settings.get("ocr","disabled/none"))[0] not in ("disabled","none"):
+    if ocr_lines is None and not orientation_confirmed and settings_store.parse_setting(settings.get("ocr","disabled/none"))[0] not in ("disabled","none"):
         try:
             with activity.stage("ocr", "原頁版面 OCR"):
                 ocr_lines,ocr_text,rotation,transforms=page_ocr.read(native_path or image_path,size,folder=Path(image_path).parent/"page_ocr",setting=settings.get("ocr","paddle/pp-ocrv5"))
@@ -156,6 +156,8 @@ def detect(image_path, *, mode="image", ocr_lines=None, ocr_text="", model_setti
         "content_kind: blank/supporting/non_voucher/document/unknown；layout_kind: single/multiple/uncertain；confidence: high/medium/low。",
         "多聯、表格欄位、明細列及合計區屬同一單據。佐證會計關係不等同非憑證；有独立付款資訊的收據與車票仍是document。",
         "reason最多120字。rotate順時針0/90/180/270，純文字模式固定0。"])
+    if orientation_confirmed:
+        instructions += "\n方向已由人工確認，rotate必須為0，不得重新判斷或旋轉。"
     data={**prompt_evidence.assemble(ocr_text,{"ocr_lines":ocr_lines},image_path),"source_evidence":_prompt_evidence(evidence)}
     content=[{"type":"text","text":instructions+prompts.DATA_SEPARATOR+prompts._json(data)}]
     if mode=="image":
@@ -163,12 +165,17 @@ def detect(image_path, *, mode="image", ocr_lines=None, ocr_text="", model_setti
     page_errors=[]
     def page_validator(raw):
         page=validate_page(raw,mode)
+        if orientation_confirmed and page["rotate"] != 0:
+            raise ValueError("human-confirmed direction requires rotate=0")
         if page["content_kind"]=="document" and page["layout_kind"]=="single" and len(image_evidence.independent_groups(evidence))>1:
             raise ValueError("single contradicts independent complete transaction groups; repair layout_kind")
         return page
     try:
         with activity.stage("structure",setting+"（頁面角色／判類型）"):
-            page=model_invocation.invoke_structured(chat,content,page_validator,task="layout",schema=_page_schema(mode),invoke=pipeline._invoke_text,diagnostics=diagnostics)
+            schema = _page_schema(mode)
+            if orientation_confirmed:
+                schema["properties"]["rotate"]["enum"] = [0]
+            page=model_invocation.invoke_structured(chat,content,page_validator,task="layout",schema=schema,invoke=pipeline._invoke_text,diagnostics=diagnostics)
     except ValueError as exc:
         if isinstance(exc, request_budget.BudgetError):
             raise
@@ -211,6 +218,8 @@ def detect(image_path, *, mode="image", ocr_lines=None, ocr_text="", model_setti
             result["issues"].append("multiple page lacks calibrated model geometry and OCR groups")
         else:
             schema=_region_schema(region_mode,ocr_lines,coordinates)
+            if orientation_confirmed:
+                schema["properties"]["regions"]["items"]["properties"]["rotate"]["enum"] = [0]
             directive="已判斷為多張，僅輸出regions。每個區域必須是一張完整單據；禁止文字行、表格欄位、多聯與合計區碎片。reason最多120字。"
             directive += "文字模式box=null，line_ids只能使用已提供唯一ID；不接收圖片。" if region_mode=="ocr_text" else "圖片模式禁止line_ids。"+model_coordinates.instructions(coordinates)
             region_data={"page":page, "source_evidence":_prompt_evidence(evidence)}
@@ -225,6 +234,8 @@ def detect(image_path, *, mode="image", ocr_lines=None, ocr_text="", model_setti
             def validator(raw):
                 if set(raw)!={"regions"}:
                     raise ValueError("region task requires only regions")
+                if orientation_confirmed and any(r.get("rotate") != 0 for r in raw["regions"]):
+                    raise ValueError("human-confirmed regions require rotate=0")
                 layout=validate_layout({**{k:page[k] for k in ("type","rotate","reason","content_kind","layout_kind")},"rotate":0 if region_mode=="ocr_text" else page["rotate"],"regions":raw["regions"]},region_mode,ocr_lines,size,evidence,coordinate_context=coordinates,strict=True)
                 if not layout["auto_split"]:
                     raise ValueError("regions require high-confidence complete document evidence")

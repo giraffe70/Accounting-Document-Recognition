@@ -205,8 +205,11 @@ def ocr_status() -> dict:
         return {"available": False, "python": pyver,
                 "detail": f"PaddleOCR 未安裝（目前 Python {pyver}；需 ≤3.12）"
                           "，辨識將降級為 VLM 直讀。"}
-    return {"available": True, "python": pyver,
-            "detail": f"地端 PaddleOCR 可用（Python {pyver}）"}
+    from app.core.ocr_engine import loaded_models
+    actual = loaded_models()
+    names = " / ".join(dict.fromkeys(actual.values()))
+    return {"available": True, "python": pyver, "actual_models":actual,
+            "detail": f"地端 PaddleOCR 可用（Python {pyver}）；" + (names or "模型尚未載入")}
 
 
 @lru_cache(maxsize=1)

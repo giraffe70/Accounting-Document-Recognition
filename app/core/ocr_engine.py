@@ -17,6 +17,11 @@ os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
 OPTIONS = {"enable_mkldnn": False, "use_doc_orientation_classify": False,
            "use_doc_unwarping": False, "use_textline_orientation": True}
 INFERENCE_LOCK = threading.RLock()
+_ACTUAL_MODELS = {}
+
+
+def loaded_models():
+    return dict(_ACTUAL_MODELS)
 
 
 def runtime_signature(lang="chinese_cht"):
@@ -47,6 +52,8 @@ class PaddleOCREngine:
             ocr = _get_paddle(self.lang)
         finally:
             metrics["engine_init_seconds"] = time.perf_counter() - started
+        from app.core import invocation_trace
+        invocation_trace.add({"kind":"ocr_engine","models":loaded_models(),"engine":runtime_signature(self.lang)})
         started = time.perf_counter()
         try:
             with INFERENCE_LOCK:
@@ -91,7 +98,10 @@ def _load_paddle(lang: str):
         ) from exc
     # 關閉文件方向自動校正（否則框會落在校正後座標系，與顯示影像不對齊）；
     # 方向由本專案 _auto_orient_ocr 以實體旋轉影像處理。保留單行方向(180)校正。
-    return PaddleOCR(
+    engine = PaddleOCR(
         lang=lang,
         **OPTIONS,
     )
+    params = getattr(engine,"_params",{})
+    _ACTUAL_MODELS.update({key:params[key] for key in ("text_detection_model_name","text_recognition_model_name","textline_orientation_model_name") if params.get(key)})
+    return engine

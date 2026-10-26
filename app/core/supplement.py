@@ -225,6 +225,21 @@ def select_targets(data, type_key, text, context, protected):
 
 
 def apply(data, type_key, chat, image_path, *, mode, ocr_text, context, confirmed_fields=None, native_path=None):
+    from app.core import model_invocation
+    import time
+    if not context.get("fast_mode"):
+        return _apply(data,type_key,chat,image_path,mode=mode,ocr_text=ocr_text,context=context,confirmed_fields=confirmed_fields,native_path=native_path)
+    deadline = time.perf_counter()+30
+    context["supplement_deadline"] = deadline
+    invocation_trace.add({"kind":"supplement_budget","seconds":30,"max_model_calls":1,"max_new_ocr":1})
+    try:
+        with model_invocation.limited(deadline=deadline):
+            return _apply(data,type_key,chat,image_path,mode=mode,ocr_text=ocr_text,context=context,confirmed_fields=confirmed_fields,native_path=native_path)
+    except TimeoutError as exc:
+        failed(data,context,exc)
+
+
+def _apply(data, type_key, chat, image_path, *, mode, ocr_text, context, confirmed_fields=None, native_path=None):
     from app.core import pipeline, page_layout, classification_evidence
     fields = data["fields"]
     mapping = doc_types.get(type_key)["common_fields"]
@@ -274,6 +289,10 @@ def apply(data, type_key, chat, image_path, *, mode, ocr_text, context, confirme
             if roi_source != "full_document":
                 roi_path = page_layout.crop(source, region, Path(image_path).with_name(Path(image_path).stem + "_supplement.png"), max_edge=2400)
             else:
+                if context.get("fast_mode"):
+                    invocation_trace.add({"kind":"supplement_skip","reason":"fast_mode_requires_safe_roi"})
+                    data.setdefault("validation_warnings",[]).append("補讀缺少安全局部範圍，保留首讀結果待人工覆核")
+                    return
                 roi_path = str(source)
             with Image.open(roi_path) as roi_image:
                 roi_size = roi_image.size
@@ -320,12 +339,15 @@ def apply(data, type_key, chat, image_path, *, mode, ocr_text, context, confirme
                               "mapped_lines": len(lines), "fresh": need, "reason": need_reason})
         if need:
             try:
+                from app.core import model_invocation
+                model_invocation.check_deadline()
                 provider, _ = pipeline.settings_store.parse_setting(pipeline.settings_store.get_settings()["ocr"])
                 ocr = pipeline.model_factory.get_ocr(provider)
                 started = perf_counter()
                 ocr_requests += 1
                 with ocr_cache.purpose("supplement_original"):
                     raw_lines = ocr.recognize(roi_path)
+                model_invocation.check_deadline()
                 raw_text = ocr.plain_text(raw_lines)
                 invocation_trace.add({"kind": "supplement_ocr", "source": "native_roi_ocr",
                                       "seconds": round(perf_counter() - started, 6), "lines": raw_lines, "text": raw_text})
@@ -338,7 +360,7 @@ def apply(data, type_key, chat, image_path, *, mode, ocr_text, context, confirme
                     context["supplement_prompt_source"] = original_ocr_source
                     target_ocr_text = raw_text
                 _, raw_reason = supplement_roi.needs_fresh_ocr(type_key, requested, groups, lines, region, source_size=source_size)
-                if raw_reason != "existing_ocr_readable":
+                if raw_reason != "existing_ocr_readable" and not context.get("fast_mode"):
                     enhanced, info = image_evidence.enhancement(
                         roi_path, lines or mapped_lines,
                         Path(roi_path).with_name(Path(roi_path).stem + "_enhanced.png"))
@@ -390,6 +412,8 @@ def apply(data, type_key, chat, image_path, *, mode, ocr_text, context, confirme
             return
     full = bool(groups or type_change)
     try:
+        from app.core import model_invocation
+        model_invocation.check_deadline()
         if full:
             result = pipeline.reread_document(roi_path,corrected_type,chat,mode=mode,ocr_text=ocr_text,
                     hint="依文件本身正確類型讀取完整欄位及表格，不推算缺值",evidence=context)

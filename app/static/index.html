@@ -49,6 +49,12 @@
           <label class="up-company">歸屬公司
             <select id="uploadCompany" class="select select-sm"></select>
           </label>
+          <label class="up-company">匯入流程
+            <select id="uploadMode" class="select select-sm">
+              <option value="manual_review">人工確認優先（快速）</option>
+              <option value="automatic">完整自動（方向與版面分析）</option>
+            </select>
+          </label>
           <div id="dropZone" class="drop">
             <p>拖拉 PDF／圖片至此，或點擊選擇</p>
             <p class="hint">支援 PDF、JPG、PNG、BMP、TIFF、WEBP（≤5MB）；可多選批次</p>
@@ -63,6 +69,7 @@
           </div>
         </div>
 
+        <div id="importJobs" class="panel hidden" aria-live="polite"></div>
         <div id="scanSourcePanel" class="panel hidden">
           <div class="row-between">
             <h2>掃描來源目錄</h2>
@@ -91,6 +98,15 @@
         <div id="eProgress" class="progress hidden">
           <div class="bar"><div id="eBarFill" class="fill"></div></div>
           <div id="eProgressText" class="hint"></div>
+        </div>
+        <div id="appearanceBatch" class="callout hidden">
+          <p class="hint">勾選要處理的頁面；未勾選時操作全部待確認單據。</p>
+          <button id="btnBatchRotL" class="btn btn-sm">↺ 批次旋轉</button>
+          <button id="btnBatchRotR" class="btn btn-sm">↻ 批次旋轉</button>
+          <label><input id="batchDirection" type="checkbox">全部方向正確</label>
+          <label><input id="batchSingle" type="checkbox">全部一頁一張</label>
+          <select id="batchType" class="select select-sm" aria-label="批次指定單據類型"><option value="">自動判斷類型</option></select>
+          <button id="btnBatchAppearance" class="btn btn-sm primary">確認並加入掃描清單</button>
         </div>
         <div id="listEmpty" class="hint">此階段目前沒有憑證。</div>
         <table id="listTable" class="list hidden">
@@ -160,6 +176,18 @@
           <b>外觀確認</b>：請先確認上方「單據類型」是否正確（可下拉修正），並用上方工具列<b>旋轉／裁切／分割</b>把影像整理好；
           完成後按「<b>✅ 確認並辨識</b>」才進行內容辨識與審核。
         </div>
+        <div id="manualPreparation" class="callout hidden">
+          <label><input id="directionConfirmed" type="checkbox">我已確認目前影像方向正確</label>
+          <label>頁面處理
+            <select id="documentMode" class="select select-sm">
+              <option value="single">一頁一張，直接提取</option>
+              <option value="auto_split">多張混貼，自動切分</option>
+              <option value="manual_split">多張混貼，人工框選</option>
+            </select>
+          </label>
+          <p class="hint">先完成旋轉與裁切，再確認方向。類型可選自動判斷。</p>
+        </div>
+        <div id="fastTiming" class="hint hidden"></div>
         <div id="reviewBody" class="prep-hide">
         <div id="dynFields" class="grid2"></div>
         <label class="full">摘要／備註<input id="f-note"></label>

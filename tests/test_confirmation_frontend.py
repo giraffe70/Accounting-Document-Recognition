@@ -665,6 +665,19 @@ class ConfirmationFrontendTests(unittest.TestCase):
         later = self.run_trace(rows, stage="queued")["view"]
         self.assertEqual([r["id"] for r in later["vouchers"]], [2])
 
+    def test_manual_source_only_row_is_hidden_while_legacy_source_only_remains_visible(self):
+        manual_source = self.source_row(9, "document", False)
+        manual_source["origin"]["preparation"] = {"mode": "manual_review"}
+        manual_view = self.run_trace([manual_source])["view"]
+
+        self.assertEqual(manual_view["vouchers"], [])
+        self.assertEqual(manual_view["hidden"], 1)
+
+        legacy_source = self.source_row(10, "document", False)
+        legacy_view = self.run_trace([legacy_source])["view"]
+        self.assertEqual([row["id"] for row in legacy_view["vouchers"]], [10])
+        self.assertEqual(legacy_view["hidden"], 0)
+
     def test_blank_only_import_shows_skipped_notice_instead_of_source_rows(self):
         result = self.run_trace([self.source_row(7, "blank", True)])["view"]
 

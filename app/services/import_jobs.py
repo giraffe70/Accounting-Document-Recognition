@@ -37,7 +37,10 @@ def _owned(session, job_id, owner_id):
     return job
 
 
-def create_job(paths, owner_id, company=""):
+def create_job(paths, owner_id, company="", *, mode="manual_review"):
+    from app.core.preparation import MODES
+    if mode not in MODES:
+        raise ValueError("未知的匯入模式")
     if not paths:
         raise ValueError("無有效檔案可匯入")
     versions = model_invocation.source_versions()
@@ -45,7 +48,7 @@ def create_job(paths, owner_id, company=""):
     for item in paths:
         path = str(item["path"] if isinstance(item, dict) else item)
         sources[path] = _source_hash(path) if Path(path).is_file() else None
-    snapshot = {"models": settings_store.get_settings(), "ocr_policy": ocr_policy.get_policy(), "versions": versions, "sources": sources}
+    snapshot = {"models": settings_store.get_settings(), "ocr_policy": ocr_policy.get_policy(), "versions": versions, "sources": sources, "mode": mode}
     job = ImportJob(id=uuid.uuid4().hex, owner_id=owner_id, company=company,
                     version=versions["execution_version_sha256"], settings_json=json.dumps(snapshot, ensure_ascii=False))
     job_id = job.id
@@ -104,7 +107,9 @@ def _view(session, job):
     current = next((p for p in data if p["status"] == "running"), None)
     return {"id": job.id, "job_id": job.id, "status": job.status, "phase": job.phase,
             "total_files": len(files), "total_pages": job.total_pages,
-            "done_pages": sum(p.status in ("completed", "failed") for p in pages),
+            "done_pages": sum(p.status in ("completed", "failed", "preview_ready") for p in pages),
+            "awaiting_review_pages": sum(p.status == "preview_ready" for p in pages),
+            "mode": json.loads(job.settings_json).get("mode", "automatic"),
             "succeeded_pages": sum(p.status == "completed" for p in pages),
             "failed_pages": sum(p.status == "failed" for p in pages), "pages": data,
             "current": {"file": current["file_name"], "page_no": current["page_no"]} if current else None,
@@ -149,7 +154,7 @@ def action(job_id, owner_id, action):
             job.cancel_requested = True
             job.status = "cancelled" if job.status == "queued" else "cancelling"
         elif action in ("resume", "retry-failed"):
-            allowed = ("interrupted", "cancelled") if action == "resume" else ("partial_failed", "failed")
+            allowed = ("interrupted", "cancelled") if action == "resume" else ("partial_failed", "failed", "awaiting_review")
             if job.status not in allowed:
                 raise JobConflict("此工作目前無法續跑或重試")
             snapshot = json.loads(job.settings_json)
@@ -250,7 +255,7 @@ def _run(job_id):
         for page in pages:
             if _cancelled(job_id):
                 break
-            if page["status"] == "completed" or page["status"] == "failed":
+            if page["status"] in ("completed", "failed", "preview_ready"):
                 continue
             file = by_file[page["file_id"]]
             with get_session() as session:
@@ -261,13 +266,21 @@ def _run(job_id):
                 expected = snapshot.get("sources", {}).get(file["path"])
                 if expected and _source_hash(file["path"]) != expected:
                     raise JobConflict("來源檔案已改變，請建立新工作")
+                operation = json.loads(page.get("preparation_json") or "{}")
+                if operation.get("operation") == "layout":
+                    _run_layout(job_id, page, file, operation, company)
+                    continue
                 _phase(job_id, page["id"], "rendering")
                 source = pipeline.render_page(file["path"], page["page_no"], page["source_token"])
-                _phase(job_id, page["id"], "orientation", source)
+                manual_mode = snapshot.get("mode", "automatic") == "manual_review"
+                _phase(job_id, page["id"], "preview" if manual_mode else "orientation", source)
                 with work_progress.capture(lambda phase: _phase(job_id, page["id"], phase)):
-                    vouchers = pipeline.prepare_page(source, file["path"], page["page_no"], token=page["source_token"], group_id=file["group_id"])
+                    prepare = pipeline.prepare_manual_page if manual_mode else pipeline.prepare_page
+                    vouchers = prepare(source, file["path"], page["page_no"], token=page["source_token"], group_id=file["group_id"])
                 for voucher in vouchers:
                     voucher.source_file = f"{file['name']} p{page['page_no']}"
+                    if manual_mode:
+                        voucher.origin.update(import_job_id=job_id, import_page_id=page["id"])
                 if expected and _source_hash(file["path"]) != expected:
                     raise JobConflict("來源檔案在處理期間改變，請建立新工作")
                 with get_session() as session:
@@ -281,7 +294,10 @@ def _run(job_id):
                         if parent and parent.image_path:
                             saved_page.preview_path = str(config.UPLOAD_DIR / parent.image_path)
                         saved_page.voucher_ids_json = json.dumps([r.id for r in records if r.record_role != "source_page"])
-                        saved_page.status, saved_page.phase = "completed", "completed"
+                        saved_page.status = "preview_ready" if manual_mode else "completed"
+                        saved_page.phase = "awaiting_review" if manual_mode else "completed"
+                        if manual_mode:
+                            saved_page.preparation_json = json.dumps({"operation":"review", "preview_ready_at":utc_now().isoformat()})
                         saved = session.get(ImportJob, job_id)
                         if saved.first_result_seconds is None:
                             saved.first_result_seconds = (utc_now() - saved.created_at).total_seconds()
@@ -300,6 +316,7 @@ def _run(job_id):
                     saved_page = session.get(ImportPage, page["id"])
                     saved_page.status, saved_page.phase, saved_page.error = "failed", "failed", f"{type(exc).__name__}: {exc}"
                     session.add(saved_page); session.commit()
+                _clear_layout_pending(page)
         with get_session() as session:
             saved = session.get(ImportJob, job_id)
             pages = session.exec(select(ImportPage).where(ImportPage.job_id == job_id)).all()
@@ -310,11 +327,121 @@ def _run(job_id):
             remaining = any(p.status in ("queued", "running") for p in pages) or any(not f.indexed for f in files)
             if remaining and (saved.cancel_requested or _stop.is_set()):
                 saved.status = "interrupted" if _stop.is_set() else "cancelled"
+            elif remaining:
+                saved.status = "queued"
             else:
-                saved.status = ("partial_failed" if success else "failed") if failed else "completed"
+                saved.status = ("partial_failed" if success else "failed") if failed else "awaiting_review" if any(p.status == "preview_ready" for p in pages) else "completed"
             saved.phase = saved.status
             saved.error = "；".join(f.error for f in file_errors)
             session.add(saved); session.commit()
+
+
+def queue_layout(session, rec, actor_id):
+    """Called inside the appearance transaction; no model runs in the request."""
+    from app.core import preparation
+    data = json.loads(rec.current_json)
+    origin = data.get("origin") or {}
+    page = session.get(ImportPage, origin.get("import_page_id", ""))
+    job = _owned(session, origin.get("import_job_id", ""), actor_id)
+    if page is None or page.job_id != job.id:
+        raise JobConflict("找不到原始匯入頁面")
+    if job.status in ("cancelled", "interrupted", "cancelling"):
+        raise JobConflict("請先續跑匯入工作")
+    snapshot = json.loads(job.settings_json)
+    with ocr_policy.isolated_policy(snapshot["ocr_policy"]):
+        if model_invocation.source_versions()["execution_version_sha256"] != job.version:
+            raise JobConflict("執行版本已改變，請建立新工作")
+    page.preparation_json = json.dumps({"operation":"layout","record_id":rec.id,
+        "expected_updated_at":rec.updated_at.isoformat(), "image_sha256":preparation.fingerprint(config.UPLOAD_DIR / rec.image_path)})
+    page.status, page.phase = "queued", "layout_queued"
+    job.status, job.phase = "queued", "layout_queued"
+    session.add(page); session.add(job)
+    _wake.set()
+
+
+def mark_review_complete(session, rec):
+    origin = json.loads(rec.current_json).get("origin") or {}
+    page = session.get(ImportPage, origin.get("import_page_id", ""))
+    if page is None or page.status != "preview_ready":
+        return
+    ids = json.loads(page.voucher_ids_json)
+    if all((item := session.get(review.VoucherRecord, ident)) is None or item.status != review.ReviewStatus.prepared or item.record_role == "source_page" for ident in ids):
+        page.status, page.phase = "completed", "completed"
+        session.add(page)
+    job = session.get(ImportJob, page.job_id)
+    other = session.exec(select(ImportPage).where(ImportPage.job_id == page.job_id)).all()
+    if job and job.status == "awaiting_review" and all(p.status in ("completed","failed") for p in other):
+        job.status, job.phase = "completed", "completed"
+        session.add(job)
+
+
+def _clear_layout_pending(page):
+    operation = json.loads(page.get("preparation_json") or "{}")
+    if not operation.get("record_id"):
+        return
+    with get_session() as session:
+        rec = session.get(review.VoucherRecord, operation["record_id"])
+        if rec:
+            data = json.loads(rec.current_json)
+            prep = data.get("origin",{}).get("preparation",{})
+            prep["layout_pending"] = False
+            rec.current_json = json.dumps(data, ensure_ascii=False)
+            session.add(rec); session.commit()
+
+
+def _run_layout(job_id, page, file, operation, company):
+    from app.core import preparation
+    rec = review.get_voucher(operation["record_id"])
+    if not rec or rec.updated_at.isoformat() != operation["expected_updated_at"]:
+        raise JobConflict("版面處理前影像版本已改變")
+    source = config.UPLOAD_DIR / rec.image_path
+    current = json.loads(rec.current_json)
+    if not preparation.confirmed(current, source) or preparation.fingerprint(source) != operation["image_sha256"]:
+        raise JobConflict("方向確認已失效")
+    _phase(job_id, page["id"], "layout")
+    with work_progress.capture(lambda phase: _phase(job_id, page["id"], phase)):
+        vouchers = pipeline.prepare_page(str(source), file["path"], page["page_no"], token=page["source_token"],
+            group_id=file["group_id"], confirmed_preparation=preparation.state(current))
+    layout = vouchers[0].origin["layout"]
+    with get_session() as session:
+        session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+        saved = session.get(review.VoucherRecord, rec.id)
+        saved_page = session.get(ImportPage, page["id"])
+        if saved is None or saved_page is None or saved.updated_at != rec.updated_at or preparation.fingerprint(source) != operation["image_sha256"]:
+            raise JobConflict("版面處理期間影像已變更")
+        if saved_page.status == "completed":
+            return
+        data = json.loads(saved.current_json)
+        data["origin"]["preparation"]["layout_pending"] = False
+        data["origin"]["layout"] = layout
+        child_ids = []
+        if layout["auto_split"]:
+            saved.record_role = "source_page"
+            data["origin"]["record_role"] = "source_page"
+            for voucher in vouchers[1:]:
+                voucher.origin.update(import_job_id=job_id, import_page_id=page["id"])
+                voucher.source_file = saved.source_file
+                child = review.save_voucher(voucher, company, review.ReviewStatus.prepared, source_parent_id=rec.id, session=session)
+                child_ids.append(child.id)
+            data["quality"] = vouchers[0].quality
+            saved_page.status, saved_page.phase = "completed", "completed"
+        else:
+            data["quality"] = {"version":1,"state":"needs_review","content_kind":"unknown","issues":layout["issues"]}
+            data["origin"]["preparation"]["document_mode"] = "manual_split"
+            saved_page.status, saved_page.phase = "preview_ready", "awaiting_review"
+            child_ids = [rec.id]
+        saved.current_json = json.dumps(data, ensure_ascii=False)
+        saved.updated_at = datetime.now()
+        saved_page.voucher_ids_json = json.dumps(child_ids)
+        saved_page.preparation_json = json.dumps({"operation":"review"})
+        session.add(saved); session.add(saved_page)
+        try:
+            session.commit()
+        except Exception:
+            session.rollback()
+            for image in session.info.get("import_images", []):
+                image.unlink(missing_ok=True)
+            raise
 
 
 def run_once():

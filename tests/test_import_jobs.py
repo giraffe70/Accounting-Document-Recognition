@@ -54,7 +54,9 @@ class ImportJobsTests(unittest.TestCase):
             yield session
 
     def _job(self, name="synthetic.pdf", owner=1):
-        return import_jobs.create_job([{"path": str(self.root / name), "name": name}], owner)
+        # These contracts exercise the legacy automatic preparation path.
+        return import_jobs.create_job([{"path": str(self.root / name), "name": name}], owner,
+                                      mode="automatic")
 
     def _rows(self, model):
         with Session(self.engine) as session:
@@ -227,7 +229,8 @@ class ImportJobsTests(unittest.TestCase):
     def test_source_changed_during_prepare_fails_page_without_vouchers(self):
         source_file = self.root / "mutable.pdf"
         source_file.write_bytes(b"original source bytes")
-        job = import_jobs.create_job([{"path": str(source_file), "name": "mutable.pdf"}], 1)
+        job = import_jobs.create_job([{"path": str(source_file), "name": "mutable.pdf"}], 1,
+                                     mode="automatic")
 
         def mutate_during_prepare(_source, _path, page_no, *, token, group_id):
             source_file.write_bytes(b"changed source bytes")

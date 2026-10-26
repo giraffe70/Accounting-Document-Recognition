@@ -61,6 +61,9 @@ def _migrate():
         "entries_history": ("VARCHAR", "'[]'"),
     }
     with _engine.begin() as conn:
+        page_columns = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(import_pages)")}
+        if page_columns and "preparation_json" not in page_columns:
+            conn.exec_driver_sql("ALTER TABLE import_pages ADD COLUMN preparation_json VARCHAR DEFAULT '{}'")
         info = list(conn.exec_driver_sql("PRAGMA table_info(voucher_records)"))
         cols = {r[1]: (r[2] or "").upper() for r in info}
         for col, (sqltype, default) in added.items():

@@ -73,9 +73,19 @@ class ImportApiTests(unittest.TestCase):
         self.assertEqual(response.json()["status"], "queued")
         args, kwargs = self.create_job.call_args
         self.assertEqual(args[1:], (1, "Example"))
+        self.assertEqual(kwargs["mode"], "manual_review")
         self.assertEqual(args[0][0]["name"], "sample.pdf")
         self.assertTrue(Path(args[0][0]["path"]).is_file())
         prepare_page.assert_not_called()
+
+    def test_explicit_upload_mode_is_forwarded_to_job_service(self):
+        response = self.client.post(
+            "/api/import-jobs", cookies={"session": "owner-1"},
+            files=[("files", ("sample.pdf", b"synthetic pdf", "application/pdf"))],
+            data={"mode": "automatic"},
+        )
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(self.create_job.call_args.kwargs["mode"], "automatic")
 
     def test_missing_session_returns_401_without_touching_job_service(self):
         response = self.client.get("/api/import-jobs/job-1")

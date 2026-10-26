@@ -168,4 +168,5 @@ class ImportPage(SQLModel, table=True):
     preview_path: str = ""
     source_page_id: Optional[int] = None
     voucher_ids_json: str = "[]"
+    preparation_json: str = "{}"
     error: str = ""
