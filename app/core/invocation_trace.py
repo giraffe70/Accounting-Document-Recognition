@@ -6,6 +6,7 @@ import json
 import os
 import re
 import uuid
+import tempfile
 from pathlib import Path
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -36,20 +37,23 @@ def atomic_json(path, value):
     """Same-directory replacement leaves the last complete journal readable after termination."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + f".{os.getpid()}.{uuid.uuid4().hex}.tmp")
-    with temporary.open("w", encoding="utf-8") as stream:
-        json.dump(_safe(value), stream, ensure_ascii=False, default=str)
-        stream.flush()
-        os.fsync(stream.fileno())
-    for attempt in range(8):
-        try:
-            os.replace(temporary, path)
-            break
-        except PermissionError:
-            # Windows scanners may briefly hold a newly replaced file open.
-            if attempt == 7:
-                raise
-            time.sleep(.025 * (attempt + 1))
+    descriptor, name = tempfile.mkstemp(prefix="j", suffix=".tmp", dir=path.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(_safe(value), stream, ensure_ascii=False, default=str)
+            stream.flush()
+            os.fsync(stream.fileno())
+        for attempt in range(8):
+            try:
+                os.replace(temporary, path)
+                break
+            except PermissionError:
+                if attempt == 7:
+                    raise
+                time.sleep(.025 * (attempt + 1))
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 @contextmanager

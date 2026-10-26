@@ -618,6 +618,9 @@ class VoucherDeleteTests(unittest.TestCase):
 
     def test_delete_endpoints_enforce_scope_busy_and_role(self):
         from fastapi.responses import JSONResponse
+        import_busy = patch("app.services.import_jobs.is_busy", return_value=False)
+        background_busy = import_busy.start()
+        self.addCleanup(import_busy.stop)
 
         users = {"admin-token": {"role": "admin", "username": "admin"}, "clerk-token": {"role": "clerk", "username": "clerk"}}
         auth = SimpleNamespace(get_user_by_token=lambda token: users.get(token))
@@ -641,6 +644,10 @@ class VoucherDeleteTests(unittest.TestCase):
         self.assertEqual(preview(request("admin-token"), pending.id, "")["can_delete"], {"record": True, "upload": True})
         self.assertEqual(delete(request("clerk-token"), pending.id, "upload").status_code, 403)
         self.assertEqual(delete(request("clerk-token"), confirmed.id, "record").status_code, 403)
+
+        background_busy.return_value = True
+        self.assertEqual(delete(request("admin-token"), pending.id, "record").status_code, 409)
+        background_busy.return_value = False
 
         state["_job"]["status"] = "running"
         busy_delete = _load_endpoint("api_delete", {**namespace, "_delete_busy": _load_endpoint("_delete_busy", dict(state))})

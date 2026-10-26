@@ -328,6 +328,8 @@
     const fields = [
       ["orientation_ocr_seconds", "方向判斷 OCR"], ["full_ocr_seconds", "完整 OCR"],
       ["supplement_ocr_seconds", "補讀 OCR"], ["model_seconds", "模型"],
+      ["orientation_model_seconds", "方向模型"], ["orientation_model_init_seconds", "方向模型初始化"],
+      ["resolution_assessment_seconds", "解析度評估"], ["first_result_seconds", "首筆結果"],
       ["ocr_cache_seconds", "OCR 快取"], ["ocr_init_seconds", "OCR 初始化"],
       ["ocr_cache_hits", "OCR 快取命中"], ["ocr_cache_misses", "OCR 快取未命中"],
       ["queue_seconds", "排隊"], ["complete_seconds", "總耗時"],
@@ -335,9 +337,12 @@
     const recorded = timings && typeof timings === "object";
     const rows = fields.map(([key, label]) => {
       const legacyTotal = key === "queue_seconds" || key === "complete_seconds";
-      const value = recorded && (version === 2 || legacyTotal) && timings[key] != null ? timings[key] : null;
+      const v3Only = ["orientation_model_seconds", "orientation_model_init_seconds", "resolution_assessment_seconds", "first_result_seconds"].includes(key);
+      const value = recorded && ([2, 3].includes(version) || legacyTotal) &&
+        (version === 3 || !v3Only) &&
+        timings[key] != null ? timings[key] : null;
       const formatted = value == null || value === "" || !Number.isFinite(Number(value))
-        ? "未記錄"
+        ? (version === 2 && v3Only ? "—" : "未記錄")
         : (key.endsWith("_seconds") ? `${fmt(value)} 秒` : String(value));
       return `<tr><th>${esc(label)}</th><td>${esc(formatted)}</td></tr>`;
     }).join("");

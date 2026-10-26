@@ -224,6 +224,22 @@ def recognize(image_path, signature, compute, metrics):
     return lines
 
 
+def contains(image_path, signature):
+    """Probe immutable evidence before choosing a lower-resolution input."""
+    current = _current.get()
+    if current is None:
+        return False
+    try:
+        identity = {"version": VERSION, **pixels(image_path), "engine": deepcopy(signature)}
+        key = digest(identity)
+        record = current.memory.get(key)
+        if record is None and current.directory:
+            record = json.loads((current.directory / f"{key}.json").read_text(encoding="utf-8"))
+        return valid(record, identity) and _valid_lines(record.get("lines"))
+    except (OSError, ValueError, TypeError, AttributeError):
+        return False
+
+
 def _trace(image, key, source, record, executed, seconds, started, metrics, lines, error=None):
     invocation_trace.add({"kind": "ocr_result", "provider": "paddle", "image": str(image),
                           "purpose": source["purpose"], "seconds": round(seconds, 6),

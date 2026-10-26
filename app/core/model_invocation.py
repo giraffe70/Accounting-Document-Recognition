@@ -242,7 +242,7 @@ def source_versions() -> dict:
     names = {p.relative_to(root).as_posix() for p in (root / "core").glob("*.py")}
     names.update({"models/schemas.py", "services/accounting_policy.py", "services/classify.py",
                   "services/importdecl.py", "services/accounts.py", "services/taxid.py", "services/review.py",
-                  "db/models.py", "db/session.py", "config.py", "validation.py", "main.py", "static/js/validation.js", "static/validation.html", "static/css/validation.css"})
+                  "db/models.py", "db/session.py", "config.py", "validation.py", "main.py", "import_api.py", "services/import_jobs.py", "static/js/validation.js", "static/validation.html", "static/css/validation.css"})
     sources = {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in sorted(names)}
     runtime = {name: hashlib.sha256((config.DATA_DIR / name).read_bytes()).hexdigest()
                if (config.DATA_DIR / name).exists() else None
@@ -260,9 +260,12 @@ def source_versions() -> dict:
     parameters = {"ollama_num_ctx": config.get_ollama_context(), "output_limits": OUTPUT_LIMITS, "repair_char_limit": REPAIR_CHAR_LIMIT}
     from app.core import model_coordinates
     from app.core import page_ocr, ocr_cache, ocr_engine, recognition_timing, supplement, supplement_roi, prompt_evidence
+    from app.core import ocr_policy, ocr_orientation, ocr_resolution
     parameters.update(coordinate_profiles_sha256=model_coordinates.registry_digest(), layout_version=3,
                       page_ocr_version=page_ocr.VERSION, ocr_cache_version=ocr_cache.VERSION,
                       ocr_engine_signature=ocr_engine.runtime_signature(), timings_version=recognition_timing.VERSION)
+    parameters.update(ocr_policy=ocr_policy.get_policy(), orientation_signature=ocr_orientation.signature(),
+                      resolution_version=ocr_resolution.VERSION)
     parameters.update(supplement_policy_version=supplement.POLICY_VERSION, supplement_roi_version=supplement_roi.VERSION,
                       prompt_evidence_version=prompt_evidence.VERSION)
     parameters.update(request_budget_version=request_budget.VERSION, tokenizer_profile_sha256=request_budget.registry_digest(),

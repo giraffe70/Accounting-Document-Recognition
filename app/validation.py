@@ -412,6 +412,13 @@ def create_run(payload: dict):
         ds = con.execute("SELECT * FROM datasets WHERE id=?", (dataset_id,)).fetchone()
         pages = con.execute("SELECT * FROM pages WHERE dataset_id=? ORDER BY relative_path,page_no",
                             (dataset_id,)).fetchall()
+        selected = payload.get("page_ids")
+        if selected is not None:
+            if not isinstance(selected, list) or not selected or any(not isinstance(p, str) for p in selected) or len(set(selected)) != len(selected):
+                return JSONResponse({"detail": "page_ids 必須為非空且不重複的頁面 ID 陣列"}, status_code=400)
+            if not set(selected) <= {p["id"] for p in pages}:
+                return JSONResponse({"detail": "選定頁面不屬於此資料集"}, status_code=400)
+            pages = [p for p in pages if p["id"] in set(selected)]
         if not ds or not pages:
             return JSONResponse({"detail": "資料集不存在或沒有可辨識頁面"}, status_code=400)
         rid = uuid.uuid4().hex
@@ -419,7 +426,7 @@ def create_run(payload: dict):
         settings = {"combinations": combos, "repeats": repeats,
                     "worker_protocol": WORKER_PROTOCOL, "parent_build": LOADED_BUILD, "result_contract_version": RESULT_CONTRACT,
                     "warmup": bool(payload.get("warmup", False)), "timeout_seconds": timeout,
-                    "max_edge": max_edge, "concurrency": 1,
+                    "max_edge": max_edge, "concurrency": 1, "page_ids": [p["id"] for p in pages],
                     **model_invocation.source_versions(),
                     "model_parameters": {"temperature": 0, "seed": 42, "num_ctx":config.get_ollama_context(), "output_limits":model_invocation.OUTPUT_LIMITS},
                     "environment": {"python": platform.python_version(), "platform": platform.platform(),
@@ -959,6 +966,7 @@ def _run_page_child(payload, timeout, runner=None):
         base.update(page_status="partial", processing_reason=reason, quality={"version":1,"state":"needs_review","content_kind":layout["content_kind"],"issues":[{"code":reason,"message":"頁面角色／單張判斷須覆核" if reason=="page_review" else "版面區域須人工確認"}]})
         return {"ok": True, "data": base}
     total_seconds = float(layout_response.get("wall_seconds", 0))
+    first_result_seconds = None
     for index, region in enumerate(layout["regions"]):
         if persist:
             with _connect() as con:
@@ -1018,6 +1026,8 @@ def _run_page_child(payload, timeout, runner=None):
         for kind, info in data.get("artifacts", {}).items():
             base.setdefault("artifacts", {})[f"document_{index}_{kind}"] = info
         total_seconds += float(response.get("wall_seconds", 0))
+        if status == "succeeded" and first_result_seconds is None:
+            first_result_seconds = total_seconds
         base["documents"].append(document)
         # Persist each completed region independently before attempting the next.
         if persist:
@@ -1036,6 +1046,7 @@ def _run_page_child(payload, timeout, runner=None):
     base["timings"] = {**(base.get("timings") or {}),
                        **recognition_timing.merge(layout_timings, *(d.get("timings", {}) for d in base["documents"])),
                        "complete_seconds": total_seconds or sum(float(d.get("timings", {}).get("complete_seconds", 0)) for d in base["documents"]), "recognition_seconds": total_seconds or sum(float(d.get("timings", {}).get("recognition_seconds", 0)) for d in base["documents"])}
+    base["timings"]["first_result_seconds"] = first_result_seconds
     return {"ok": True, "data": base}
 
 
@@ -1311,11 +1322,11 @@ def _recognize_document(payload):
         else:
             ocr = model_factory.get_ocr("paddle")
             from app.core import image_evidence
-            ocr_input = image_evidence.native_ocr(original, result_dir / "ocr_input.png")
+            from app.core import ocr_resolution
             # Page routing has already rotated this native document.
             from app.core import ocr_cache
             with activity.stage("ocr", "paddle/pp-ocrv5"), ocr_cache.purpose("extraction"):
-                native_lines = ocr.recognize(ocr_input)
+                native_lines, ocr_input = ocr_resolution.read(original, result_dir / "ocr_input.png", ocr, purpose="extraction")
             with Image.open(ocr_input) as native_image, Image.open(input_path) as model_image:
                 ocr_lines = image_evidence.map_lines(native_lines, native_image.size, model_image.size)
             ocr_text = ocr.plain_text(ocr_lines)

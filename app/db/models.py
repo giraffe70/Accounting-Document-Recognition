@@ -124,3 +124,48 @@ class MappingHistory(SQLModel, table=True):
     actor_id: Optional[int] = Field(default=None, foreign_key="users.id")
     actor_name: str = ""
     created_at: datetime = Field(default_factory=utc_now)
+
+
+class ImportJob(SQLModel, table=True):
+    __tablename__ = "import_jobs"
+    id: str = Field(primary_key=True)
+    owner_id: int = Field(foreign_key="users.id", index=True)
+    company: str = ""
+    status: str = Field(default="queued", index=True)
+    phase: str = "queued"
+    settings_json: str = "{}"
+    version: str = ""
+    cancel_requested: bool = False
+    total_pages: Optional[int] = None
+    first_result_seconds: Optional[float] = None
+    created_at: datetime = Field(default_factory=utc_now)
+    started_at: Optional[datetime] = None
+    updated_at: datetime = Field(default_factory=utc_now)
+    error: str = ""
+
+
+class ImportFile(SQLModel, table=True):
+    __tablename__ = "import_files"
+    id: str = Field(primary_key=True)
+    job_id: str = Field(foreign_key="import_jobs.id", index=True)
+    path: str
+    name: str
+    group_id: str
+    indexed: bool = False
+    error: str = ""
+
+
+class ImportPage(SQLModel, table=True):
+    __tablename__ = "import_pages"
+    __table_args__ = (UniqueConstraint("job_id", "file_id", "page_no", name="uq_import_page"),)
+    id: str = Field(primary_key=True)
+    job_id: str = Field(foreign_key="import_jobs.id", index=True)
+    file_id: str = Field(foreign_key="import_files.id", index=True)
+    page_no: int
+    source_token: str
+    status: str = "queued"
+    phase: str = "queued"
+    preview_path: str = ""
+    source_page_id: Optional[int] = None
+    voucher_ids_json: str = "[]"
+    error: str = ""

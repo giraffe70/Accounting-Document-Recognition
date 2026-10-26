@@ -6,13 +6,15 @@ from pathlib import Path
 from PIL import Image
 from app.core import invocation_trace, ocr_cache
 
-VERSION = 2
+VERSION = 3
 
 
 def identity(source, setting):
     from app.core.ocr_engine import runtime_signature
+    from app.core import ocr_orientation, ocr_policy
     return {"version": VERSION, **ocr_cache.pixels(source), "ocr": setting,
-            "engine": runtime_signature(), "max_edge": 2400, "orientation_policy": 1}
+            "engine": runtime_signature(), "max_edge": 2400, "orientation_policy": 2,
+            "orientation": ocr_orientation.signature(), "resolution": ocr_policy.get_policy()["resolution"]}
 
 
 def read(source, target_size, *, folder, setting="paddle/pp-ocrv5"):
@@ -38,9 +40,17 @@ def _read(source, target_size, *, folder, setting):
         except (OSError, ValueError):
             pass
     # Unique immutable input copies also avoid concurrent orientation scratch collisions.
-    copy = image_evidence.native_ocr(source, folder / (key + "_" + uuid.uuid4().hex + ".png"))
+    from app.core import ocr_orientation, ocr_resolution, work_progress
+    copy = image_evidence.native_ocr(source, folder / ("p" + uuid.uuid4().hex[:12] + ".png"))
+    work_progress.emit("orientation")
     if record is None:
-        _, rotation = pipeline._auto_orient_ocr(copy, ocr)
+        prediction = ocr_orientation.classify(copy)
+        if prediction["accepted"]:
+            rotation = prediction["angle"]
+            if rotation:
+                pipeline._apply_rotation(copy, rotation)
+        else:
+            _, rotation = pipeline._auto_orient_ocr(copy, ocr)
         record = ocr_cache.seal({"identity": cache_identity, "rotation": rotation})
         try:
             invocation_trace.atomic_json(saved, record)
@@ -52,9 +62,9 @@ def _read(source, target_size, *, folder, setting):
             pipeline._apply_rotation(copy, rotation)
     # Direction records contain no OCR lines. Every full read uses the shared,
     # pixel-validated store, in the actual upright input frame.
-    with ocr_cache.purpose("layout"):
-        native_lines = ocr.recognize(copy)
-    with Image.open(copy) as image:
+    work_progress.emit("ocr")
+    native_lines, text_input = ocr_resolution.read(copy, Path(copy).with_name(Path(copy).stem + "_text.png"), ocr, purpose="layout")
+    with Image.open(text_input) as image:
         size = list(image.size)
     text = ocr.plain_text(native_lines)
     w, h = size

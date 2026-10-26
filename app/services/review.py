@@ -36,7 +36,7 @@ def _period_of(date_str: str) -> str:
 
 
 def save_voucher(voucher: Voucher, company: str = "",
-                 status: ReviewStatus = ReviewStatus.pending, *, source_parent_id=None) -> VoucherRecord:
+                 status: ReviewStatus = ReviewStatus.pending, *, source_parent_id=None, session=None) -> VoucherRecord:
     """辨識完成後落地紀錄。ai_json 與 current_json 初始相同。
     status 預設 pending（已辨識待確認）；匯入外觀確認階段傳 prepared（僅判類型/轉正）。"""
     payload = mapping.strip_accounting(voucher.model_dump())
@@ -56,7 +56,7 @@ def save_voucher(voucher: Voucher, company: str = "",
         ocr_provider=voucher.ocr_provider,
         structure_model=voucher.structure_model,
     )
-    with get_session() as s:
+    with (get_session() if session is None else nullcontext(session)) as s:
         registered = companies.resolve(s, company)
         rec.company_id = registered.id if registered else None
         payload["entries"] = entry_flow.normalize_entries(raw_entries, origin="observed" if
@@ -68,8 +68,11 @@ def save_voucher(voucher: Voucher, company: str = "",
         rec.entries_status = "draft" if payload["entries"] else "none"
         rec.current_json = json.dumps(payload, ensure_ascii=False)
         s.add(rec)
-        s.commit()
-        s.refresh(rec)
+        if session is None:
+            s.commit()
+            s.refresh(rec)
+        else:
+            s.flush()
         # 落地後以紀錄 id 保存該頁掃描影像，供審核對照
         src = getattr(voucher, "source_image", "")
         if src and os.path.exists(src):
@@ -77,13 +80,23 @@ def save_voucher(voucher: Voucher, company: str = "",
                 pages = config.UPLOAD_DIR / "pages"
                 pages.mkdir(parents=True, exist_ok=True)
                 ext = os.path.splitext(src)[1].lower() or ".png"
-                shutil.copyfile(src, pages / f"{rec.id}{ext}")
-                rec.image_path = f"pages/{rec.id}{ext}"
+                if session is None:
+                    name = f"{rec.id}{ext}"
+                else:
+                    import uuid
+                    name = f"i{uuid.uuid4().hex}{ext}"
+                    s.info.setdefault("import_images", []).append(pages / name)
+                shutil.copyfile(src, pages / name)
+                rec.image_path = f"pages/{name}"
                 s.add(rec)
-                s.commit()
-                s.refresh(rec)
+                if session is None:
+                    s.commit()
+                    s.refresh(rec)
+                else:
+                    s.flush()
             except OSError:
-                pass
+                if session is not None:
+                    raise
     return rec
 
 
@@ -123,6 +136,19 @@ def save_prepared_vouchers(vouchers, company=""):
     for voucher in vouchers:
         token = voucher.origin.get("source_token")
         rec = save_voucher(voucher, company, ReviewStatus.prepared, source_parent_id=parents.get(token))
+        if rec.record_role == "source_page":
+            parents[token] = rec.id
+        records.append(rec)
+    return records
+
+
+def save_prepared_page(vouchers, company, session):
+    """Flush the entire page into the caller's transaction, without committing."""
+    parents, records = {}, []
+    for voucher in vouchers:
+        token = voucher.origin.get("source_token")
+        rec = save_voucher(voucher, company, ReviewStatus.prepared,
+                           source_parent_id=parents.get(token), session=session)
         if rec.record_role == "source_page":
             parents[token] = rec.id
         records.append(rec)

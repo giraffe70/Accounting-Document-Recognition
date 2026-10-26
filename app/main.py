@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app import config
 from app import validation
+from app import import_api
 from app.core import activity, doc_types, model_factory, pipeline, settings_store
 from app.db.models import ReviewStatus, VoucherRecord
 from app.db.session import init_db
@@ -53,6 +54,19 @@ auth.ensure_seed_users()
 validation.init_validation()
 app.include_router(validation.router)
 app.include_router(database_view.router)
+app.include_router(import_api.router)
+
+
+@app.on_event("startup")
+def start_import_worker():
+    from app.services import import_jobs
+    import_jobs.start()
+
+
+@app.on_event("shutdown")
+def stop_import_worker():
+    from app.services import import_jobs
+    import_jobs.stop()
 
 _PUBLIC_API = {"/api/login", "/api/logout", "/api/me", "/api/health"}
 
@@ -330,27 +344,20 @@ def api_scan_list():
 
 
 @app.post("/api/scan-source/import")
-def api_scan_import(filenames: list = Body(..., embed=True), company: str = Body("", embed=True)):
+def api_scan_import(request: Request, filenames: list = Body(..., embed=True), company: str = Body("", embed=True), background: bool = Body(False, embed=True)):
     """從掃描來源目錄匯入選定檔案（外觀準備，落 prepared）。"""
     d = _scan_dir()
     if d is None:
         return JSONResponse({"detail": "尚未設定或找不到掃描來源目錄"}, status_code=400)
-    with _job_lock:
-        if _job["status"] == "running":
-            return JSONResponse({"ok": False, "detail": "已有匯入進行中"}, status_code=409)
-        paths, errors = [], []
-        for name in filenames:
-            f = (d / Path(str(name)).name)   # 僅取檔名，防目錄穿越
-            if f.is_file() and f.suffix.lower() in config.ALLOWED_SUFFIXES:
-                paths.append(str(f))
-            else:
-                errors.append(f"{name}: 找不到或不支援")
-        if not paths:
-            return JSONResponse({"ok": False, "detail": "無有效檔案可匯入"}, status_code=400)
-        _job.update(id=str(uuid.uuid4()), status="running", done=0,
-                    total=len(paths), current="", results=[], errors=errors)
-    threading.Thread(target=_run_batch, args=(list(paths), company), daemon=True).start()
-    return {"ok": True, "job_id": _job["id"], "total": _job["total"]}
+    from app.services import import_jobs
+    paths = [{"path": str(d / Path(str(name)).name), "name": Path(str(name)).name} for name in filenames]
+    valid = [p for p in paths if Path(p["path"]).is_file() and Path(p["path"]).suffix.lower() in config.ALLOWED_SUFFIXES]
+    if not valid:
+        return JSONResponse({"ok": False, "detail": "無有效檔案可匯入"}, status_code=400)
+    created = import_jobs.create_job(valid, import_api.owner(request), company)
+    if background:
+        return JSONResponse(created, status_code=202)
+    return {"ok": True, "job_id": created["id"], "total": len(valid)}
 
 
 # ── 單張分析 ────────────────────────────────────────────────────
@@ -377,25 +384,24 @@ async def api_analyze(file: UploadFile = File(...), company: str = Form("")):
 
 # ── 批次（背景執行 + 輪詢）──────────────────────────────────────
 @app.post("/api/batch")
-async def api_batch(files: list[UploadFile] = File(...), company: str = Form("")):
-    with _job_lock:
-        if _job["status"] == "running":
-            return JSONResponse({"ok": False, "detail": "已有批次進行中"}, status_code=409)
-        paths = []
-        for f in files:
-            try:
-                paths.append(str(await _save_upload(f)))
-            except ValueError as exc:
-                _job["errors"].append(f"{f.filename}: {exc}")
-        _job.update(id=str(uuid.uuid4()), status="running", done=0,
-                    total=len(paths), current="", results=[], errors=list(_job["errors"]))
-    threading.Thread(target=_run_batch, args=(list(paths), company), daemon=True).start()
-    return {"ok": True, "job_id": _job["id"], "total": _job["total"]}
+async def api_batch(request: Request, files: list[UploadFile] = File(...), company: str = Form("")):
+    from app.services import import_jobs
+    paths, errors = [], []
+    for file in files:
+        try:
+            paths.append({"path": str(await _save_upload(file)), "name": file.filename})
+        except ValueError as exc:
+            errors.append(f"{file.filename}: {exc}")
+    if not paths:
+        return JSONResponse({"ok": False, "detail": "無有效檔案可匯入", "errors": errors}, status_code=400)
+    created = import_jobs.create_job(paths, import_api.owner(request), company)
+    return {"ok": True, "job_id": created["id"], "total": len(paths), "errors": errors}
 
 
 @app.get("/api/job")
-def api_job():
-    return _job
+def api_job(request: Request):
+    from app.services import import_jobs
+    return import_jobs.legacy_status(import_api.owner(request))
 
 
 def _run_batch(paths: list[str], company: str = ""):
@@ -503,7 +509,8 @@ def api_get(rec_id: int):
 
 def _delete_busy() -> bool:
     """匯入或批次提取進行中時不刪除，避免與背景寫檔／辨識互相踩踏。"""
-    return _job["status"] == "running" or _ejob["status"] == "running"
+    from app.services import import_jobs
+    return _job["status"] == "running" or _ejob["status"] == "running" or import_jobs.is_busy()
 
 
 @app.get("/api/vouchers/{rec_id}/delete-preview")

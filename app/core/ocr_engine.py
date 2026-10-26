@@ -5,15 +5,18 @@
 """
 import os
 import time
+import threading
 from functools import lru_cache
 from importlib.metadata import version, PackageNotFoundError
 from app.core import ocr_cache
 
 # paddle 3.3 + paddleocr 3.7 在 Windows CPU 的 oneDNN 有相容性 bug，需停用
 os.environ.setdefault("FLAGS_use_mkldnn", "0")
+os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
 
 OPTIONS = {"enable_mkldnn": False, "use_doc_orientation_classify": False,
            "use_doc_unwarping": False, "use_textline_orientation": True}
+INFERENCE_LOCK = threading.RLock()
 
 
 def runtime_signature(lang="chinese_cht"):
@@ -46,7 +49,8 @@ class PaddleOCREngine:
             metrics["engine_init_seconds"] = time.perf_counter() - started
         started = time.perf_counter()
         try:
-            result = list(ocr.predict(image_path) or [])
+            with INFERENCE_LOCK:
+                result = list(ocr.predict(image_path) or [])
         finally:
             metrics["predict_seconds"] = time.perf_counter() - started
         lines: list[dict] = []
@@ -72,8 +76,13 @@ class PaddleOCREngine:
         return "\n".join(l["text"] for l in lines)
 
 
-@lru_cache(maxsize=2)
 def _get_paddle(lang: str):
+    with INFERENCE_LOCK:
+        return _load_paddle(lang)
+
+
+@lru_cache(maxsize=2)
+def _load_paddle(lang: str):
     try:
         from paddleocr import PaddleOCR
     except ImportError as exc:  # pragma: no cover

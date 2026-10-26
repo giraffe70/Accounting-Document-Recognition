@@ -247,7 +247,7 @@ class ValidationTimingFrontendContractTests(unittest.TestCase):
         source = (ROOT / "app" / "static" / "js" / "validation.js").read_text(encoding="utf-8")
 
         self.assertIn("function timingBlock(timings, version, heading)", source)
-        self.assertIn("(version === 2 || legacyTotal)", source)
+        self.assertIn("[2, 3].includes(version)", source)
         self.assertIn('key === "queue_seconds" || key === "complete_seconds"', source)
         self.assertIn("timings?.incomplete === true", source)
         self.assertIn("處理曾中斷，細項僅包含已完成的呼叫，耗時可能未完整記錄", source)
@@ -261,6 +261,8 @@ class ValidationTimingFrontendContractTests(unittest.TestCase):
             "orientation_ocr_seconds", "full_ocr_seconds", "supplement_ocr_seconds",
             "model_seconds", "ocr_cache_seconds", "ocr_init_seconds",
             "ocr_cache_hits", "ocr_cache_misses", "queue_seconds", "complete_seconds",
+            "orientation_model_seconds", "orientation_model_init_seconds",
+            "resolution_assessment_seconds", "first_result_seconds",
         ):
             with self.subTest(field=field):
                 self.assertIn(f'"{field}"', source)

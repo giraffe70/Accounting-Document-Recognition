@@ -4,6 +4,10 @@
   const progress = $("progress"), barFill = $("barFill"), progressText = $("progressText");
   const modal = $("modal");
   let jobTimer = null;
+  const importJobs = new Map();
+  const importJobTimers = new Map();
+  const importSeenPages = new Map();
+  let importJobGeneration = 0;
   let currentId = null;
   let currentVoucher = {};   // 目前載入的 current（保留 entries 等未編輯欄位）
   let currentVersion = "", companyRecords = [], accountChart = [], reviewedItems = {};
@@ -57,44 +61,129 @@
   function handleFiles(fileList) {
     const files = Array.from(fileList);
     if (!files.length) return;
-    if (files.length === 1) analyzeSingle(files[0]); else runBatch(files);
-  }
-
-  async function analyzeSingle(file) {
-    showProgress("準備中…（判類型／自動轉正）", 0.3);
-    const fd = new FormData(); fd.append("file", file);
-    fd.append("company", $("uploadCompany").value);
-    try {
-      const data = await (await fetch("/api/analyze", { method: "POST", body: fd })).json();
-      if (!data.ok) throw new Error(errText(data, "匯入失敗"));
-      hideProgress();
-      toast(`已匯入 ${data.count || 1} 張，請在②外觀確認`);
-      setStage("prepared");
-      if (data.id) openReview(data.id);
-    } catch (err) { hideProgress(); alert("錯誤：" + err.message); }
+    runBatch(files);
   }
 
   async function runBatch(files) {
     const fd = new FormData(); files.forEach((f) => fd.append("files", f));
     fd.append("company", $("uploadCompany").value);
-    showProgress("批次上傳中…", 0.1);
-    const data = await (await fetch("/api/batch", { method: "POST", body: fd })).json();
-    if (!data.ok) { hideProgress(); alert(errText(data, "批次失敗")); return; }
-    pollJob();
+    try {
+      const data = await (await fetch("/api/import-jobs", { method: "POST", body: fd })).json();
+      if (!data.ok) throw new Error(errText(data, "匯入失敗"));
+      trackImportJob(data, files);
+    } catch (err) { alert("錯誤：" + err.message); }
   }
 
-  function pollJob() {
-    clearInterval(jobTimer);
-    jobTimer = setInterval(async () => {
-      const job = await (await fetch("/api/job")).json();
-      const pct = job.total ? job.done / job.total : 0;
-      showProgress(`準備中 ${job.done}/${job.total}　${job.current || ""}`, pct);
-      if (job.status === "completed") {
-        clearInterval(jobTimer); hideProgress();
-        toast("匯入完成，請在②外觀確認"); setStage("prepared");
-        if (job.errors && job.errors.length) alert("部分失敗：\n" + job.errors.join("\n"));
+  const IMPORT_ACTIVE = new Set(["queued", "running", "cancelling"]);
+  const IMPORT_STATUS_LABEL = {
+    queued: "排隊中", running: "處理中", cancelling: "取消中", interrupted: "已中斷",
+    completed: "完成", partial_failed: "部分失敗", failed: "失敗", cancelled: "已取消",
+  };
+  const IMPORT_PHASE_LABEL = {
+    rendering: "頁面轉圖", orientation: "方向判斷", ocr: "文字辨識", layout: "版面分析", saving: "保存中",
+  };
+  function importJobLabel(value) { return IMPORT_STATUS_LABEL[value] || IMPORT_PHASE_LABEL[value] || value || ""; }
+
+  function trackImportJob(job, files) {
+    const id = String(job.job_id || job.id);
+    if (!id || id === "undefined") return;
+    const previous = importJobs.get(id);
+    const images = previous?.files || new Map();
+    (files || []).forEach((file) => {
+      if (!images.has(file.name) && /^image\//.test(file.type || "")) images.set(file.name, URL.createObjectURL(file));
+    });
+    importJobs.set(id, { ...previous, ...job, id, files: images });
+    if (!importSeenPages.has(id)) importSeenPages.set(id, new Set());
+    renderImportJobs(); pollImportJob(id);
+  }
+
+  function renderImportJobs() {
+    const box = $("importJobs"); if (!box) return;
+    const jobs = Array.from(importJobs.values());
+    box.classList.toggle("hidden", !jobs.length);
+    box.innerHTML = jobs.map((job) => {
+      const total = job.total_pages == null ? job.total_files : job.total_pages;
+      const done = job.done_pages || 0, pct = total ? Math.min(1, done / total) : 0;
+      const cur = job.current ? `${job.current.file || ""} ${job.current.page_no == null ? "" : `p${job.current.page_no}`}` : "";
+      const pages = (job.pages || []).map((page) => {
+        const preview = page.preview_url || job.files?.get(page.file_name);
+        const resultIds = Array.isArray(page.voucher_ids) ? page.voucher_ids : [];
+        const reviewId = Number(resultIds[0] || page.source_page_id);
+        const reviewButton = page.status === "completed" && Number.isSafeInteger(reviewId) && reviewId > 0
+          ? `<button class="btn btn-sm" data-import-review-id="${reviewId}">外觀確認</button>` : "";
+        return `<div class="import-job-page"><span>${esc(page.file_name)}${page.page_no == null ? "" : ` · p${esc(page.page_no)}`}</span><span>${esc(importJobLabel(page.phase || page.status))}</span>${preview ? `<a href="${esc(preview)}" target="_blank" rel="noopener">預覽</a>` : ""}${reviewButton}${page.error ? `<span class="bad">${esc(page.error)}</span>` : ""}</div>`;
+      }).join("");
+      const actions = job.status === "running" || job.status === "queued" ? `<button class="btn btn-sm" data-job-action="cancel" data-job-id="${esc(job.id)}">取消</button>` :
+        job.status === "interrupted" || job.status === "cancelled" ? `<button class="btn btn-sm" data-job-action="resume" data-job-id="${esc(job.id)}">續跑</button>` :
+        job.status === "partial_failed" || job.status === "failed" ? `<button class="btn btn-sm" data-job-action="retry-failed" data-job-id="${esc(job.id)}">重跑失敗</button>` : "";
+      const shortId = job.id.length > 8 ? `${job.id.slice(0, 8)}…` : job.id;
+      return `<article class="import-job"><div class="row-between"><strong title="${esc(job.id)}">匯入工作 ${esc(shortId)} · ${esc(importJobLabel(job.status))}</strong>${actions}</div><div class="bar"><div class="fill" style="width:${Math.round(pct * 100)}%"></div></div><div class="hint">${done}/${total == null ? "…" : total} 頁　${esc(importJobLabel(job.phase))} ${esc(cur)}</div>${job.pollError ? `<div class="bad">${esc(job.pollError)}</div>` : ""}${job.error ? `<div class="bad">${esc(job.error)}</div>` : ""}${pages}</article>`;
+    }).join("");
+    box.querySelectorAll("[data-job-action]").forEach((button) => button.addEventListener("click", () => actOnImportJob(button.dataset.jobId, button.dataset.jobAction)));
+    box.querySelectorAll("[data-import-review-id]").forEach((button) => button.addEventListener("click", () => {
+      if (recognitionDirty || editBusy) { alert("請先儲存目前修改，再開啟外觀確認頁"); return; }
+      setStage("prepared");
+      openReview(Number(button.dataset.importReviewId));
+    }));
+  }
+
+  async function pollImportJob(id) {
+    clearTimeout(importJobTimers.get(id));
+    if (!currentUser || !importJobs.has(id)) return;
+    const generation = importJobGeneration;
+    try {
+      const response = await fetch(`/api/import-jobs/${encodeURIComponent(id)}`);
+      if (generation !== importJobGeneration || !currentUser || !importJobs.has(id)) return;
+      if (response.status === 401 || response.status === 404) {
+        const job = importJobs.get(id);
+        job.pollError = response.status === 401 ? "登入已過期，請重新登入。" : "找不到此匯入工作。";
+        importJobTimers.delete(id);
+        renderImportJobs();
+        return;
       }
-    }, 1500);
+      const job = await response.json();
+      if (generation !== importJobGeneration || !currentUser || !importJobs.has(id)) return;
+      if (!response.ok || !job.id) throw new Error(errText(job, "讀取匯入進度失敗"));
+      const previous = importJobs.get(id);
+      importJobs.set(id, { ...previous, ...job, id, files: previous.files });
+      const seen = importSeenPages.get(id) || new Set();
+      let added = false;
+      (job.pages || []).forEach((page) => {
+        const key = page.id != null ? `id:${page.id}` : `${page.file_name}:${page.page_no}:${page.source_page_id}`;
+        if (!seen.has(key) && (page.source_page_id || (page.voucher_ids || []).length) && page.status !== "failed") { seen.add(key); added = true; }
+      });
+      importSeenPages.set(id, seen);
+      renderImportJobs();
+      if (added) { loadList(); refreshStats(); }
+      if (IMPORT_ACTIVE.has(job.status) && generation === importJobGeneration && currentUser && importJobs.has(id)) importJobTimers.set(id, setTimeout(() => pollImportJob(id), 1500));
+    } catch (err) {
+      if (generation !== importJobGeneration || !currentUser || !importJobs.has(id)) return;
+      console.warn("import job poll failed", id, err);
+      importJobTimers.set(id, setTimeout(() => pollImportJob(id), 1500));
+    }
+  }
+
+  function stopImportPolling() {
+    importJobGeneration += 1;
+    importJobTimers.forEach((timer) => clearTimeout(timer));
+    importJobTimers.clear();
+    importJobs.forEach((job) => job.files?.forEach((url) => URL.revokeObjectURL(url)));
+    importJobs.clear(); importSeenPages.clear();
+    renderImportJobs();
+  }
+
+  async function actOnImportJob(id, action) {
+    const response = await fetch(`/api/import-jobs/${encodeURIComponent(id)}/${action}`, { method: "POST" });
+    const data = await response.json();
+    if (!response.ok || data.ok === false) { alert(errText(data, "無法更新匯入工作")); return; }
+    pollImportJob(id);
+  }
+
+  async function restoreImportJobs() {
+    try {
+      const data = await (await fetch("/api/import-jobs")).json();
+      (data.items || []).forEach((job) => trackImportJob(job));
+    } catch (err) { console.warn("could not restore import jobs", err); }
   }
 
   // ── ③掃描清單：一鍵批次提取 ──
@@ -137,12 +226,11 @@
   $("btnScanImport").addEventListener("click", async () => {
     const names = Array.from($("scanFiles").querySelectorAll("input:checked")).map((i) => i.value);
     if (!names.length) { alert("請勾選要匯入的檔案"); return; }
-    const d = await (await fetch("/api/scan-source/import", { method: "POST", headers: json(), body: JSON.stringify({ filenames: names, company: $("uploadCompany").value }) })).json();
+    const d = await (await fetch("/api/scan-source/import", { method: "POST", headers: json(), body: JSON.stringify({ filenames: names, company: $("uploadCompany").value, background: true }) })).json();
     if (!d.ok) { alert(errText(d, "匯入失敗")); return; }
-    toast(`開始匯入 ${d.total} 個檔案…`); pollJob();
+    toast(`開始匯入 ${d.total_files || names.length} 個檔案…`); trackImportJob(d);
   });
 
-  function showProgress(text, pct) { progress.classList.remove("hidden"); barFill.style.width = Math.round(pct * 100) + "%"; progressText.textContent = text; }
   function hideProgress() { progress.classList.add("hidden"); }
 
   // ── 階段分頁 ──
@@ -236,11 +324,12 @@
     const rows = view.vouchers;
     const body = $("listBody");
     $("listEmpty").textContent = view.emptyText;
-    if (!rows.length) { $("listTable").classList.add("hidden"); $("listEmpty").classList.remove("hidden"); updateMergeBtn(); refreshStats(); return; }
+    if (!rows.length) { body.innerHTML = ""; $("listTable").classList.add("hidden"); $("listEmpty").classList.remove("hidden"); updateMergeBtn(); refreshStats(); return; }
     $("listEmpty").classList.add("hidden"); $("listTable").classList.remove("hidden");
     const mergeable = currentStage === "prepared" || currentStage === "queued";
+    const selectedIds = new Set(Array.from(body.querySelectorAll(".mchk:checked"), (cb) => cb.dataset.id));
     body.innerHTML = rows.map((r) => {
-      const chk = mergeable ? `<input type="checkbox" class="mchk" data-id="${r.id}">` : "";
+      const chk = mergeable ? `<input type="checkbox" class="mchk" data-id="${r.id}"${selectedIds.has(String(r.id)) ? " checked" : ""}>` : "";
       const att = r.attachments ? ` <span class="att-badge" title="含 ${r.attachments} 附頁">📎${r.attachments}</span>` : "";
       // 憑證號常是空的（對帳單、部分收據無單號），故以「種類」為第二行辨識依據，
       // 否則清單只剩一排數字看不出是什麼單
@@ -1501,7 +1590,10 @@
   const ROLE_LABEL = { admin: "管理員", clerk: "記帳士", accountant: "會計師" };
   $("loginBtn").addEventListener("click", doLogin);
   $("loginPass").addEventListener("keydown", (e) => { if (e.key === "Enter") doLogin(); });
-  $("logoutBtn").addEventListener("click", async () => { await fetch("/api/logout", { method: "POST" }); location.reload(); });
+  $("logoutBtn").addEventListener("click", async () => {
+    stopImportPolling(); currentUser = null;
+    await fetch("/api/logout", { method: "POST" }); location.reload();
+  });
 
   async function doLogin() {
     const r = await fetch("/api/login", { method: "POST", headers: json(),
@@ -1518,6 +1610,7 @@
   }
 
   async function enterApp() {
+    importJobGeneration += 1;
     $("loginOverlay").classList.add("hidden");
     $("logoutBtn").classList.remove("hidden");
     const chip = $("userChip");
@@ -1525,6 +1618,7 @@
     chip.classList.remove("hidden");
     applyRole();
     loadCompanies();
+    restoreImportJobs();
     try { DOC_TYPES = (await (await fetch("/api/doc-types")).json()).types || {}; } catch (e) { DOC_TYPES = {}; }
     setStage("import"); refreshStats(); openFromHash();
     refreshEngine(); startEnginePoll();

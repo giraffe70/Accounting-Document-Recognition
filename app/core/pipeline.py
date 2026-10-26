@@ -6,6 +6,7 @@ import base64
 import json
 import logging
 import os
+import threading
 from functools import lru_cache
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from app.core import activity, doc_router, doc_types, model_factory, settings_st
 from app.models.schemas import Voucher
 
 logger = logging.getLogger("pdf_scan.pipeline")
+_PDF_LOCK = threading.RLock()
 
 def render_to_images(file_path: str) -> list[str]:
     """PDF → 逐頁 PNG 路徑（輸出至暫存區，不污染來源目錄）；圖片 → 原路徑。"""
@@ -25,13 +27,13 @@ def render_to_images(file_path: str) -> list[str]:
 
     render_dir = config.UPLOAD_DIR / "_pages"
     render_dir.mkdir(parents=True, exist_ok=True)
-    pdf = pdfium.PdfDocument(str(p))
     out = []
-    for i in range(len(pdf)):
-        img = pdf[i].render(scale=200 / 72).to_pil()  # ~200dpi
-        out_path = render_dir / f"{p.stem}_p{i}.png"
-        img.save(out_path)
-        out.append(str(out_path))
+    with _PDF_LOCK, pdfium.PdfDocument(str(p)) as pdf:
+        for i in range(len(pdf)):
+            img = pdf[i].render(scale=200 / 72).to_pil()  # ~200dpi
+            out_path = render_dir / f"{p.stem}_p{i}.png"
+            img.save(out_path)
+            out.append(str(out_path))
     return out
 
 
@@ -68,42 +70,103 @@ def managed_upload_name(file_path: str) -> str:
 
 def prepare_pages(file_path: str) -> list[Voucher]:
     """Route immutable native pages and prepare separate documents for appearance review."""
-    from app.core import page_layout, invocation_trace, model_invocation
-    from app import config
     import uuid
-    images = render_to_images(file_path)
     out = []
-    # One id per uploaded file ties its source pages and documents together for deletion.
-    group = {"source_group_id": uuid.uuid4().hex}
+    for vouchers in iter_prepare_pages(file_path):
+        out.extend(vouchers)
+    return out
+
+
+def iter_prepare_pages(file_path):
+    import uuid
+    group_id = uuid.uuid4().hex
+    for index, source in enumerate(render_to_images(file_path), 1):
+        yield prepare_page(source, file_path, index, group_id=group_id)
+
+
+def page_count(file_path):
+    if Path(file_path).suffix.lower() != ".pdf":
+        from PIL import Image
+        with Image.open(file_path) as image:
+            image.verify()
+        return 1
+    import pypdfium2 as pdfium
+    with _PDF_LOCK, pdfium.PdfDocument(str(file_path)) as pdf:
+        return len(pdf)
+
+
+def render_page(file_path, page_no, token):
+    from app import config
+    folder = config.UPLOAD_DIR / "_pages" / token
+    folder.mkdir(parents=True, exist_ok=True)
+    if Path(file_path).suffix.lower() != ".pdf":
+        import shutil
+        import uuid
+        target = folder / ("source" + Path(file_path).suffix.lower())
+        temporary = folder / ("r" + uuid.uuid4().hex[:12] + ".tmp")
+        try:
+            shutil.copyfile(file_path, temporary)
+            os.replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return str(target)
+    import pypdfium2 as pdfium
+    target = folder / "source.png"
+    valid = False
+    if target.is_file():
+        from PIL import Image
+        try:
+            with Image.open(target) as image:
+                image.verify()
+            valid = True
+        except OSError:
+            pass
+    if not valid:
+        import uuid
+        temporary = folder / ("r" + uuid.uuid4().hex[:12] + ".png")
+        try:
+            with _PDF_LOCK, pdfium.PdfDocument(str(file_path)) as pdf:
+                pdf[page_no - 1].render(scale=200 / 72).to_pil().save(temporary)
+            os.replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
+    return str(target)
+
+
+def prepare_page(source, file_path, page_no, *, token=None, group_id=None):
+    """One immutable page, with stable identities supplied by resumable imports."""
+    import uuid
+    from app import config
+    from app.core import page_layout, invocation_trace, model_invocation, work_progress
+    token = token or uuid.uuid4().hex
+    group = {"source_group_id": group_id or uuid.uuid4().hex}
     if managed_upload_name(file_path):
         group["upload_file"] = managed_upload_name(file_path)
-    for index, source in enumerate(images):
-        token = uuid.uuid4().hex
-        folder = config.UPLOAD_DIR / "_pages" / token
-        folder.mkdir(parents=True, exist_ok=True)
-        with invocation_trace.capture(folder / "trace.json"), ocr_cache.scope(folder / "ocr_cache"):
-            invocation_trace.add({"kind": "snapshot", "versions": model_invocation.source_versions(), "settings": settings_store.get_settings()})
-            input_path = page_layout.crop(source, {"box": [0,0,1000,1000]}, folder / "input.png", max_edge=1180)
-            layout = page_layout.detect(input_path, native_path=source)
-            source_origin = {**page_layout.origin(source, {"box": [0,0,1000,1000]}, index+1),
-                             "record_role": "source_page", "source_token": token, "layout": layout, **group}
-            parent = Voucher.model_validate({"doc_type_key": layout["type"], "origin": source_origin,
-                "quality": {"version": 1, "state": "needs_review" if not layout["auto_split"] else "usable", "content_kind": layout["content_kind"], "issues": layout["issues"]}})
-            parent.source_file = f"{Path(file_path).name} p{index+1}"
-            parent.source_image = source
-            out.append(parent)
-            if not layout["auto_split"] or layout["content_kind"] != "document":
-                continue
+    folder = config.UPLOAD_DIR / "_pages" / token
+    folder.mkdir(parents=True, exist_ok=True)
+    with invocation_trace.capture(folder / "trace.json"), ocr_cache.scope(folder / "ocr_cache"):
+        invocation_trace.add({"kind": "snapshot", "versions": model_invocation.source_versions(), "settings": settings_store.get_settings()})
+        input_path = page_layout.crop(source, {"box": [0, 0, 1000, 1000]}, folder / "input.png", max_edge=1180)
+        layout = page_layout.detect(input_path, native_path=source)
+        work_progress.emit("saving")
+        source_origin = {**page_layout.origin(source, {"box": [0, 0, 1000, 1000]}, page_no),
+                         "record_role": "source_page", "source_token": token, "layout": layout, **group}
+        parent = Voucher.model_validate({"doc_type_key": layout["type"], "origin": source_origin,
+            "quality": {"version": 1, "state": "needs_review" if not layout["auto_split"] else "usable", "content_kind": layout["content_kind"], "issues": layout["issues"]}})
+        parent.source_file = f"{Path(file_path).name} p{page_no}"
+        parent.source_image = source
+        out = [parent]
+        if layout["auto_split"] and layout["content_kind"] == "document":
             for document_index, region in enumerate(layout["regions"]):
                 crop_path = page_layout.crop(source, region, folder / f"document_{document_index}.png")
                 child = Voucher.model_validate({"doc_type_key": region["type"], "doc_type": doc_types.get(region["type"])["label"],
-                    "origin": {**page_layout.origin(source, region, index+1), "source_token": token, "document_index": document_index, "layout_fallback":layout.get("fallback_reason"), **group},
+                    "origin": {**page_layout.origin(source, region, page_no), "source_token": token, "document_index": document_index,
+                               "layout_fallback": layout.get("fallback_reason"), **group},
                     "quality": {"version": 1, "state": "unassessed", "content_kind": layout["content_kind"], "issues": []}})
-                child.source_file = parent.source_file
-                child.source_image = crop_path
+                child.source_file, child.source_image = parent.source_file, crop_path
                 child.field_evidence["doc_type_key"] = [{"source": "route", "value": region["type"], "reason": region["reason"], "selected": True}]
                 out.append(child)
-    return out
+        return out
 
 
 def _is_blank_page(image_path: str, ink_thresh: float = 0.004) -> bool:
@@ -182,9 +245,9 @@ def extract_for_type(image_path: str, type_key: str, hint: str = "", company: st
             with activity.stage("ocr", settings["ocr"]):
                 from app.core import image_evidence
                 from PIL import Image
-                ocr_input = image_evidence.native_ocr(native_path or image_path, Path(image_path).with_name(Path(image_path).stem + "_ocr.png"))
-                with ocr_cache.purpose("extraction"):
-                    native_lines = ocr.recognize(ocr_input)
+                from app.core import ocr_resolution
+                native_lines, ocr_input = ocr_resolution.read(native_path or image_path,
+                    Path(image_path).with_name(Path(image_path).stem + "_ocr.png"), ocr, purpose="extraction")
                 _, image_conditions = image_evidence.enhancement(ocr_input, native_lines, None)
                 from app.core import invocation_trace
                 invocation_trace.add({"kind":"image_assessment", **image_conditions})

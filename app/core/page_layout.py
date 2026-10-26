@@ -126,7 +126,7 @@ def _prompt_evidence(evidence):
 
 
 def detect(image_path, *, mode="image", ocr_lines=None, ocr_text="", model_setting=None, native_path=None):
-    from app.core import pipeline, activity, barcode, page_ocr
+    from app.core import pipeline, activity, barcode, page_ocr, work_progress
     settings=settings_store.get_settings()
     setting=model_setting or settings["structure"]
     provider,model=settings_store.parse_setting(setting)
@@ -142,6 +142,7 @@ def detect(image_path, *, mode="image", ocr_lines=None, ocr_text="", model_setti
             invocation_trace.add({"kind":"layout_ocr_error","error":str(exc)})
             ocr_lines=[]
     ocr_lines=ocr_lines or []
+    work_progress.emit("layout")
     from app.core import request_budget, prompt_evidence
     diagnostics={"version":1,"requests":[],"issues":[]}
     coordinates=model_coordinates.for_image(image_path,setting,deferred=True)

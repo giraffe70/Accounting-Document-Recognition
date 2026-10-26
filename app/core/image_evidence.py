@@ -7,11 +7,11 @@ from app.core import invocation_trace
 from app.core.geometry import iou
 
 
-def native_ocr(source, target):
+def native_ocr(source, target, max_edge=2400):
     with Image.open(source) as image:
         original_size = image.size
         image = image.convert("RGB")
-        image.thumbnail((2400, 2400), Image.Resampling.LANCZOS)
+        image.thumbnail((max_edge, max_edge), Image.Resampling.LANCZOS)
         image.save(target)
         size = image.size
     invocation_trace.add({"kind": "ocr_input", "source_size": original_size, "input_size": size,
