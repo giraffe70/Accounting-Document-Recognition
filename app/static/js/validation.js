@@ -46,7 +46,7 @@
       ensureRuntimeBanner(); ensureResultViewControl();
       if ($("startRun")) $("startRun").disabled = true;
       const [me, modelData, typeData] = await Promise.all([request("/api/me"), request("/api/models"), request("/api/doc-types").catch(() => ({types:{}}))]);
-      $("userChip").textContent = `${me.name}（${me.role}）`;
+      $("userChip").textContent = `${me.name}（${me.is_admin ? "系統管理員" : "一般使用者"}）`;
       models = modelData;
       documentTypes = typeData.types || {};
       addCombo();

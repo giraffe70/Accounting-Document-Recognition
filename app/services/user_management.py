@@ -18,7 +18,7 @@ class AccountRoute(APIRoute):
                 response = await handler(request)
             except RequestValidationError:
                 # FastAPI's default validation output can echo submitted passwords.
-                response = JSONResponse({"detail": "輸入資料不合法，請檢查必填欄位與角色"}, status_code=422)
+                response = JSONResponse({"detail": "輸入資料不合法，請檢查必填欄位"}, status_code=422)
             except auth.AccountError as exc:
                 response = JSONResponse({"detail": str(exc)}, status_code=exc.status_code)
             except HTTPException as exc:
@@ -33,7 +33,7 @@ def require_admin(request: Request):
     user = auth.get_user_by_token(request.cookies.get("session"))
     if user is None:
         raise HTTPException(401, "未登入")
-    if user["role"] != "admin":
+    if not user.get("is_admin"):
         raise HTTPException(403, "需管理員權限")
     return user
 
@@ -43,7 +43,6 @@ class CreateUser(BaseModel):
     username: StrictStr
     name: StrictStr
     password: SecretStr
-    role: StrictStr = "clerk"
 
 
 class UpdateUser(BaseModel):
@@ -57,7 +56,7 @@ class PublicUser(BaseModel):
     id: int
     username: str
     name: str
-    role: str
+    is_admin: bool
     is_active: bool
     created_at: datetime
 
@@ -72,7 +71,7 @@ def get_users(actor=Depends(require_admin)):
 
 @router.post("", status_code=201, response_model=PublicUser)
 def post_user(body: CreateUser, actor=Depends(require_admin)):
-    return auth.create_user(body.username, body.name, body.password.get_secret_value(), body.role, actor_id=actor["id"])
+    return auth.create_user(body.username, body.name, body.password.get_secret_value(), actor_id=actor["id"])
 
 
 @router.delete("/{user_id}", response_model=PublicUser)

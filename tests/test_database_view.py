@@ -27,8 +27,8 @@ class DatabaseViewTests(unittest.TestCase):
         self.db = root / "app.db"
         con = sqlite3.connect(self.db)
         con.executescript("""
-            CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, password_hash TEXT, salt TEXT);
-            INSERT INTO users VALUES (1, '管理員', 'secret-hash', 'secret-salt');
+            CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, password_hash TEXT, salt TEXT, is_admin INTEGER);
+            INSERT INTO users VALUES (1, '管理員', 'secret-hash', 'secret-salt', 1);
             CREATE TABLE voucher_records (
                 id INTEGER PRIMARY KEY, company TEXT, current_json TEXT,
                 correction_note TEXT DEFAULT '', confirmed_at TEXT,
@@ -58,10 +58,11 @@ class DatabaseViewTests(unittest.TestCase):
         self.tokens = []
         self.addCleanup(lambda: [auth.logout(token) for token in self.tokens])
 
-    def login(self, role="admin"):
-        if role not in self.identities:
-            self.identities[role] = auth.create_user(f"test-{role}", "測試", "Synthetic-123", role)
-        token = auth.create_token(self.identities[role])
+    def login(self, identity="admin"):
+        if identity not in self.identities:
+            self.identities[identity] = auth.create_user(
+                f"test-{identity}", "測試", "Synthetic-123", is_admin=identity == "admin")
+        token = auth.create_token(self.identities[identity])
         self.tokens.append(token)
         self.client.cookies.set("session", token)
 
@@ -69,9 +70,9 @@ class DatabaseViewTests(unittest.TestCase):
         return self.client.get("/api/database/rows", params={"database": "app", "table": "voucher_records", **params})
 
     def test_requires_admin_for_both_endpoints(self):
-        for role, status in [(None, 401), ("clerk", 403), ("accountant", 403), ("admin", 200)]:
-            if role:
-                self.login(role)
+        for identity, status in [(None, 401), ("clerk", 403), ("accountant", 403), ("admin", 200)]:
+            if identity:
+                self.login(identity)
             self.assertEqual(self.client.get("/api/database/tables").status_code, status)
             self.assertEqual(self.rows().status_code, status)
 
@@ -129,6 +130,7 @@ class DatabaseViewTests(unittest.TestCase):
     def test_chinese_metadata_covers_current_schema(self):
         self.login()
         tables = self.client.get("/api/database/tables").json()["tables"]
+        self.assertEqual(next(t for t in tables if t["name"] == "users")["label"], "使用者帳號")
         self.assertEqual(next(t for t in tables if t["name"] == "voucher_records")["label"], "憑證紀錄")
         self.assertEqual(next(t for t in tables if t["name"] == "voucher_records")["date_label"], "憑證日期")
         voucher_columns = self.rows().json()["columns"]
@@ -146,6 +148,10 @@ class DatabaseViewTests(unittest.TestCase):
             columns = self.rows(table=table["name"]).json()["columns"]
             self.assertTrue(all(c["label"] for c in columns))
         self.assertEqual(sum(len(meta["columns"]) for meta in database_view.TABLE_META.values()), 131)
+        users_response = self.rows(table="users").json()
+        user_columns = {column["name"]: column["label"] for column in users_response["columns"]}
+        self.assertEqual(user_columns["is_admin"], "管理員權限")
+        self.assertEqual(users_response["rows"][0]["is_admin"], 1)
         columns = database_view.TABLE_META[("app", "voucher_records")]["columns"]
         self.assertEqual(columns["confirmed_by"], "辨識確認者編號")
         self.assertEqual(columns["confirmed_by_name"], "辨識確認者名稱")

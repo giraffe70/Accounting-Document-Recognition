@@ -93,7 +93,7 @@ class ItemAccountApiTests(unittest.TestCase):
             _compile_endpoint(name, namespace)
         self.api = namespace
         self.request = SimpleNamespace(cookies={"session": "synthetic-session"})
-        self.actor = {"id": self.user_id, "username": "api-reviewer", "name": "API 審核者", "role": "clerk"}
+        self.actor = {"id": self.user_id, "username": "api-reviewer", "name": "API 審核者", "is_admin": False}
 
     def voucher(self, description="合成明細", *, account_code="", account_name="", **extras):
         row = {"description": description, "amount": 100, "account_code": account_code,
@@ -134,7 +134,7 @@ class ItemAccountApiTests(unittest.TestCase):
             except review.RecognitionProtected as exc:
                 return asyncio.run(self.api["recognition_protected_handler"](self.request, exc))
 
-    def test_auth_guard_rejects_anonymous_and_all_three_roles_can_save(self):
+    def test_auth_guard_rejects_anonymous_and_all_signed_users_can_save(self):
         request = SimpleNamespace(url=SimpleNamespace(path="/api/vouchers/1/save"),
             method="POST", cookies={"session": "synthetic-session"})
         async def call_next(_request):
@@ -143,8 +143,12 @@ class ItemAccountApiTests(unittest.TestCase):
         with patch.object(auth, "get_user_by_token", return_value=None):
             rejected = asyncio.run(self.api["auth_guard"](request, call_next))
         self.assertEqual(rejected.status_code, 401)
-        for role in ("clerk", "accountant", "admin"):
-            with self.subTest(role=role), patch.object(auth, "get_user_by_token", return_value={"role": role}):
+        users = (
+            ("ordinary", {"username": "clerk", "is_admin": False}),
+            ("admin", {"username": "admin", "is_admin": True}),
+        )
+        for identity, user in users:
+            with self.subTest(identity=identity), patch.object(auth, "get_user_by_token", return_value=user):
                 self.assertEqual(asyncio.run(self.api["auth_guard"](request, call_next)), {"passed": True})
 
     def test_save_endpoint_returns_current_and_mapping_history_uses_authenticated_actor(self):

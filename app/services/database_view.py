@@ -14,7 +14,7 @@ def require_admin(request: Request, response: Response):
     user = auth.get_user_by_token(request.cookies.get("session"))
     if not user:
         raise HTTPException(401, "未登入")
-    if user["role"] != "admin":
+    if not user.get("is_admin"):
         raise HTTPException(403, "需管理員權限")
 
 
@@ -30,7 +30,7 @@ TABLE_META = {
         "date_label": "帳號建立日期", "date_column": "created_at",
         "columns": {
             "id": "帳號編號", "username": "登入帳號", "password_hash": "密碼雜湊",
-            "salt": "密碼鹽值", "role": "角色", "name": "顯示名稱", "is_active": "啟用狀態", "created_at": "建立時間",
+            "salt": "密碼鹽值", "is_admin": "管理員權限", "name": "顯示名稱", "is_active": "啟用狀態", "created_at": "建立時間",
         },
     },
     ("app", "voucher_records"): {

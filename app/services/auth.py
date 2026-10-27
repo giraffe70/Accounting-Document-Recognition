@@ -1,7 +1,7 @@
-"""帳號密碼登入與角色權限（基本資安）。
+"""帳號密碼登入與管理員權限（基本資安）。
 
 密碼以 PBKDF2-HMAC-SHA256 雜湊（stdlib，不加依賴）；session token 存記憶體。
-角色：clerk（記帳士）、accountant（會計師）、admin（管理員）、other:名稱（一般使用者）。
+帳號分為系統管理員及一般使用者。
 """
 import hashlib
 import hmac
@@ -14,14 +14,12 @@ from sqlalchemy.exc import IntegrityError
 from app.db.models import UserAccount
 from app.db.session import get_session
 
-# token -> {id, username, role, name}; authorization always reloads the account.
+# token -> {id, username, is_admin, name}; authorization always reloads the account.
 _sessions: dict[str, dict] = {}
 _session_lock = threading.RLock()
-ROLES = {"clerk": "記帳士", "accountant": "會計師", "admin": "管理員"}
 MIN_PASSWORD_LENGTH = 8
 MAX_PASSWORD_LENGTH = 128
 _COMMON_PASSWORDS = {"admin123", "clerk123", "acc123", "12345678", "password"}
-CUSTOM_ROLE_PREFIX = "other:"
 
 
 class AccountError(ValueError):
@@ -35,16 +33,6 @@ def validate_password(password: str):
         raise AccountError("密碼須為 8 至 128 字元")
     if password in _COMMON_PASSWORDS:
         raise AccountError("請勿使用常見或預設密碼")
-
-
-def validate_role(role: str) -> str:
-    if isinstance(role, str) and role in ROLES:
-        return role
-    if isinstance(role, str) and role.startswith(CUSTOM_ROLE_PREFIX):
-        label = role[len(CUSTOM_ROLE_PREFIX):].strip()
-        if 1 <= len(label) <= 100:
-            return CUSTOM_ROLE_PREFIX + label
-    raise AccountError("請選擇角色，或輸入 1 至 100 字元的其他角色名稱")
 
 
 def resolve_user(session, actor):
@@ -63,7 +51,7 @@ def _validate_account_fields(username: str, name: str):
 
 
 def _identity(user: UserAccount):
-    return {"id": user.id, "username": user.username, "role": user.role, "name": user.name}
+    return {"id": user.id, "username": user.username, "is_admin": user.is_admin, "name": user.name}
 
 
 def public_account(user: UserAccount):
@@ -77,7 +65,7 @@ def _check_admin(session, actor_id):
     actor = session.get(UserAccount, actor_id)
     if actor is None or not actor.is_active:
         raise AccountError("未登入", 401)
-    if actor.role != "admin":
+    if not actor.is_admin:
         raise AccountError("需管理員權限", 403)
 
 
@@ -87,9 +75,12 @@ def list_users(*, actor_id: int | None = None):
         return [public_account(user) for user in session.exec(select(UserAccount).order_by(UserAccount.id)).all()]
 
 
-def create_user(username: str, name: str, password: str, role: str = "clerk", *, actor_id: int | None = None):
+def create_user(username: str, name: str, password: str, *, is_admin: bool = False, actor_id: int | None = None):
     username, name = _validate_account_fields(username, name)
-    role = validate_role(role)
+    if not isinstance(is_admin, bool):
+        raise AccountError("管理員權限設定不合法")
+    if is_admin and actor_id is not None:
+        raise AccountError("網頁新增帳號只能建立一般使用者", 403)
     validate_password(password)
     salt, password_hash = _hash(password)
     with get_session() as session:
@@ -98,7 +89,7 @@ def create_user(username: str, name: str, password: str, role: str = "clerk", *,
             _check_admin(session, actor_id)
             if session.exec(select(UserAccount).where(UserAccount.username == username)).first():
                 raise AccountError("帳號已存在（包含已停用帳號）", 409)
-            user = UserAccount(username=username, name=name, role=role, salt=salt, password_hash=password_hash)
+            user = UserAccount(username=username, name=name, is_admin=is_admin, salt=salt, password_hash=password_hash)
             session.add(user)
             session.flush()
             result = public_account(user)
@@ -153,9 +144,9 @@ def disable_user(user_id: int, *, actor_id: int | None = None):
             return public_account(user)
         if user.id == actor_id:
             raise AccountError("不能停用目前登入的管理員帳號", 409)
-        if user.role == "admin":
+        if user.is_admin:
             admins = session.exec(select(UserAccount.id).where(
-                UserAccount.role == "admin", UserAccount.is_active == True)).all()  # noqa: E712
+                UserAccount.is_admin == True, UserAccount.is_active == True)).all()  # noqa: E712
             if len(admins) <= 1:
                 raise AccountError("不能停用最後一位啟用中的管理員", 409)
         user.is_active = False
@@ -176,9 +167,9 @@ def revoke_user_sessions(user_id: int, *, password_hash: str | None = None):
 
 # 預設種子帳號（首次啟動建立；正式部署請立即改密碼）
 _SEED = [
-    ("admin", "admin123", "admin", "系統管理員"),
-    ("clerk", "clerk123", "clerk", "記帳士"),
-    ("accountant", "acc123", "accountant", "會計師"),
+    ("admin", "admin123", True, "系統管理員"),
+    ("clerk", "clerk123", False, "記帳士"),
+    ("accountant", "acc123", False, "會計師"),
 ]
 
 
@@ -194,9 +185,9 @@ def ensure_seed_users():
         exists = s.exec(select(UserAccount)).first()
         if exists:
             return
-        for username, pw, role, name in _SEED:
+        for username, pw, is_admin, name in _SEED:
             salt, ph = _hash(pw)
-            s.add(UserAccount(username=username, password_hash=ph, salt=salt, role=role, name=name))
+            s.add(UserAccount(username=username, password_hash=ph, salt=salt, is_admin=is_admin, name=name))
         s.commit()
 
 

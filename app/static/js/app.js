@@ -402,7 +402,7 @@
   });
 
   // ── 刪除 ──
-  function isAdminUser() { return !!currentUser && currentUser.role === "admin"; }
+  function isAdminUser() { return !!currentUser && currentUser.is_admin === true; }
   function deleteScopeText(p) {
     const parts = [];
     if (p.voucher_count) parts.push(`${p.voucher_count} 張單據`);
@@ -1639,7 +1639,6 @@
   window.addEventListener("hashchange", openFromHash);
 
   // ── 登入 / 角色 ──
-  const ROLE_LABEL = { admin: "管理員", clerk: "記帳士", accountant: "會計師" };
   $("loginBtn").addEventListener("click", doLogin);
   $("loginPass").addEventListener("keydown", (e) => { if (e.key === "Enter") doLogin(); });
   $("logoutBtn").addEventListener("click", async () => {
@@ -1656,7 +1655,7 @@
   }
 
   function applyRole() {
-    const canAdmin = currentUser && currentUser.role === "admin";
+    const canAdmin = currentUser && currentUser.is_admin === true;
     $("accountsBtn").classList.toggle("hidden", !canAdmin);
     $("databaseBtn").classList.toggle("hidden", !canAdmin);
     $("usersBtn").classList.toggle("hidden", !canAdmin);
@@ -1667,8 +1666,7 @@
     $("loginOverlay").classList.add("hidden");
     $("logoutBtn").classList.remove("hidden");
     const chip = $("userChip");
-    const roleLabel = currentUser.role.startsWith("other:") ? `其他：${currentUser.role.slice(6)}` : (ROLE_LABEL[currentUser.role] || currentUser.role);
-    chip.textContent = `${currentUser.name}（${roleLabel}）`;
+    chip.textContent = `${currentUser.name}（${currentUser.is_admin ? "系統管理員" : "一般使用者"}）`;
     chip.classList.remove("hidden");
     applyRole();
     loadCompanies();

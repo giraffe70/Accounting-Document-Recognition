@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>權限管理 — 憑證辨識系統</title>
   <link rel="stylesheet" href="/css/styles.css">
-  <link rel="stylesheet" href="/css/users.css?v=20261027-edit">
-  <script src="/js/users.js?v=20261027-edit" defer></script>
+  <link rel="stylesheet" href="/css/users.css?v=20261027-admin-flag">
+  <script src="/js/users.js?v=20261027-admin-flag" defer></script>
 </head>
 <body>
   <header class="topbar">
@@ -19,17 +19,6 @@
     <section id="usersPanel" class="panel hidden" aria-label="帳號管理">
       <h2>新增帳號</h2>
       <form id="userForm" class="users-form">
-        <label for="role">角色
-          <select id="role" class="select" name="role" required>
-            <option value="clerk" selected>記帳士</option>
-            <option value="accountant">會計師</option>
-            <option value="other">其他</option>
-          </select>
-        </label>
-        <label id="customRoleWrap" for="customRole" class="hidden">其他角色名稱
-          <input id="customRole" class="select" name="customRole" maxlength="100" aria-describedby="customRoleHint">
-          <span id="customRoleHint" class="hint">自訂角色具一般使用者權限，不能使用管理員功能。</span>
-        </label>
         <label for="displayName">顯示名稱
           <input id="displayName" class="select" name="displayName" maxlength="100" required>
         </label>
@@ -84,7 +73,6 @@
               <tr>
                 <th scope="col">帳號</th>
                 <th scope="col">顯示名稱</th>
-                <th scope="col">角色</th>
                 <th scope="col">狀態</th>
                 <th scope="col">建立時間</th>
                 <th scope="col">操作</th>

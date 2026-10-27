@@ -309,7 +309,7 @@ class ConfirmationApiContractTests(unittest.TestCase):
         from fastapi import Body
 
         request = SimpleNamespace(cookies={"session": "signed-token"})
-        actor = {"username": "reviewer", "role": "accountant"}
+        actor = {"username": "reviewer", "is_admin": False}
         auth_stub = SimpleNamespace(get_user_by_token=Mock(return_value=actor))
         record = SimpleNamespace(id=13)
         review_stub = SimpleNamespace(confirm_record=Mock(return_value=record))
@@ -325,7 +325,11 @@ class ConfirmationApiContractTests(unittest.TestCase):
         from fastapi import Body, Request
         from fastapi.responses import JSONResponse
 
-        users = {f"{role}-token": {"role": role} for role in ("clerk", "accountant", "admin")}
+        users = {
+            "clerk-token": {"username": "clerk", "is_admin": False},
+            "accountant-token": {"username": "accountant", "is_admin": False},
+            "admin-token": {"username": "admin", "is_admin": True},
+        }
         auth = SimpleNamespace(get_user_by_token=Mock(side_effect=lambda token: users.get(token)))
         guard = _load_endpoint("auth_guard", {
             "Request": Request, "JSONResponse": JSONResponse, "auth": auth,
@@ -622,7 +626,8 @@ class VoucherDeleteTests(unittest.TestCase):
         background_busy = import_busy.start()
         self.addCleanup(import_busy.stop)
 
-        users = {"admin-token": {"role": "admin", "username": "admin"}, "clerk-token": {"role": "clerk", "username": "clerk"}}
+        users = {"admin-token": {"is_admin": True, "username": "admin"},
+                 "clerk-token": {"is_admin": False, "username": "clerk"}}
         auth = SimpleNamespace(get_user_by_token=lambda token: users.get(token))
         state = {"_job": {"status": "idle"}, "_ejob": {"status": "idle"}}
         busy = _load_endpoint("_delete_busy", dict(state))

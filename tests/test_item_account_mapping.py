@@ -44,7 +44,7 @@ class ItemAccountMappingTests(unittest.TestCase):
 
     def actor(self, username="reviewer"):
         # Real sessions carry the database ID; the supplied display name remains untrusted.
-        return {"username": username, "id": self.user_id, "name": "偽造名稱", "role": "admin"}
+        return {"username": username, "id": self.user_id, "name": "偽造名稱", "is_admin": False}
 
     def voucher(self, description="影印紙", *, doc_type="receipt", account_code="", account_name="",
                 **extra):

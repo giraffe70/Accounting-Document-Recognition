@@ -53,7 +53,7 @@ class SyntheticElement {
   }
   reset() {
     for (const field of this.elements) {
-      field.value = field.id === "role" ? "clerk" : "";
+      field.value = "";
       field.disabled = false;
     }
   }
@@ -63,17 +63,16 @@ function element(id) {
   if (!elements.has(id)) {
     const tag = id === "userForm" || id === "editForm" ? "form" : id === "usersBody" ? "tbody" : "div";
     const node = new SyntheticElement(tag, id);
-    if (id === "usersPanel" || id === "editPanel" || id === "customRoleWrap") node.classList.add("hidden");
+    if (id === "usersPanel" || id === "editPanel") node.classList.add("hidden");
     elements.set(id, node);
   }
   return elements.get(id);
 }
 
-const formFields = ["username", "displayName", "role", "customRole", "password", "confirmPassword", "createUserBtn"]
+const formFields = ["username", "displayName", "password", "confirmPassword", "createUserBtn"]
   .map((id) => element(id));
 element("userForm").elements = formFields;
 element("editForm").elements = ["editUsername", "editDisplayName", "editPassword", "editConfirmPassword", "editSave", "editCancel"].map(element);
-element("role").value = "clerk";
 
 function response(status, data) {
   return { status, ok: status >= 200 && status < 300, json: async () => data };
@@ -85,22 +84,22 @@ async function fetchMock(url, options = {}) {
   const call = { url, method, body: options.body ? JSON.parse(options.body) : null };
   calls.push(call);
   const scenario = input.scenario;
-  if (url === "/api/me") return response(scenario.meStatus || 200, scenario.me || { id: 1, name: "管理員", role: "admin" });
+  if (url === "/api/me") return response(scenario.meStatus || 200, scenario.me || { id: 1, name: "管理員", is_admin: true });
   if (url === "/api/users" && method === "GET") {
     return queues.list.length ? response(queues.list[0].status, queues.list.shift().data) : response(200, scenario.users || []);
   }
   if (url === "/api/users" && method === "POST") {
-    const result = scenario.postResponse || { status: 201, data: { id: 9, username: call.body.username, name: call.body.name, role: call.body.role, is_active: true } };
+    const result = scenario.postResponse || { status: 201, data: { id: 9, username: call.body.username, name: call.body.name, is_active: true, is_admin: false } };
     return response(result.status, result.data);
   }
   if (url.startsWith("/api/users/") && method === "DELETE") {
-    const result = scenario.deleteResponse || { status: 200, data: { id: Number(url.split("/").pop()), username: "clerk", name: "記帳士", role: "clerk", is_active: false, created_at: "2026-01-01" } };
+    const result = scenario.deleteResponse || { status: 200, data: { id: Number(url.split("/").pop()), username: "clerk", name: "記帳士", is_admin: false, is_active: false, created_at: "2026-01-01" } };
     return response(result.status, result.data);
   }
   if (url.startsWith("/api/users/") && method === "PATCH") {
     const result = scenario.patchResponse || { status: 200, data: {
       id: Number(url.split("/").pop()), username: call.body.username, name: call.body.name,
-      role: scenario.editRole || "clerk", is_active: true, created_at: "2026-01-01" } };
+      is_admin: !!scenario.editIsAdmin, is_active: true, created_at: "2026-01-01" } };
     return response(result.status, result.data);
   }
   throw new Error(`unexpected request ${method} ${url}`);
@@ -122,9 +121,6 @@ async function settle() { for (let i = 0; i < 8; i += 1) await tick(); }
   if (scenario.action === "submit") {
     element("username").value = scenario.form?.username || "newuser";
     element("displayName").value = scenario.form?.name || "新帳號";
-    element("role").value = scenario.form?.role || "clerk";
-    await element("role").dispatch("change");
-    element("customRole").value = scenario.form?.customRole || "";
     element("password").value = scenario.form?.password || "password-123";
     element("confirmPassword").value = scenario.form?.confirmPassword || scenario.form?.password || "password-123";
     await element("userForm").dispatch("submit");
@@ -151,14 +147,6 @@ async function settle() { for (let i = 0; i < 8; i += 1) await tick(); }
       await element("editForm").dispatch("submit");
     }
     await settle();
-  } else if (scenario.action === "roleChange") {
-    element("role").value = "other";
-    await element("role").dispatch("change");
-    element("customRole").value = "自訂角色";
-    if (scenario.switchBack) {
-      element("role").value = "clerk";
-      await element("role").dispatch("change");
-    }
   } else if (scenario.action === "refresh") {
     await element("refreshUsers").dispatch("click");
     await settle();
@@ -173,14 +161,10 @@ async function settle() { for (let i = 0; i < 8; i += 1) await tick(); }
     calls, confirms, innerHTMLWrites,
     usersPanelHidden: element("usersPanel").classList.contains("hidden"),
     editPanelHidden: element("editPanel").classList.contains("hidden"),
-    customRoleHidden: element("customRoleWrap").classList.contains("hidden"),
-    customRoleRequired: !!element("customRole").required,
-    customRoleDisabled: element("customRole").disabled,
-    customRoleValue: element("customRole").value,
     usersRows: element("usersBody").children.map(serialize),
     messages: Object.fromEntries(["accessMessage", "formMessage", "listMessage", "editMessage"].map((id) => [id, element(id).textContent])),
     messageErrors: Object.fromEntries(["accessMessage", "formMessage", "listMessage", "editMessage"].map((id) => [id, element(id).classList.contains("users-error")])),
-    form: Object.fromEntries(["username", "displayName", "role", "password", "confirmPassword"].map((id) => [id, element(id).value])),
+    form: Object.fromEntries(["username", "displayName", "password", "confirmPassword"].map((id) => [id, element(id).value])),
     editForm: Object.fromEntries(["editUsername", "editDisplayName", "editPassword", "editConfirmPassword"].map((id) => [id, element(id).value])),
   };
   process.stdout.write(JSON.stringify(out));

@@ -38,7 +38,7 @@ def main():
 
         # ① 登入畫面
         pg.wait_for_selector("#loginBtn", state="visible", timeout=15000)
-        shot("01_login", "登入畫面：三種角色、未登入無法使用任何功能")
+        shot("01_login", "登入畫面：一般使用者與系統管理員、未登入無法使用任何功能")
 
         pg.fill("#loginUser", "admin")
         pg.fill("#loginPass", "admin123")

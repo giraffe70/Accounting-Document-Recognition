@@ -6,7 +6,8 @@
 用法（於專案根目錄）：
     python scripts/manage_users.py list
     python scripts/manage_users.py passwd <帳號>
-    python scripts/manage_users.py add <帳號> <角色 clerk|accountant|admin|other:名稱> <顯示名稱>
+    python scripts/manage_users.py add <帳號> <顯示名稱>
+    python scripts/manage_users.py add --admin <帳號> <顯示名稱>
     python scripts/manage_users.py rename <帳號> <新顯示名稱>
     python scripts/manage_users.py delete <帳號>
 
@@ -18,12 +19,7 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
-ROLES = {"clerk": "記帳士", "accountant": "會計師", "admin": "管理員"}
 MIN_LEN = 8
-
-
-def _role_label(role: str) -> str:
-    return f"其他：{role[6:]}" if role.startswith("other:") else ROLES.get(role, role)
 
 
 def _prompt_password(username: str) -> str:
@@ -55,13 +51,17 @@ def main():
     # Support existing installations before the next web-server restart.
     _migrate_users()
 
-    if cmd == "add" and len(args) >= 4:
-        username, role, name = args[1], args[2], " ".join(args[3:])
+    if cmd == "add" and len(args) >= 3:
+        is_admin = args[1] == "--admin"
+        start = 2 if is_admin else 1
+        if len(args) < start + 2:
+            sys.exit("請提供帳號及顯示名稱")
+        username, name = args[start], " ".join(args[start + 1:])
         try:
-            user = auth.create_user(username, name, _prompt_password(username), role)
+            user = auth.create_user(username, name, _prompt_password(username), is_admin=is_admin)
         except auth.AccountError as exc:
             sys.exit(str(exc))
-        print(f"✓ 已新增 {user['username']}（{_role_label(user['role'])}／{user['name']}）")
+        print(f"✓ 已新增 {user['username']}（{'系統管理員' if user['is_admin'] else '一般使用者'}／{user['name']}）")
         return
 
     if cmd == "delete" and len(args) >= 2:
@@ -82,7 +82,7 @@ def main():
     with get_session() as s:
         if cmd == "list":
             users = s.exec(select(UserAccount).order_by(UserAccount.id)).all()
-            print(f"{'帳號':<16}{'角色':<12}{'顯示名稱':<16}{'啟用狀態':<12}{'密碼狀態'}")
+            print(f"{'帳號':<16}{'顯示名稱':<16}{'管理員':<10}{'啟用狀態':<12}{'密碼狀態'}")
             for u in users:
                 # 用預設密碼驗一次，就能標出「尚未改過密碼」的帳號
                 default = {"admin": "admin123", "clerk": "clerk123", "accountant": "acc123"}
@@ -92,7 +92,7 @@ def main():
                     _, ph = auth._hash(d, u.salt)
                     weak = "⚠ 仍為預設密碼" if ph == u.password_hash else "已變更"
                 state = "啟用" if u.is_active else "已停用"
-                print(f"{u.username:<16}{_role_label(u.role):<12}{u.name:<16}{state:<12}{weak}")
+                print(f"{u.username:<16}{u.name:<16}{'是' if u.is_admin else '否':<10}{state:<12}{weak}")
             return
 
         if cmd == "passwd" and len(args) >= 2:

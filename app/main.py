@@ -91,8 +91,7 @@ async def auth_guard(request: Request, call_next):
         user = auth.get_user_by_token(request.cookies.get("session"))
         if not user:
             return JSONResponse({"detail": "未登入"}, status_code=401, headers={"Cache-Control": "no-store"})
-        role = user["role"]
-        if role != "admin":
+        if not user.get("is_admin"):
             if path == "/api/accounts" and request.method == "POST":
                 return JSONResponse({"detail": "需管理員權限"}, status_code=403)
             elif path.startswith("/api/backup"):
@@ -536,7 +535,7 @@ def api_delete_preview(request: Request, rec_id: int, scope: str = ""):
     previews = {item: review.delete_preview(rec_id, item) for item in scopes}
     if any(preview is None for preview in previews.values()):
         return JSONResponse({"detail": "查無此紀錄"}, status_code=404)
-    is_admin = (auth.get_user_by_token(request.cookies.get("session")) or {}).get("role") == "admin"
+    is_admin = bool((auth.get_user_by_token(request.cookies.get("session")) or {}).get("is_admin"))
     return {"ok": True, "is_admin": is_admin, "busy": _delete_busy(), "previews": previews,
             "can_delete": {item: is_admin or not preview["requires_admin"] for item, preview in previews.items()}}
 
@@ -550,7 +549,7 @@ def api_delete(request: Request, rec_id: int, scope: str = "record"):
         return JSONResponse({"ok": False, "detail": "匯入或提取進行中，請稍後再刪除"}, status_code=409)
     user = auth.get_user_by_token(request.cookies.get("session")) or {}
     try:
-        result = review.delete_vouchers(rec_id, scope, is_admin=user.get("role") == "admin",
+        result = review.delete_vouchers(rec_id, scope, is_admin=bool(user.get("is_admin")),
                                         actor=user.get("username", ""))
     except review.DeleteForbidden as exc:
         return JSONResponse({"ok": False, "detail": str(exc)}, status_code=403)

@@ -77,9 +77,8 @@
           minute: "2-digit", second: "2-digit" }).format(timestamp);
       }
     }
-    if ((column.name === "manual_entry" || column.name === "warmup" || column.name === "cancel_requested")
+    if ((column.name === "manual_entry" || column.name === "warmup" || column.name === "cancel_requested" || column.name === "is_admin")
       && (value === 0 || value === 1)) return value ? "是" : "否";
-    if (column.name === "role") return {admin: "管理員", clerk: "記帳士", accountant: "會計師"}[value] || String(value);
     return String(value);
   }
 

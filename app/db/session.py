@@ -28,16 +28,39 @@ def init_db():
 
 
 def _migrate_users():
-    """Keep account identities unique and retain disabled users for foreign keys."""
-    with _engine.begin() as conn:
-        duplicate = conn.exec_driver_sql(
-            "SELECT 1 FROM users GROUP BY username HAVING COUNT(*) > 1 LIMIT 1").first()
-        if duplicate:
-            raise RuntimeError("帳號資料遷移失敗：存在重複帳號，請先由管理員人工處理；未自動合併或更名。")
-        columns = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(users)")}
-        if "is_active" not in columns:
-            conn.exec_driver_sql("ALTER TABLE users ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1")
-        conn.exec_driver_sql("CREATE UNIQUE INDEX IF NOT EXISTS uq_users_username ON users(username)")
+    """Atomically preserve admin access and remove the obsolete role column."""
+    with _engine.connect() as conn:
+        conn.exec_driver_sql("BEGIN IMMEDIATE")
+        try:
+            duplicate = conn.exec_driver_sql(
+                "SELECT 1 FROM users GROUP BY username HAVING COUNT(*) > 1 LIMIT 1").first()
+            if duplicate:
+                raise RuntimeError("帳號資料遷移失敗：存在重複帳號，請先由管理員人工處理；未自動合併或更名。")
+            columns = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(users)")}
+            if "is_active" not in columns:
+                conn.exec_driver_sql("ALTER TABLE users ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1")
+            if "is_admin" not in columns:
+                if "role" not in columns and conn.exec_driver_sql("SELECT 1 FROM users LIMIT 1").first():
+                    raise RuntimeError("帳號資料遷移失敗：缺少舊角色及管理員權限欄位，無法判斷管理員。")
+                conn.exec_driver_sql("ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
+                if "role" in columns:
+                    conn.exec_driver_sql("UPDATE users SET is_admin = CASE WHEN role = 'admin' THEN 1 ELSE 0 END")
+            elif "role" in columns:
+                conflict = conn.exec_driver_sql("SELECT 1 FROM users WHERE is_admin IS NULL OR "
+                    "CAST(is_admin AS INTEGER) != CASE WHEN role = 'admin' THEN 1 ELSE 0 END LIMIT 1").first()
+                if conflict:
+                    raise RuntimeError("帳號資料遷移失敗：舊角色與管理員權限不一致，請先人工檢查。")
+            invalid_admin = conn.exec_driver_sql("SELECT 1 FROM users WHERE is_admin IS NULL OR "
+                "typeof(is_admin) != 'integer' OR is_admin NOT IN (0, 1) LIMIT 1").first()
+            if invalid_admin:
+                raise RuntimeError("帳號資料遷移失敗：管理員權限必須為整數 0 或 1，請先人工檢查。")
+            if "role" in columns:
+                conn.exec_driver_sql("ALTER TABLE users DROP COLUMN role")
+            conn.exec_driver_sql("CREATE UNIQUE INDEX IF NOT EXISTS uq_users_username ON users(username)")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
 
 
 # 已由 correction_note、confirmed_at 與新狀態取代的舊審核欄位（遷移後移除）。

@@ -41,7 +41,7 @@ class UserAccount(SQLModel, table=True):
     username: str = Field(index=True)
     password_hash: str = ""
     salt: str = ""
-    role: str = "clerk"          # clerk（記帳士）/ accountant（會計師）/ admin（管理員）
+    is_admin: bool = Field(default=False, sa_column_kwargs={"server_default": "0"})
     name: str = ""
     is_active: bool = Field(default=True, sa_column_kwargs={"server_default": "1"})
     created_at: datetime = Field(default_factory=datetime.now)

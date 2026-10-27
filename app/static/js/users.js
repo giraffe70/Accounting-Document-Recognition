@@ -1,23 +1,10 @@
 (() => {
   "use strict";
   const $ = (id) => document.getElementById(id);
-  const roles = { admin: "管理員", clerk: "記帳士", accountant: "會計師" };
   let currentUser = null;
   let users = [];
   let busy = false;
   let editingUser = null;
-
-  function roleLabel(role) {
-    return role.startsWith("other:") ? `其他：${role.slice(6)}` : (roles[role] || role);
-  }
-
-  function syncCustomRole() {
-    const isOther = $("role").value === "other";
-    $("customRoleWrap").classList.toggle("hidden", !isOther);
-    $("customRole").required = isOther;
-    $("customRole").disabled = busy || !isOther;
-    if (!isOther) $("customRole").value = "";
-  }
 
   function closeEdit() {
     editingUser = null;
@@ -36,7 +23,6 @@
     users = [];
     $("usersBody").replaceChildren();
     $("userForm").reset();
-    syncCustomRole();
     closeEdit();
     $("usersPanel").classList.add("hidden");
     message("formMessage", "");
@@ -59,11 +45,11 @@
   function renderUsers() {
     const body = $("usersBody");
     body.replaceChildren();
-    const adminCount = users.filter((user) => user.is_active && user.role === "admin").length;
+    const adminCount = users.filter((user) => user.is_active && user.is_admin === true).length;
     for (const user of users) {
       const row = document.createElement("tr");
       const date = new Date(user.created_at);
-      const cells = [user.username, user.name, roleLabel(user.role),
+      const cells = [user.username + (user.is_admin ? "（系統管理員）" : ""), user.name,
         user.is_active ? "啟用" : "已停用",
         Number.isNaN(date.getTime()) ? user.created_at : date.toLocaleString("zh-TW")];
       for (const value of cells) {
@@ -87,7 +73,7 @@
         button.className = "btn users-disable-button";
         button.textContent = "刪除（停用）";
         const isSelf = user.id === currentUser.id;
-        const isLastAdmin = user.role === "admin" && adminCount <= 1;
+        const isLastAdmin = user.is_admin === true && adminCount <= 1;
         button.disabled = busy || isSelf || isLastAdmin;
         button.title = isSelf ? "不能停用目前登入的管理員" : isLastAdmin ? "不能停用最後一位管理員" : "停用此帳號並保留歷史紀錄";
         button.addEventListener("click", () => disableUser(user));
@@ -107,7 +93,6 @@
     busy = value;
     for (const field of $("userForm").elements) field.disabled = busy;
     for (const field of $("editForm").elements) field.disabled = busy;
-    syncCustomRole();
     $("refreshUsers").disabled = busy;
     if (currentUser) renderUsers();
   }
@@ -133,19 +118,13 @@
       message("formMessage", "兩次輸入的密碼不一致。", true);
       return;
     }
-    const customRole = $("customRole").value.trim();
-    if ($("role").value === "other" && !customRole) {
-      message("formMessage", "請輸入其他角色名稱。", true);
-      return;
-    }
     const payload = { username: $("username").value, name: $("displayName").value,
-      password: $("password").value, role: $("role").value === "other" ? `other:${customRole}` : $("role").value };
+      password: $("password").value };
     setBusy(true);
     message("formMessage", "正在新增帳號…");
     try {
       const user = await api("/api/users", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
       $("userForm").reset();
-      syncCustomRole();
       message("formMessage", `已新增帳號 ${user.username}。`);
       try { await loadUsers(); }
       catch (error) { if (currentUser) message("listMessage", `帳號已新增，列表更新失敗：${error.message}`, true); }
@@ -220,7 +199,7 @@
     setBusy(true);
     try {
       currentUser = await api("/api/me");
-      if (currentUser.role !== "admin") { deny(403); return; }
+      if (currentUser.is_admin !== true) { deny(403); return; }
       await loadUsers();
       message("accessMessage", "");
       $("usersPanel").classList.remove("hidden");
@@ -231,7 +210,6 @@
   }
 
   $("userForm").addEventListener("submit", createUser);
-  $("role").addEventListener("change", syncCustomRole);
   $("editForm").addEventListener("submit", saveEdit);
   $("editCancel").addEventListener("click", closeEdit);
   $("refreshUsers").addEventListener("click", refreshUsers);

@@ -197,7 +197,7 @@ function node(id) {
 const $ = node;
 let currentId = null, currentVoucher = {}, currentIsImport = false, editBusy = false, inferBusy = 0, cropping = false, stageAction = '';
 let currentManualEntry = false;
-const currentUser = { role: input.role || 'clerk' };
+const currentUser = { is_admin: !!input.is_admin };
 const fileInput = { value: 'selected-file' }, progressText = { textContent: '' }, progress = { classList: { remove() {} } }, barFill = { style: {} };
 function setCropMode() {}
 function setStatus() {}
@@ -340,7 +340,7 @@ const document = {
   querySelectorAll: () => [],
 };
 let currentId = 12, editBusy = false;
-const currentUser = { role: 'admin' };
+const currentUser = { is_admin: true };
 const esc = (s) => (s == null ? '' : String(s));
 const errText = (d, fallback) => (d && d.detail) || fallback;
 const $ = (id) => node(id);
@@ -539,7 +539,7 @@ class ConfirmationFrontendTests(unittest.TestCase):
         self.assertEqual(first_payload["voucher"], retry_payload["voucher"])
         self.assertEqual(first_payload["reviewed_items"], retry_payload["reviewed_items"])
 
-    def test_review_opens_and_role_visibility_works_without_removed_elements(self):
+    def test_review_opens_and_admin_visibility_works_without_removed_elements(self):
         opened = self.run_review(action="open", recordId=12, records={"12": self.review_record(True)})
         self.assertEqual(opened["currentId"], 12)
         self.assertTrue(opened["manualEntry"])
@@ -549,11 +549,9 @@ class ConfirmationFrontendTests(unittest.TestCase):
         self.assertEqual(chart_loads, [{"type": "loadItemAccountChart", "company": "3"}])
         self.assertTrue(opened["absentNodes"])
 
-        clerk = self.run_review(action="role", role="clerk")
-        self.assertFalse(any(clerk["visible"].values()))
-        accountant = self.run_review(action="role", role="accountant")
-        self.assertFalse(any(accountant["visible"].values()))
-        admin = self.run_review(action="role", role="admin")
+        regular = self.run_review(action="role", is_admin=False)
+        self.assertFalse(any(regular["visible"].values()))
+        admin = self.run_review(action="role", is_admin=True)
         self.assertTrue(all(admin["visible"].values()))
 
     def test_removed_sysconfig_hash_is_noop_and_supported_hashes_still_route(self):

@@ -265,7 +265,7 @@ class EntryReviewWorkflowTests(unittest.TestCase):
                                      side_effect=lambda: Session(self.engine, expire_on_commit=False))
         session_patch.start()
         self.addCleanup(session_patch.stop)
-        self.actor = {"username": "entry-reviewer", "name": "不採用客戶名稱", "role": "accountant"}
+        self.actor = {"username": "entry-reviewer", "name": "不採用客戶名稱", "is_admin": False}
 
     def voucher(self, *, doc_type="receipt", amount=100, entries=None):
         return Voucher.model_validate({
