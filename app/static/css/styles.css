@@ -209,6 +209,7 @@ table.list th:nth-child(4) { text-align: right; }
 .grid2 label, label.full { position: relative; display: flex; flex-direction: column; font-size: 12px; color: var(--muted); gap: 3px; }
 .fld-badge { position: absolute; top: 0; right: 0; color: #fff; font-size: 10px; font-weight: 700;
   width: 15px; height: 15px; border-radius: 50%; display: grid; place-items: center; }
+.company-filled-tag { align-self: flex-start; color: #57606a; font-size: 10px; line-height: 1.3; }
 label.full { margin: 8px 0; }
 .grid2 input, label.full input, label.full textarea {
   width: 100%; min-width: 0;
@@ -247,6 +248,7 @@ table.items-edit .item-extras label { display: block; margin: 5px 0; font-size: 
 
 .up-company { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); margin-bottom: 12px; }
 .up-company .select { width: auto; min-width: 140px; }
+.company-tax-id { color: var(--muted); font-size: 12px; white-space: nowrap; }
 .chk { font-size: 11.5px; margin-top: 2px; }
 .chk.ok { color: var(--green); }
 .chk.warn { color: #9a6700; }

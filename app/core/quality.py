@@ -152,7 +152,11 @@ def evaluate_quality(voucher: dict) -> dict:
     is_supporting = bool(spec.get("supporting"))
     is_other = type_key == "other"
 
-    has_content = (_has_content(fields) or any(_has_content(row) for row in items)
+    evidence = voucher.get("field_evidence") or {}
+    observed_fields = {key: value for key, value in fields.items()
+                       if not any(r.get("source") == "company" and r.get("selected")
+                                  for r in evidence.get("fields." + key, []))}
+    has_content = (_has_content(observed_fields) or any(_has_content(row) for row in items)
                    or any(_has_content(row) for row in entries))
     content_kind = "unknown" if not known_type or is_other else "supporting" if is_supporting else "document"
     issues: list[dict] = []

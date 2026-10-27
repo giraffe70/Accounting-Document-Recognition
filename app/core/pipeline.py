@@ -483,6 +483,9 @@ def extract_evidence(image_path: str, type_key: str, chat, ocr_lines: list, ocr_
     dense = type_key in doc_types.NO_VLM_BOX_TYPES
     data["boxes"] = _refine_boxes_with_ocr(data["fields"], vlm_boxes, ocr_lines, image_path,
                         keep_unmatched=mode == "image" and not dense) if ocr_lines else ({} if dense else vlm_boxes)
+    from app.core import company_defaults
+    data["doc_type_key"] = type_key
+    company_defaults.apply(data, context.get("company"))
     voucher = _build_voucher(data, type_key)
     voucher.initial_ai = initial_ai
     voucher.recognition_diagnostics = diagnostics
@@ -869,6 +872,10 @@ def _build_voucher(data: dict, type_key: str, *, derive_entries: bool = True, no
     if type_key == "import_declaration":
         f["buyer"] = f.get("taxpayer")
         f["buyer_tax_id"] = f.get("taxpayer_tax_id")
+        for source, target in (("taxpayer", "buyer"), ("taxpayer_tax_id", "buyer_tax_id")):
+            if evidence.get("fields." + source):
+                from copy import deepcopy
+                evidence["fields." + target] = deepcopy(evidence["fields." + source])
     # A generic declaration's direction must be explicit, never inferred from notes.
     if type_key == "declaration" and f.get("direction") not in ("進口", "出口"):
         f["direction"] = None
@@ -908,6 +915,7 @@ def _build_voucher(data: dict, type_key: str, *, derive_entries: bool = True, no
         common["tax_amount"] = None
     payload = {
         "doc_type_key": type_key, "doc_type": spec["label"], "fields": f,
+        "company_info": data.get("company_info") or {},
         "note": to_traditional(data.get("note") or ""), "confidence": data.get("confidence"),
         "boxes": data.get("boxes") or {}, "items": data.get("items") or [],
         "details_version": data.get("details_version") or 0,

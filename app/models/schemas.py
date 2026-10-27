@@ -134,6 +134,7 @@ class Voucher(_StrCoerceModel):
     doc_type: str = ""               # 憑證類型顯示名（發票/支票/匯款單…）
     doc_type_key: str = ""           # Router 判定的類型代碼（invoice/cheque/…）
     fields: dict = Field(default_factory=dict)  # 該類型專屬欄位值（key→value）
+    company_info: dict = Field(default_factory=dict)  # 使用者指定公司，非單據辨識值
     buyer: Party = Field(default_factory=Party)
     seller: Party = Field(default_factory=Party)
     items: list[LineItem] = Field(default_factory=list)

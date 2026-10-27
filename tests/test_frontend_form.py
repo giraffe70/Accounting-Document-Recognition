@@ -241,6 +241,51 @@ class FrontendFormRegressionTests(unittest.TestCase):
         self.assertEqual(collected["entries"][0]["entry_id"], "fixed-entry-uuid")
         self.assertEqual(collected["entries"][0]["debit_account"], "00120")
 
+    def test_company_filled_field_uses_selected_company_record_in_evidence_list(self):
+        payload = {
+            "source": self.source,
+            "keys": ["seller_tax_id", "buyer_tax_id"],
+            "evidence": {
+                "fields.seller_tax_id": [
+                    {"source": "model", "selected": False},
+                    {"source": "company", "selected": True},
+                ],
+                "fields.buyer_tax_id": [
+                    {"source": "company", "selected": False},
+                    {"source": "model", "selected": True},
+                ],
+            },
+        }
+        harness = r"""
+const fs = require('fs');
+const vm = require('vm');
+const input = JSON.parse(fs.readFileSync(0, 'utf8'));
+const start = input.source.indexOf('  function renderFields(values)');
+const end = input.source.indexOf('  function setupImage(', start);
+if (start < 0 || end < 0) throw new Error('could not locate production renderFields');
+const box = { innerHTML: '', querySelector: () => null };
+const context = {
+  activeFields: input.keys.map((key, index) => ({ key, label: key, kind: 'text', el: 'dyn-' + key, color: '#000', n: index + 1 })),
+  currentVoucher: { field_evidence: input.evidence },
+  esc: (value) => String(value),
+  $: (id) => id === 'dynFields' ? box : null,
+};
+vm.createContext(context);
+vm.runInContext(input.source.slice(start, end) + '\nrenderFields({});', context);
+process.stdout.write(box.innerHTML);
+"""
+        completed = subprocess.run(
+            [str(NODE), "-e", harness],
+            input=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr.decode("utf-8", errors="replace"))
+        html = completed.stdout.decode("utf-8")
+        self.assertIn('data-key="seller_tax_id"', html)
+        self.assertEqual(html.count('class="company-filled-tag">公司帶入'), 1)
+        self.assertNotIn('class="company-filled-tag">公司帶入', html[html.index('data-key="buyer_tax_id"'):])
+
 
 class ValidationTimingFrontendContractTests(unittest.TestCase):
     def test_timing_details_are_versioned_and_rendered_for_page_and_document(self):

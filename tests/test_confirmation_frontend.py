@@ -170,7 +170,9 @@ const roleStart = source.indexOf('  function applyRole()', clearEnd);
 const roleEnd = source.indexOf('  async function enterApp()', roleStart);
 const recognizeStart = source.indexOf('  async function runRecognize()', openEnd);
 const recognizeEnd = source.indexOf('  function buildActiveFields(', recognizeStart);
-if ([openStart, openEnd, clearStart, clearEnd, roleStart, roleEnd, recognizeStart, recognizeEnd].some((p) => p < 0))
+const companyTaxStart = source.indexOf('  function companyTaxIdText(company)');
+const companyTaxEnd = source.indexOf('\n  $("uploadCompany")', companyTaxStart);
+if ([openStart, openEnd, clearStart, clearEnd, roleStart, roleEnd, recognizeStart, recognizeEnd, companyTaxStart, companyTaxEnd].some((p) => p < 0))
   throw new Error('could not locate review/role/recognize functions');
 const events = [], requests = [];
 const removed = new Set([
@@ -198,6 +200,7 @@ const $ = node;
 let currentId = null, currentVoucher = {}, currentIsImport = false, editBusy = false, inferBusy = 0, cropping = false, stageAction = '';
 let currentManualEntry = false;
 const currentUser = { is_admin: !!input.is_admin };
+const companyRecords = input.companies || [{ id: 3, name: '甲公司', short: '甲公司', tax_id: '12345678' }];
 const fileInput = { value: 'selected-file' }, progressText = { textContent: '' }, progress = { classList: { remove() {} } }, barFill = { style: {} };
 function setCropMode() {}
 function setStatus() {}
@@ -244,13 +247,13 @@ const context = { console, events, requests, input, nodes, $, currentUser, fileI
   get currentIsImport() { return currentIsImport; }, set currentIsImport(v) { currentIsImport = v; },
   editBusy, inferBusy, cropping, stageAction, currentVersion: '', reviewedItems: { stale: true },
   updateRecognitionState, applyRecognitionState,
-  DOC_TYPES: { other: { fields: [] } },
+  DOC_TYPES: { other: { fields: [] } }, companyRecords,
   async loadItemAccountChart() { events.push({ type: 'loadItemAccountChart', company: node('revCompanySel').value }); },
   setCropMode, setStatus, setPendingActionVisibility, populateTypeSel, buildActiveFields, renderFields, renderItems,
   renderTaxcheck, renderDatecheck, renderAmountcheck, renderEntries, setupImage, renderPages, sourceHintHtml, sourceTrace,
   esc, loadList, alert, toast, confirm, json, persistCurrentEdits, withInferProgress, fetch };
 vm.createContext(context);
-const reviewCode = source.slice(openStart, openEnd) + '\n' + source.slice(clearStart, clearEnd) + '\n' + source.slice(roleStart, roleEnd) + '\n' + source.slice(recognizeStart, recognizeEnd);
+const reviewCode = source.slice(openStart, openEnd) + '\n' + source.slice(clearStart, clearEnd) + '\n' + source.slice(roleStart, roleEnd) + '\n' + source.slice(recognizeStart, recognizeEnd) + '\n' + source.slice(companyTaxStart, companyTaxEnd);
 vm.runInContext(reviewCode + '\nglobalThis.api = { openReview, clearReview, applyRole, runRecognize };', context);
 (async () => {
   const out = {};

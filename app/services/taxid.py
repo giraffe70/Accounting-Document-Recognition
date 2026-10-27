@@ -28,14 +28,15 @@ def load_companies() -> list:
     global _companies
     from app.db.models import Company
     from app.db.session import get_session
-    from app.services.companies import public
+    from app.services.companies import public, registrations
     from sqlalchemy.exc import OperationalError
     from sqlmodel import select
     try:
         with get_session() as session:
             registered = session.exec(select(Company)).all()
             if registered:
-                return [public(company) for company in registered]
+                rows = registrations()
+                return [public(company, rows) for company in registered]
     except OperationalError:
         pass  # Before first startup/migration, the existing JSON remains readable.
     if _companies is None:
@@ -59,9 +60,9 @@ def check_party(name: str, tax_id: str) -> dict:
     valid = validate_tax_id(tax_id) if tax_id else None
     matched = find_by_tax_id(tax_id) if tax_id else None
     name_match = None
-    if matched:
+    if matched and name:
         # 已登錄公司：比對名稱是否相符（去空白包含即可）
-        name_match = bool(name) and (matched["name"] in name or name in matched["name"]
+        name_match = (matched["name"] in name or name in matched["name"]
                                      or matched["short"] in name)
     return {
         "tax_id": tax_id or "",

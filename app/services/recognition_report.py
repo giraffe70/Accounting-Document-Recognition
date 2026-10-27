@@ -57,13 +57,22 @@ def _image_url(rec, attachment_index: int | None = None) -> str:
     return f"/api/vouchers/{quote(str(rec_id), safe='')}/image?{urlencode(params)}"
 
 
-def _field_rows(spec, fields) -> str:
+def _field_rows(spec, fields, field_evidence=None) -> str:
+    field_evidence = field_evidence if isinstance(field_evidence, Mapping) else {}
     rows = []
     for field in spec.get("fields", []):
-        value = fields.get(field["key"])
+        key = field["key"]
+        value = fields.get(key)
         if _present(value):
+            evidence = field_evidence.get(f"fields.{key}")
+            company_filled = (isinstance(evidence, list)
+                              and any(isinstance(record, Mapping)
+                                      and record.get("source") == "company"
+                                      and record.get("selected") is True
+                                      for record in evidence))
+            source_label = '<small class="company-filled-tag">公司帶入</small>' if company_filled else ""
             rows.append(
-                f'<div class="field"><dt>{_text(field.get("label", field["key"]))}</dt>'
+                f'<div class="field"><dt>{_text(field.get("label", key))}{source_label}</dt>'
                 f'<dd>{_text(value)}</dd></div>'
             )
     return "".join(rows)
@@ -128,6 +137,8 @@ def render(rec, voucher, account_warnings=None) -> str:
     """Render a printable report using a record and a prepared voucher mapping."""
     voucher = voucher if isinstance(voucher, Mapping) else {}
     fields = voucher.get("fields") if isinstance(voucher.get("fields"), Mapping) else {}
+    field_evidence = voucher.get("field_evidence") if isinstance(voucher.get("field_evidence"), Mapping) else {}
+    company_info = voucher.get("company_info") if isinstance(voucher.get("company_info"), Mapping) else {}
     type_key = voucher.get("doc_type_key", "")
     spec = doc_types.get(type_key)
     doc_type_label = voucher.get("doc_type") or spec.get("label") or type_key
@@ -168,6 +179,7 @@ def render(rec, voucher, account_warnings=None) -> str:
 h1 {{ text-align: center; font-size: 20pt; margin: 0 0 8mm; }} h2 {{ font-size: 14pt; margin: 7mm 0 3mm; }}
 .fields {{ display: grid; grid-template-columns: 1fr 1fr; gap: 2mm 8mm; }}
 .field, .total {{ display: flex; gap: 8px; min-width: 0; }} dt {{ color: #53606c; min-width: 7em; }} dd {{ margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }}
+.company-filled-tag {{ margin-left: 5px; color: #53606c; font-size: 8pt; font-weight: 400; white-space: nowrap; }}
 table {{ width: 100%; border-collapse: collapse; table-layout: fixed; }} thead {{ display: table-header-group; }}
 th, td {{ border: 1px solid #aab4be; padding: 2mm; text-align: left; vertical-align: top; overflow-wrap: anywhere; white-space: pre-wrap; }}
 th {{ background: #eef2f5; }} th:nth-child(1) {{ width: 14%; }} th:nth-child(2) {{ width: 16%; }} th:nth-child(3) {{ width: 30%; }}
@@ -183,11 +195,12 @@ tr {{ break-inside: avoid; page-break-inside: avoid; }}
 <article class="report"><h1>會計憑證辨識報告</h1>
 <section class="fields">
 <div class="field"><dt>公司</dt><dd>{_text(company)}</dd></div>
+{f'<div class="field"><dt>統編</dt><dd>{_text(company_info.get("tax_id"))}</dd></div>' if _present(company_info.get("tax_id")) else ""}
 <div class="field"><dt>單據類型</dt><dd>{_text(doc_type_label)}</dd></div>
 <div class="field"><dt>號碼</dt><dd>{_text(voucher.get("voucher_id"))}</dd></div>
 <div class="field"><dt>日期</dt><dd>{_text(voucher.get("date"))}</dd></div>
 <div class="field"><dt>金額幣別</dt><dd>{_text(voucher.get("currency"))}</dd></div>
-{_field_rows(spec, fields)}
+{_field_rows(spec, fields, field_evidence)}
 <div class="field"><dt>確認人</dt><dd>{_text(confirmed_by)}</dd></div>
 <div class="field"><dt>確認時間</dt><dd>{_text(confirmed_at)}</dd></div>
 </section>

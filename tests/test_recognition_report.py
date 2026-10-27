@@ -67,6 +67,30 @@ class RecognitionReportTests(unittest.TestCase):
         self.assertNotIn("<tag>", result)
         self.assertIn("overflow-wrap: anywhere", result)
 
+    def test_company_filled_fields_and_company_tax_id_are_displayed_safely(self):
+        voucher = {
+            "doc_type_key": "invoice",
+            "company_info": {"id": 3, "name": "甲公司", "tax_id": "12345678&"},
+            "fields": {"seller_tax_id": "12345678", "buyer_tax_id": "87654321"},
+            "field_evidence": {
+                "fields.seller_tax_id": [
+                    {"source": "model", "selected": False, "value": "12345678"},
+                    {"source": "company", "selected": True, "value": "12345678"},
+                ],
+                "fields.buyer_tax_id": [
+                    {"source": "company", "selected": False, "value": "87654321"},
+                    {"source": "model", "selected": True, "value": "87654321"},
+                ],
+            },
+            "items": [],
+        }
+        result = render(self.record, voucher)
+        self.assertIn("<dt>統編</dt><dd>12345678&amp;</dd>", result)
+        self.assertIn("賣方統編<small class=\"company-filled-tag\">公司帶入</small>", result)
+        self.assertIn("買方統編</dt>", result)
+        self.assertNotIn("買方統編<small class=\"company-filled-tag\">", result)
+        self.assertNotIn('"field_evidence"', result)
+
     def test_journal_voucher_prints_distinct_source_totals_and_no_technical_json(self):
         result = render(
             self.record,

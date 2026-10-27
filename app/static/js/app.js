@@ -545,6 +545,7 @@
       $("prepHint").innerHTML += `<br><span class="hint">此單據拆分自來源頁 #${esc(rec.source_parent_id)}${v.origin?.page_no != null ? `（原始頁 p${esc(v.origin.page_no)}）` : ""}。</span>`;
     }
     $("revCompanySel").value = rec.company_id == null ? "" : String(rec.company_id);
+    updateReviewCompanyTaxId();
     loadItemAccountChart();
     const typeKey = manualMode && isPreExtract && !prep.type_confirmed ? "" : v.doc_type_key || "other";
     populateTypeSel(typeKey);
@@ -708,7 +709,10 @@
         const n = Number(String(v).replace(/(?:NT)?\$|[,\s，、＄元]/gi, ""));
         if (Number.isFinite(n)) v = n; else t = "text";
       }
-      return `<label><span class="fld-badge" style="background:${f.color}" data-key="${f.key}" title="點我在影像上定位">${f.n}</span>${esc(f.label)}<input id="${f.el}" type="${t}" value="${esc(v == null ? "" : v)}"><span class="chk" id="chk-${f.key}"></span></label>`;
+      const evidence = currentVoucher.field_evidence?.[`fields.${f.key}`];
+      const companyFilled = Array.isArray(evidence) && evidence.some((record) =>
+        record?.source === "company" && record.selected === true);
+      return `<label><span class="fld-badge" style="background:${f.color}" data-key="${f.key}" title="點我在影像上定位">${f.n}</span>${esc(f.label)}${companyFilled ? '<span class="company-filled-tag">公司帶入</span>' : ""}<input id="${f.el}" type="${t}" value="${esc(v == null ? "" : v)}"><span class="chk" id="chk-${f.key}"></span></label>`;
     }).join("");
     activeFields.forEach((f) => {
       const el = $(f.el); if (!el) return;
@@ -1408,6 +1412,7 @@
     if (stageAction === "confirm") confirmAppearance(); else runRecognize();
   });
   $("revCompanySel").addEventListener("change", async () => {
+    updateReviewCompanyTaxId();
     if (!currentId) return;
     try {
       await loadItemAccountChart();
@@ -1558,6 +1563,21 @@
 
   // 載入公司清單到上傳下拉
   let COMPANIES = [];
+  function companyTaxIdText(company) {
+    if (!company) return "";
+    return company.tax_id ? `統編：${company.tax_id}` : "統編未設定";
+  }
+  function updateUploadCompanyTaxId() {
+    const selected = $("uploadCompany").value;
+    const company = companyRecords.find((c) => (c.short || c.name) === selected);
+    $("uploadCompanyTaxId").textContent = companyTaxIdText(company);
+  }
+  function updateReviewCompanyTaxId() {
+    const selected = $("revCompanySel").value;
+    const company = companyRecords.find((c) => String(c.id) === selected);
+    $("revCompanyTaxId").textContent = companyTaxIdText(company);
+  }
+  $("uploadCompany").addEventListener("change", updateUploadCompanyTaxId);
   async function loadCompanies() {
     const data = await (await fetch("/api/companies")).json();
     companyRecords = data.companies || [];
@@ -1566,6 +1586,8 @@
     $("uploadCompany").innerHTML = `<option value="">未指定</option>` + opts;
     $("revCompanySel").innerHTML = `<option value="">未指定</option>` + companyRecords.map((c) =>
       `<option value="${esc(c.id)}">${esc(c.short || c.name)}</option>`).join("");
+    updateUploadCompanyTaxId();
+    updateReviewCompanyTaxId();
   }
 
   // ── 左右欄可拖拉調整寬度 ──

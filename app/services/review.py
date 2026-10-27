@@ -14,10 +14,25 @@ from app import config
 from app.db.models import ReviewStatus, VoucherRecord, ItemAccountMapping, MappingHistory
 from app.db.session import get_session
 from app.models.schemas import Voucher
-from app.core import doc_types
+from app.core import doc_types, company_defaults
 from app.services import companies, item_account_mapping as mapping, entry_workflow as entry_flow, recognition_details as details
 
 _UNSET = object()
+
+
+def _apply_company(data, session, *, company_id=None, company="", fill_fields=True, project=False):
+    registered = companies.resolve(session, company_id=company_id) if company_id is not None else companies.resolve(session, company)
+    old_fields = deepcopy(data.get("fields") or {})
+    company_defaults.apply(data, companies.public(registered) if registered else None, fill_fields=fill_fields)
+    if project and data.get("fields") != old_fields:
+        from app.core import pipeline
+        normalized = pipeline.canonicalize_voucher(deepcopy(data))
+        # A company change only changes party fields. Keep legacy top-level
+        # identifiers, dates and amounts when their source fields are absent.
+        for key in ("fields", "buyer", "seller", "field_evidence", "validation_warnings", "quality"):
+            if key in normalized:
+                data[key] = normalized[key]
+    return data
 
 
 def _ocr_cache_directory(rec):
@@ -59,6 +74,8 @@ def save_voucher(voucher: Voucher, company: str = "",
     with (get_session() if session is None else nullcontext(session)) as s:
         registered = companies.resolve(s, company)
         rec.company_id = registered.id if registered else None
+        _apply_company(payload, s, company_id=rec.company_id,
+                       fill_fields=status != ReviewStatus.prepared, project=True)
         payload["entries"] = entry_flow.normalize_entries(raw_entries, origin="observed" if
             doc_types.get(voucher.doc_type_key).get("has_entries") else "manual", split_legacy=True)
         details.ensure(payload)
@@ -256,6 +273,7 @@ def _save_recognition(rec_id, voucher, *, expected_updated_at=None, actor=None):
         data["source_file"] = rec.source_file
         if protected_items:
             data["details_version"] = details.VERSION
+        _apply_company(data, session, company_id=rec.company_id, company=rec.company)
         data = pipeline.canonicalize_voucher(data)
         protected_entries = any(r.get("source") == "manual" and r.get("selected")
             for path, rows in evidence.items() if path == "entries" or path.startswith("entries[")
@@ -381,6 +399,9 @@ def update_current(rec_id: int, voucher_dict: dict, *, mark_manual: bool = True,
                 meta = voucher_dict["classification_meta"]
                 meta.update(status="candidate", stale=True)
                 meta["warnings"] = list(dict.fromkeys([*(meta.get("warnings") or []), "資料已人工修改，原分錄待重新確認"]))
+        _apply_company(voucher_dict, s, company_id=selected_company,
+                       company=getattr(rec, "company", "") if _company_id is _UNSET else "",
+                       fill_fields=getattr(rec, "status", ReviewStatus.pending) not in (ReviewStatus.prepared, ReviewStatus.queued))
         voucher_dict = pipeline.canonicalize_voucher(voucher_dict)
         summary = entry_flow.recompute(voucher_dict)
         if _actor is not None:
@@ -645,7 +666,8 @@ def set_company(rec_id: int, company: str, *, expected_updated_at=None, actor=No
         company = company or ""
         registered = companies.resolve(s, company)
         selected_id = registered.id if registered else None
-        if rec.company != company:
+        company_changed = rec.company != company
+        if company_changed:
             _invalidate_confirmation(rec, entry_flow.user_identity(s, actor))
             data = json.loads(rec.current_json)
             mapping.prepare_items(s, data, selected_id, previous=json.loads(rec.current_json),
@@ -653,6 +675,13 @@ def set_company(rec_id: int, company: str, *, expected_updated_at=None, actor=No
             rec.current_json = json.dumps(data, ensure_ascii=False)
         rec.company = company
         rec.company_id = selected_id
+        data = json.loads(rec.current_json)
+        old_fields = deepcopy(data.get("fields") or {})
+        _apply_company(data, s, company_id=selected_id,
+                       fill_fields=rec.status not in (ReviewStatus.prepared, ReviewStatus.queued), project=True)
+        if not company_changed and data.get("fields") != old_fields:
+            _invalidate_confirmation(rec, entry_flow.user_identity(s, actor), data.get("entries") or [])
+        rec.current_json = json.dumps(data, ensure_ascii=False)
         rec.updated_at = datetime.now()
         s.add(rec)
         s.commit()

@@ -47,6 +47,7 @@
           <h2>上傳憑證</h2>
           <label class="up-company">歸屬公司
             <select id="uploadCompany" class="select select-sm"></select>
+            <span id="uploadCompanyTaxId" class="company-tax-id" aria-live="polite"></span>
           </label>
           <label class="up-company">匯入流程
             <select id="uploadMode" class="select select-sm">
@@ -162,6 +163,7 @@
         <div class="rev-meta">
           單據類型：<select id="revTypeSel" class="type-sel"></select>
           　歸屬公司：<select id="revCompanySel" class="type-sel" title="匯入時未選公司者可在此補填"></select>
+          <span id="revCompanyTaxId" class="company-tax-id" aria-live="polite"></span>
           <button id="btnConfirmRecognize" class="btn btn-sm primary hidden">✅ 確認並辨識</button>
           <span id="revConfWrap">　信心度：<span id="revConf" class="tag">—</span></span>
         </div>

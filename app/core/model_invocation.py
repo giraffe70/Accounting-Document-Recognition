@@ -303,7 +303,7 @@ def source_versions() -> dict:
     root = Path(__file__).resolve().parents[1]
     names = {p.relative_to(root).as_posix() for p in (root / "core").glob("*.py")}
     names.update({"models/schemas.py", "services/accounting_policy.py", "services/classify.py",
-                  "services/importdecl.py", "services/accounts.py", "services/taxid.py", "services/review.py",
+                  "services/importdecl.py", "services/accounts.py", "services/taxid.py", "services/review.py", "services/companies.py",
                   "db/models.py", "db/session.py", "config.py", "validation.py", "main.py", "import_api.py", "services/import_jobs.py", "static/js/validation.js", "static/validation.html", "static/css/validation.css"})
     sources = {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in sorted(names)}
     runtime = {name: hashlib.sha256((config.DATA_DIR / name).read_bytes()).hexdigest()
