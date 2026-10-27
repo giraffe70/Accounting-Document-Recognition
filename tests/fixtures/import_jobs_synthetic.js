@@ -1,149 +1,192 @@
-const fs = require('fs');
-const vm = require('vm');
-const source = fs.readFileSync(process.argv[2], 'utf8');
-const start = source.indexOf('  const IMPORT_ACTIVE =');
-const end = source.indexOf('  // ── ③掃描清單', start);
-if (start < 0 || end < 0) throw new Error('production import job functions not found');
-const timers = new Map(), requests = [], events = [];
-const boundHandlers = new Map();
-let nextTimer = 1, responseByUrl = {}, createdUrls = 0, revokedUrls = 0;
+const fs = require("fs");
+const vm = require("vm");
+const source = fs.readFileSync(process.argv[2], "utf8");
+const timers = new Map(), requests = [], events = [], responses = new Map();
 const importJobs = new Map(), importJobTimers = new Map(), importSeenPages = new Map();
-const jobNode = {
-  innerHTML: '', classList: { toggle() {} },
+let nextTimer = 1, resolveUpload, resolveLate;
+const nodes = {};
+function makeNode(id) {
+  return nodes[id] = {
+    id, value: "", textContent: "", innerHTML: "", disabled: false, checked: false,
+    style: {}, attrs: {}, listeners: {}, classList: {
+      values: new Set(),
+      toggle(name, force) { if (force === undefined ? !this.values.has(name) : force) this.values.add(name); else this.values.delete(name); },
+      add(name) { this.values.add(name); }, remove(name) { this.values.delete(name); },
+      contains(name) { return this.values.has(name); },
+    },
+    setAttribute(name, value) { this.attrs[name] = String(value); },
+    addEventListener(type, handler) { this.listeners[type] = handler; },
+    click() { events.push(["click", id]); },
+    querySelectorAll() { return []; },
+  };
+}
+const ids = ["dropZone","fileInput","progress","progressText","modal","importState","importHint","btnImportReview","btnImportRetry","btnImportCancel","uploadCompany","uploadMode","btnScanImport","appearanceRecovery","btnAppearanceRetry","btnAppearanceCancel","appearancePosition","btnScanList","scanFiles","scanDirHint","btnExtractAll","listBody","listEmpty","listTable","btnMerge","confirmationFilter","queueTitle"];
+ids.forEach(makeNode);
+nodes.uploadCompany.value = "3";
+nodes.uploadMode.value = "manual_review";
+nodes.confirmationFilter.value = "prepared";
+const document = {
+  getElementById: (id) => nodes[id] || null,
   querySelectorAll(selector) {
-    const attr = selector === '[data-import-review-id]' ? 'data-import-review-id' : 'data-job-id';
-    const regex = new RegExp(`${attr}="([^"]+)"`, 'g');
-    return Array.from(this.innerHTML.matchAll(regex), (match) => {
-      const handlerKey = `${attr}:${match[1]}`;
-      const button = { dataset: attr === 'data-import-review-id' ? { importReviewId: match[1] } : { jobId: match[1], jobAction: 'cancel' }, handler: boundHandlers.get(handlerKey) || null,
-        addEventListener(_type, handler) { this.handler = handler; boundHandlers.set(handlerKey, handler); } };
-      return button;
-    });
+    if (selector === ".mchk:checked") return (nodes.listBody.checks || []).filter(x => x.checked);
+    return [];
   },
 };
-let recognitionDirty = true, currentId = 77, currentUser = { id: 1 };
-function $(id) { return id === 'importJobs' ? jobNode : null; }
-function setTimeoutFake(fn, delay) { const id = nextTimer++; timers.set(id, { fn, delay }); return id; }
-function clearTimeoutFake(id) { timers.delete(id); }
-async function fetch(url, options = {}) {
-  requests.push({ url, method: options.method || 'GET' });
-  const value = responseByUrl[url] || {};
-  return { ok: value.ok !== false, status: value.status || 200, json: async () => value.body || value };
-}
-function errText(data, fallback) { return data?.detail || fallback; }
-function loadList() { events.push('loadList'); }
-function refreshStats() { events.push('refreshStats'); }
-function alert(msg) { events.push(`alert:${msg}`); }
-function toast(msg) { events.push(`toast:${msg}`); }
-function setStage(stage) { events.push(['setStage', stage]); }
-function openReview(id) { events.push(['openReview', id]); }
-  const context = { console, Map, Set, URL: { createObjectURL: () => `blob:${++createdUrls}`, revokeObjectURL: () => { revokedUrls += 1; } }, $, importJobs, importJobTimers, importSeenPages,
-  currentUser, fetch, setTimeout: setTimeoutFake, clearTimeout: clearTimeoutFake, errText, loadList, refreshStats, alert, toast, editBusy: false,
-  encodeURIComponent, esc: (x) => String(x ?? ''), recognitionDirty, currentId, importJobGeneration: 0, setStage, openReview };
+const context = {
+  console, Map, Set, Array, JSON, String, Number, encodeURIComponent, document, nodes, events, dropZone: nodes.dropZone, fileInput: nodes.fileInput, progress: nodes.progress, progressText: nodes.progressText, modal: nodes.modal,
+  currentUser: { id: 7 }, currentVoucher: {}, currentStage: "import", currentId: null,
+  recognitionDirty: false, editBusy: false, importJobs, importJobTimers, importSeenPages,
+  uploadSending: false, importRestorePending: false, importJobGeneration: 0,
+  $: (id) => nodes[id] || makeNode(id),
+  alert: (message) => events.push(["alert", message]),
+  toast: (message) => events.push(["toast", message]),
+  refreshStats: () => events.push(["refreshStats"]),
+  loadList: async () => events.push(["loadList"]),
+  setStage: (stage) => { context.currentStage = stage; events.push(["setStage", stage]); },
+  openReview: async (id) => { context.currentId = id; events.push(["openReview", id]); },
+  clearReview: () => events.push(["clearReview"]),
+  errText: (data, fallback) => data && data.detail || fallback,
+  esc: (x) => String(x == null ? "" : x),
+  nf: (x) => String(x == null ? "—" : x),
+  setTimeout(fn, delay) { const id = nextTimer++; timers.set(id, { fn, delay }); return id; },
+  clearTimeout(id) { timers.delete(id); },
+  setInterval() { return 1; }, clearInterval() {},
+  FormData: class { constructor() { this.values = []; } append(key, value) { this.values.push([key, value]); } },
+  fetch: async (url, options = {}) => {
+    requests.push({ url, method: options.method || "GET", body: options.body });
+    if (url === "/api/import-jobs" && options.method === "POST") {
+      return new Promise(resolve => { resolveUpload = resolve; });
+    }
+    if (url === "/api/import-jobs/late") {
+      return new Promise(resolve => { resolveLate = resolve; });
+    }
+    const response = responses.get(url) || { ok: true, status: 200, body: { items: [] } };
+    return { ok: response.ok !== false, status: response.status || 200, json: async () => response.body || {} };
+  },
+};
 vm.createContext(context);
-vm.runInContext(source.slice(start, end) + '\nglobalThis.testApi = { trackImportJob, pollImportJob, actOnImportJob, restoreImportJobs, renderImportJobs, stopImportPolling };', context);
-async function runListSelectionScenario() {
-  const listStart = source.indexOf('  async function loadList()');
-  const listEnd = source.indexOf('  // 合併多頁為一張', listStart);
-  if (listStart < 0 || listEnd < 0) throw new Error('production loadList function not found');
-  let rowData = [{ id: 1 }, { id: 2 }];
-  const nodes = {
-    confirmationFilter: { value: 'pending' }, listEmpty: { textContent: '', classList: { add() {}, remove() {} } },
-    listTable: { classList: { add() {}, remove() {} } }, btnMerge: { disabled: false },
-    listBody: {
-      checks: [], rows: [],
-      set innerHTML(html) {
-        this.checks = Array.from(html.matchAll(/class="mchk" data-id="(\d+)"( checked)?/g), (m) => ({ dataset: { id: m[1] }, checked: !!m[2], classList: { contains: () => false }, addEventListener() {} }));
-        this.rows = Array.from(html.matchAll(/<tr data-id="(\d+)"/g), (m) => ({ dataset: { id: m[1] }, addEventListener() {} }));
-      },
-      querySelectorAll(selector) { return selector === '.mchk:checked' ? this.checks.filter((cb) => cb.checked) : selector === '.mchk' ? this.checks : this.rows; },
-    },
-  };
-  const listContext = {
-    console, currentStage: 'prepared', currentId: null, DOC_TYPES: {}, STATUS_CLASS: {}, STATUS_LABEL: {},
-    STAGE_STATUS: { prepared: 'prepared' },
-    $: (id) => nodes[id] || (nodes[id] = { value: "", checked: false, addEventListener() {} }),
-    document: { querySelectorAll: (selector) => selector === '.mchk:checked' ? nodes.listBody.checks.filter((cb) => cb.checked) : [] },
-    fetch: async () => ({ json: async () => ({ items: rowData }) }),
-    queueViewModel: (items) => ({ vouchers: items, emptyText: 'empty' }),
-    esc: (value) => String(value ?? ''), nf: (value) => String(value ?? ''),
-    updateMergeBtn() { nodes.btnMerge.disabled = nodes.listBody.checks.filter((cb) => cb.checked).length < 2; },
-    refreshStats() {}, openReview() {}, encodeURIComponent,
-  };
-  vm.createContext(listContext);
-  vm.runInContext(source.slice(listStart, listEnd) + '\nglobalThis.testLoadList = loadList;', listContext);
-  await listContext.testLoadList();
-  nodes.listBody.checks.forEach((cb) => { cb.checked = true; });
-  rowData = [{ id: 2 }, { id: 3 }];
-  await listContext.testLoadList();
-  return nodes.listBody.checks.filter((cb) => cb.checked).map((cb) => cb.dataset.id);
+const importStart = source.indexOf("  // ── 上傳：");
+const importEnd = source.indexOf("  // ── ③掃描清單", importStart);
+if (importStart < 0 || importEnd < 0) throw new Error("production upload/import functions not found");
+vm.runInContext(source.slice(importStart, importEnd) +
+  "\nglobalThis.testImport = { handleFiles, runBatch, activeImportJob, uploadsBlocked, recoveryImportJob, currentReviewIds, renderImportState, trackImportJob, pollImportJob, stopImportPolling, actOnImportJob, restoreImportJobs, restorePending: () => importRestorePending };", context);
+
+async function uploadScenario() {
+  const fileA = { name: "a.pdf", type: "application/pdf" };
+  const fileB = { name: "b.pdf", type: "application/pdf" };
+  const postsBeforeMulti = requests.filter(r => r.url === "/api/import-jobs" && r.method === "POST").length;
+  context.testImport.handleFiles([fileA, fileB]);
+  const rejectedMulti = requests.filter(r => r.url === "/api/import-jobs" && r.method === "POST").length === postsBeforeMulti;
+  const multiAlert = events.find(e => e[0] === "alert")?.[1] || "";
+  context.testImport.handleFiles([fileA]);
+  await Promise.resolve();
+  const lockedDuringUpload = context.testImport.uploadsBlocked() && nodes.fileInput.disabled;
+  context.testImport.handleFiles([fileB]);
+  const requestCountWhileLocked = requests.filter(r => r.url === "/api/import-jobs" && r.method === "POST").length;
+  responses.set("/api/import-jobs/upload-1", { body: { id: "upload-1", status: "queued", pages: [] } });
+  context.currentUser = null;
+  resolveUpload({ ok: true, status: 200, json: async () => ({ ok: true, job_id: "upload-1", status: "queued" }) });
+  await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+  context.currentUser = { id: 7 };
+  return { rejectedMulti, multiAlert, lockedDuringUpload, requestCountWhileLocked,
+    requestCount: requests.filter(r => r.url === "/api/import-jobs" && r.method === "POST").length,
+    formData: requests.find(r => r.url === "/api/import-jobs" && r.method === "POST")?.body?.values || [],
+    blockedAfterAccepted: context.testImport.uploadsBlocked(), disabledAfterAccepted: nodes.fileInput.disabled };
 }
-(async () => {
-  context.responseByUrl = responseByUrl;
-  const api = context.testApi;
-  responseByUrl['/api/import-jobs/a'] = { body: { id: 'a', status: 'running', phase: 'ocr', total_pages: 3, done_pages: 1, pages: [
-    { id: 10, file_name: 'a.pdf', page_no: 1, status: 'completed', phase: 'layout', source_page_id: 90, voucher_ids: [91] },
-    { id: 11, file_name: 'a.pdf', page_no: 2, status: 'completed', source_page_id: 92, voucher_ids: [] },
-    { id: 12, file_name: 'a.pdf', page_no: 3, status: 'failed', source_page_id: 93, voucher_ids: [94] },
-  ] } };
-  responseByUrl['/api/import-jobs/b'] = { body: { id: 'b', status: 'running', total_pages: 2, done_pages: 0, pages: [] } };
-  responseByUrl['/api/import-jobs/failed-job'] = { body: { id: 'failed-job', status: 'partial_failed', total_pages: 1, done_pages: 1, pages: [] } };
-  api.trackImportJob({ id: 'a', status: 'running' }, [{ name: 'image.png', type: 'image/png' }]);
-  api.trackImportJob({ id: 'a', status: 'running' }, [{ name: 'image.png', type: 'image/png' }]);
-  api.trackImportJob({ id: 'b', status: 'running' });
-  api.trackImportJob({ id: 'failed-job', status: 'partial_failed' });
-  responseByUrl['/api/import-jobs'] = { body: { items: [{ id: 'restored', status: 'interrupted' }] } };
-  responseByUrl['/api/import-jobs/restored'] = { body: { id: 'restored', status: 'interrupted', pages: [] } };
-  await api.restoreImportJobs();
-  await api.pollImportJob('a'); await api.pollImportJob('b');
-  const afterFirst = events.filter((x) => x === 'loadList').length;
-  await api.pollImportJob('a');
-  const afterDuplicate = events.filter((x) => x === 'loadList').length;
-  responseByUrl['/api/import-jobs/awaiting-review'] = { body: { id: 'awaiting-review', status: 'awaiting_review', total_pages: 1, done_pages: 1, pages: [
-    { id: 13, file_name: 'review.png', page_no: 1, status: 'preview_ready', phase: 'awaiting_review', source_page_id: 95, voucher_ids: [96] },
-  ] } };
-  api.trackImportJob({ id: 'awaiting-review', status: 'awaiting_review' });
-  await api.pollImportJob('awaiting-review');
-  const awaitingReviewStoppedPolling = !importJobTimers.has('awaiting-review');
-  const pollReviewClicks = events.filter((event) => Array.isArray(event) && (event[0] === 'setStage' || event[0] === 'openReview'));
-  const dirtyPreserved = context.recognitionDirty;
-  const reviewButtons = jobNode.querySelectorAll('[data-import-review-id]');
-  reviewButtons.forEach((button) => button.handler());
-  const dirtyClicksBlocked = events.filter((event) => typeof event === 'string' && event.startsWith('alert:請先儲存目前修改')).length === 3;
+async function pollScenario() {
+  context.currentUser = { id: 7 };
+  events.length = 0; importJobs.clear(); importJobTimers.clear(); importSeenPages.clear();
+  const api = context.testImport;
+  importJobs.set("cross-tab", { id: "cross-tab", status: "awaiting_review" });
+  responses.set("/api/import-jobs/cross-tab", { body: { id: "cross-tab", status: "awaiting_review", current_page: 1, total_pages: 3, review_ids: [41], pages: [{ status: "preview_ready", source_page_id: 99, voucher_ids: [99] }] } });
+  const idsPreferJobReviewList = JSON.stringify(api.currentReviewIds({ status: "awaiting_review", review_ids: [41], pages: [{ status: "preview_ready", voucher_ids: [99] }] }));
+  context.currentStage = "import"; await api.pollImportJob("cross-tab");
+  const first = events.filter(e => e[0] === "setStage").length;
+  responses.set("/api/import-jobs/cross-tab", { body: { id: "cross-tab", status: "awaiting_review", current_page: 2, total_pages: 3, review_ids: [42], pages: [{ status: "preview_ready", source_page_id: 99, voucher_ids: [99] }] } });
+  await api.pollImportJob("cross-tab");
+  const afterPageTwo = events.filter(e => e[0] === "loadList").length;
+  const pagePosition = nodes.appearancePosition.textContent;
+  context.recognitionDirty = true;
+  responses.set("/api/import-jobs/cross-tab", { body: { id: "cross-tab", status: "awaiting_review", current_page: 3, total_pages: 3, review_ids: [43], pages: [] } });
+  await api.pollImportJob("cross-tab");
+  const afterDirtyPage = events.filter(e => e[0] === "loadList").length;
+  const timersAtAwaiting = importJobTimers.get("cross-tab") != null;
+  const reviewButtonVisible = !nodes.btnImportReview.classList.contains("hidden");
   context.recognitionDirty = false;
-  reviewButtons.forEach((button) => button.handler());
-  const reviewClicks = events.filter((event) => Array.isArray(event) && (event[0] === 'setStage' || event[0] === 'openReview'));
-  responseByUrl['/api/import-jobs/a/retry-failed'] = { body: { ok: true } };
-  await api.actOnImportJob('a', 'retry-failed');
-  responseByUrl['/api/import-jobs/a/cancel'] = { body: { ok: true } };
-  await api.actOnImportJob('a', 'cancel');
-  const normalHtml = jobNode.innerHTML;
-  const timersBeforeLogout = Array.from(importJobTimers.keys());
-  const restoredStatus = importJobs.get('restored')?.status;
-  const jobIds = Array.from(importJobs.keys());
-  const seenIds = Array.from(importSeenPages.get('a') || []);
-  importJobs.set('expired', { id: 'expired', status: 'running', files: new Map() });
-  responseByUrl['/api/import-jobs/expired'] = { status: 401, ok: false, body: { detail: 'unauthorized' } };
-  await api.pollImportJob('expired');
-  importJobs.set('missing', { id: 'missing', status: 'running', files: new Map() });
-  responseByUrl['/api/import-jobs/missing'] = { status: 404, ok: false, body: { detail: 'missing' } };
-  await api.pollImportJob('missing');
-  const authHtml = jobNode.innerHTML;
-  importJobs.set('late', { id: 'late', status: 'running', files: new Map() });
-  let resolveLate;
-  context.fetch = () => new Promise((resolve) => { resolveLate = resolve; });
-  const latePoll = api.pollImportJob('late');
+  responses.set("/api/import-jobs/cross-tab", { body: { id: "cross-tab", status: "awaiting_review", current_page: 3, total_pages: 3, review_ids: [], pages: [] } });
+  await api.pollImportJob("cross-tab");
+  const reviewButtonHiddenWithoutIds = nodes.btnImportReview.classList.contains("hidden");
+  importJobs.set("late", { id: "late", status: "running" });
+  const latePoll = api.pollImportJob("late");
   await Promise.resolve();
   api.stopImportPolling();
-  resolveLate({ ok: true, status: 200, json: async () => ({ id: 'late', status: 'running', pages: [] }) });
+  resolveLate({ ok: true, status: 200, json: async () => ({ id: "late", status: "running", pages: [] }) });
   await latePoll;
-  process.stdout.write(JSON.stringify({
-    requests, timers: Array.from(timers.values()).map((t) => t.delay), timerJobIds: timersBeforeLogout,
-    jobIds, restoredStatus, seen: seenIds,
-    loadListAfterPage: afterFirst, loadListAfterDuplicate: afterDuplicate,
-    awaitingReviewStoppedPolling,
-    dirtyPreserved, dirtyClicksBlocked, currentIdPreserved: context.currentId, createdUrls, revokedUrls,
-    staleTimerAfterLogout: importJobTimers.has('late'), authHtml, html: normalHtml, reviewButtonIds: reviewButtons.map((button) => Number(button.dataset.importReviewId)), reviewClicks,
-    pollReviewClicks, selectedIdsAfterRefresh: await runListSelectionScenario(),
-  }));
-})().catch((error) => { console.error(error.stack || error); process.exit(1); });
+  return { first, afterPageTwo, afterDirtyPage, pagePosition, timersAtAwaiting, idsPreferJobReviewList, reviewButtonVisible, reviewButtonHiddenWithoutIds,
+    staleTimerAfterLogout: importJobTimers.has("late"), jobsAfterLogout: importJobs.size,
+    lateResponseDidNotNavigate: events.filter(e => e[0] === "setStage").length === first };
+}
+async function recoveryScenario() {
+  const api = context.testImport;
+  api.stopImportPolling();
+  responses.set("/api/import-jobs", { body: { items: [{ id: "recovered", status: "interrupted" }] } });
+  responses.set("/api/import-jobs/recovered", { body: { id: "recovered", status: "interrupted", pages: [] } });
+  await api.restoreImportJobs();
+  return { restoredId: api.recoveryImportJob()?.id, blocked: api.uploadsBlocked(), retryVisible: !nodes.btnImportRetry.classList.contains("hidden"),
+    retryLabel: nodes.btnImportRetry.textContent, restorePending: api.restorePending() };
+}
+async function listScenario() {
+  const listStart = source.indexOf("  async function loadList()");
+  const listEnd = source.indexOf("  // 合併多頁為一張", listStart);
+  if (listStart < 0 || listEnd < 0) throw new Error("production loadList not found");
+  const body = nodes.listBody;
+  body.checks = []; body.rows = [];
+  Object.defineProperty(body, "innerHTML", { configurable: true, get() { return this.html || ""; }, set(html) {
+    this.html = html;
+    this.checks = Array.from(html.matchAll(/class="mchk" data-id="(\d+)"( checked)?/g), m => ({ dataset: { id: m[1] }, checked: !!m[2], addEventListener() {} }));
+    this.rows = Array.from(html.matchAll(/<tr data-id="(\d+)"/g), m => ({ dataset: { id: m[1] }, addEventListener() {} }));
+  }});
+  body.querySelectorAll = (selector) => selector === ".mchk:checked" ? body.checks.filter(cb => cb.checked) : selector === ".mchk" ? body.checks : body.rows;
+  nodes.listEmpty.classList.remove("hidden"); nodes.listTable.classList.add("hidden");
+  nodes.listBody.html = "";
+  nodes.confirmationFilter.value = "prepared";
+  const rows = [{ id: 1, status: "prepared", doc_type: "one" }, { id: 2, status: "prepared", doc_type: "two" }, { id: 3, status: "queued", doc_type: "three" }];
+  context.currentStage = "prepared"; context.currentId = null;
+  let activeJobForList = { id: "job", status: "awaiting_review", review_ids: [2] };
+  context.activeImportJob = () => activeJobForList;
+  context.currentReviewIds = (job) => job?.review_ids || [];
+  context.queueViewModel = (items) => ({ vouchers: items, emptyText: "empty" });
+  context.STAGE_STATUS = { prepared: "prepared", queued: "queued" };
+  context.STAGE_TITLE = { prepared: "ready", queued: "queue" };
+  context.STATUS_CLASS = {}; context.STATUS_LABEL = {}; context.DOC_TYPES = {};
+  context.updateMergeBtn = () => {};
+  context.refreshStats = () => {};
+  context.renderImportState = () => {};
+  context.fetch = async () => ({ json: async () => ({ items: rows }) });
+  vm.runInContext(source.slice(listStart, listEnd) + "\nglobalThis.testLoadList = loadList;", context);
+  await context.testLoadList();
+  const preparedIds = body.rows.map(row => Number(row.dataset.id));
+  const preparedHasCheckboxes = body.checks.length > 0;
+  context.currentStage = "queued"; nodes.confirmationFilter.value = "queued";
+  await context.testLoadList();
+  body.checks.find(cb => cb.dataset.id === "2").checked = true;
+  await context.testLoadList();
+  const queuedIds = body.rows.map(row => Number(row.dataset.id));
+  const queuedCheckedIds = body.checks.filter(cb => cb.checked).map(cb => Number(cb.dataset.id));
+  activeJobForList = { id: "job", status: "awaiting_review", review_ids: [] };
+  context.currentStage = "prepared"; nodes.confirmationFilter.value = "prepared";
+  await context.testLoadList();
+  const emptyTextWhenNoReview = nodes.listEmpty.textContent;
+  return { preparedIds, preparedHasCheckboxes, queuedIds, queuedCheckedIds, emptyTextWhenNoReview };
+}
+(async () => {
+  await context.testImport.restoreImportJobs();
+  const upload = await uploadScenario();
+  const poll = await pollScenario();
+  const recovery = await recoveryScenario();
+  const list = await listScenario();
+  process.stdout.write(JSON.stringify({ upload, poll, recovery, list, source: {
+    hasLegacyJobRenderer: source.includes("renderImportJobs"),
+    hasBatchAppearanceControls: ["appearanceBatch", "batchType", "dirInput"].some(s => source.includes(s)),
+  } }));
+})().catch(error => { console.error(error.stack || error); process.exit(1); });

@@ -30,6 +30,23 @@ class JobConflict(ValueError):
     pass
 
 
+class SingleFileRequired(ValueError):
+    pass
+
+
+def _sequential(job):
+    return json.loads(job.settings_json).get("sequential_review", False)
+
+
+def _check_available(session, owner_id, *, exclude=None):
+    active = session.exec(select(ImportJob).where(
+        ImportJob.owner_id == owner_id,
+        ImportJob.status.notin_(("completed", "cancelled")),
+        ImportJob.id != (exclude or ""))).first()
+    if active:
+        raise JobConflict("請先完成目前檔案的外觀確認，或取消目前匯入，再上傳下一個檔案")
+
+
 def _owned(session, job_id, owner_id):
     job = session.get(ImportJob, job_id)
     if job is None or job.owner_id != owner_id:
@@ -37,22 +54,28 @@ def _owned(session, job_id, owner_id):
     return job
 
 
-def create_job(paths, owner_id, company="", *, mode="manual_review"):
+def create_job(paths, owner_id, company="", *, mode="manual_review", sequential=True):
     from app.core.preparation import MODES
     if mode not in MODES:
         raise ValueError("未知的匯入模式")
     if not paths:
         raise ValueError("無有效檔案可匯入")
+    if sequential and len(paths) != 1:
+        raise SingleFileRequired("一次只能上傳一個檔案；多頁 PDF 將逐頁進行外觀確認")
     versions = model_invocation.source_versions()
     sources = {}
     for item in paths:
         path = str(item["path"] if isinstance(item, dict) else item)
         sources[path] = _source_hash(path) if Path(path).is_file() else None
-    snapshot = {"models": settings_store.get_settings(), "ocr_policy": ocr_policy.get_policy(), "versions": versions, "sources": sources, "mode": mode}
+    snapshot = {"models": settings_store.get_settings(), "ocr_policy": ocr_policy.get_policy(), "versions": versions, "sources": sources, "mode": mode, "sequential_review": sequential}
     job = ImportJob(id=uuid.uuid4().hex, owner_id=owner_id, company=company,
                     version=versions["execution_version_sha256"], settings_json=json.dumps(snapshot, ensure_ascii=False))
     job_id = job.id
     with get_session() as session:
+        # Serialize the check and insert across tabs, threads and server processes.
+        session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+        if sequential:
+            _check_available(session, owner_id)
         session.add(job)
         session.flush()
         for position, item in enumerate(paths):
@@ -104,12 +127,20 @@ def _view(session, job):
                      "status": page.status, "phase": page.phase, "source_page_id": page.source_page_id,
                      "voucher_ids": json.loads(page.voucher_ids_json), "error": page.error,
                      "preview_url": f"/api/import-jobs/{job.id}/pages/{page.id}/preview" if page.preview_path else None})
-    current = next((p for p in data if p["status"] == "running"), None)
+    current = next((p for p in data if p["status"] not in ("completed",)), None)
+    review_ids = []
+    if current and current["status"] == "preview_ready":
+        for ident in current["voucher_ids"] or [current["source_page_id"]]:
+            rec = session.get(review.VoucherRecord, ident) if ident else None
+            if rec and rec.status == review.ReviewStatus.prepared and (rec.record_role != "source_page" or not current["voucher_ids"]):
+                review_ids.append(rec.id)
     return {"id": job.id, "job_id": job.id, "status": job.status, "phase": job.phase,
             "total_files": len(files), "total_pages": job.total_pages,
             "done_pages": sum(p.status in ("completed", "failed", "preview_ready") for p in pages),
             "awaiting_review_pages": sum(p.status == "preview_ready" for p in pages),
             "mode": json.loads(job.settings_json).get("mode", "automatic"),
+            "sequential_review": _sequential(job), "blocks_upload": job.status not in ("completed", "cancelled"),
+            "review_ids": review_ids, "current_page": current["page_no"] if current else None,
             "succeeded_pages": sum(p.status == "completed" for p in pages),
             "failed_pages": sum(p.status == "failed" for p in pages), "pages": data,
             "current": {"file": current["file_name"], "page_no": current["page_no"]} if current else None,
@@ -147,16 +178,20 @@ def preview(job_id, page_id, owner_id):
 
 def action(job_id, owner_id, action):
     with get_session() as session:
+        session.connection().exec_driver_sql("BEGIN IMMEDIATE")
         job = _owned(session, job_id, owner_id)
         if action == "cancel":
-            if job.status not in ("queued", "running", "cancelling"):
+            if job.status == "completed":
                 raise JobConflict("此工作目前無法取消")
             job.cancel_requested = True
-            job.status = "cancelled" if job.status == "queued" else "cancelling"
+            job.status = "cancelling" if job.status in ("running", "cancelling") else "cancelled"
+            job.phase = job.status
         elif action in ("resume", "retry-failed"):
             allowed = ("interrupted", "cancelled") if action == "resume" else ("partial_failed", "failed", "awaiting_review")
             if job.status not in allowed:
                 raise JobConflict("此工作目前無法續跑或重試")
+            if _sequential(job):
+                _check_available(session, owner_id, exclude=job.id)
             snapshot = json.loads(job.settings_json)
             with ocr_policy.isolated_policy(snapshot.get("ocr_policy", {})):
                 if job.version != model_invocation.source_versions()["execution_version_sha256"]:
@@ -170,7 +205,9 @@ def action(job_id, owner_id, action):
                     if file.error:
                         file.indexed, file.error = False, ""
                         session.add(file)
-            job.status, job.phase, job.cancel_requested, job.error = "queued", "queued", False, ""
+            waiting = session.exec(select(ImportPage).where(ImportPage.job_id == job.id, ImportPage.status == "preview_ready")).first()
+            state = "awaiting_review" if _sequential(job) and waiting else "queued"
+            job.status, job.phase, job.cancel_requested, job.error = state, state, False, ""
         else:
             raise ValueError("未知的工作操作")
         job.updated_at = utc_now()
@@ -213,6 +250,7 @@ def _run(job_id):
     with get_session() as session:
         job = session.get(ImportJob, job_id)
         snapshot = json.loads(job.settings_json)
+        sequential = snapshot.get("sequential_review", False)
         company, owner = job.company, job.owner_id
         files = [file.model_dump() for file in session.exec(select(ImportFile).where(ImportFile.job_id == job_id)).all()]
     with settings_store.isolated_settings(snapshot["models"]), ocr_policy.isolated_policy(snapshot["ocr_policy"]):
@@ -255,6 +293,8 @@ def _run(job_id):
         for page in pages:
             if _cancelled(job_id):
                 break
+            if sequential and page["status"] in ("failed", "preview_ready"):
+                break
             if page["status"] in ("completed", "failed", "preview_ready"):
                 continue
             file = by_file[page["file_id"]]
@@ -269,6 +309,8 @@ def _run(job_id):
                 operation = json.loads(page.get("preparation_json") or "{}")
                 if operation.get("operation") == "layout":
                     _run_layout(job_id, page, file, operation, company)
+                    if sequential:
+                        break
                     continue
                 _phase(job_id, page["id"], "rendering")
                 source = pipeline.render_page(file["path"], page["page_no"], page["source_token"])
@@ -277,9 +319,18 @@ def _run(job_id):
                 with work_progress.capture(lambda phase: _phase(job_id, page["id"], phase)):
                     prepare = pipeline.prepare_manual_page if manual_mode else pipeline.prepare_page
                     vouchers = prepare(source, file["path"], page["page_no"], token=page["source_token"], group_id=file["group_id"])
+                if sequential and not manual_mode and vouchers and not any(v.origin.get("record_role") != "source_page" for v in vouchers) and not vouchers[0].origin.get("layout", {}).get("auto_split"):
+                    # An uncertain automatic layout still needs an editable copy;
+                    # the immutable source cannot serve as the manual split remainder.
+                    from app.core import preparation
+                    working = vouchers[0].model_copy(deep=True)
+                    working.origin.pop("record_role", None)
+                    working.origin.pop("layout", None)
+                    working.origin["preparation"] = preparation.fresh()
+                    vouchers.append(working)
                 for voucher in vouchers:
                     voucher.source_file = f"{file['name']} p{page['page_no']}"
-                    if manual_mode:
+                    if manual_mode or sequential:
                         voucher.origin.update(import_job_id=job_id, import_page_id=page["id"])
                 if expected and _source_hash(file["path"]) != expected:
                     raise JobConflict("來源檔案在處理期間改變，請建立新工作")
@@ -294,9 +345,10 @@ def _run(job_id):
                         if parent and parent.image_path:
                             saved_page.preview_path = str(config.UPLOAD_DIR / parent.image_path)
                         saved_page.voucher_ids_json = json.dumps([r.id for r in records if r.record_role != "source_page"])
-                        saved_page.status = "preview_ready" if manual_mode else "completed"
-                        saved_page.phase = "awaiting_review" if manual_mode else "completed"
-                        if manual_mode:
+                        needs_review = manual_mode or (sequential and (json.loads(saved_page.voucher_ids_json) or not vouchers[0].origin.get("layout", {}).get("auto_split")))
+                        saved_page.status = "preview_ready" if needs_review else "completed"
+                        saved_page.phase = "awaiting_review" if needs_review else "completed"
+                        if needs_review:
                             saved_page.preparation_json = json.dumps({"operation":"review", "preview_ready_at":utc_now().isoformat()})
                         saved = session.get(ImportJob, job_id)
                         if saved.first_result_seconds is None:
@@ -310,6 +362,8 @@ def _run(job_id):
                             except OSError:
                                 logger.warning("Uncommitted import image cleanup failed")
                         raise
+                if sequential and needs_review:
+                    break
             except Exception as exc:
                 logger.exception("Import page failed: %s", page["id"])
                 with get_session() as session:
@@ -317,6 +371,8 @@ def _run(job_id):
                     saved_page.status, saved_page.phase, saved_page.error = "failed", "failed", f"{type(exc).__name__}: {exc}"
                     session.add(saved_page); session.commit()
                 _clear_layout_pending(page)
+                if sequential:
+                    break
         with get_session() as session:
             saved = session.get(ImportJob, job_id)
             pages = session.exec(select(ImportPage).where(ImportPage.job_id == job_id)).all()
@@ -325,8 +381,12 @@ def _run(job_id):
             success = sum(p.status == "completed" for p in pages)
             failed = sum(p.status == "failed" for p in pages) + len(file_errors)
             remaining = any(p.status in ("queued", "running") for p in pages) or any(not f.indexed for f in files)
-            if remaining and (saved.cancel_requested or _stop.is_set()):
+            if (sequential and saved.cancel_requested) or (remaining and (saved.cancel_requested or _stop.is_set())):
                 saved.status = "interrupted" if _stop.is_set() else "cancelled"
+            elif sequential and failed:
+                saved.status = "partial_failed" if success else "failed"
+            elif sequential and any(p.status == "preview_ready" for p in pages):
+                saved.status = "awaiting_review"
             elif remaining:
                 saved.status = "queued"
             else:
@@ -359,6 +419,23 @@ def queue_layout(session, rec, actor_id):
     _wake.set()
 
 
+def check_review_turn(session, rec, actor_id=None):
+    """A new sequential import only accepts its current page's working copy."""
+    origin = json.loads(rec.current_json).get("origin") or {}
+    job = session.get(ImportJob, origin.get("import_job_id", ""))
+    if not job or not _sequential(job):
+        return
+    if actor_id is not None and job.owner_id != actor_id:
+        raise JobNotFound("匯入工作不存在")
+    if job.cancel_requested or job.status in ("cancelled", "cancelling", "interrupted", "failed", "partial_failed"):
+        raise JobConflict("請先續跑或重試目前匯入，再進行外觀確認")
+    _check_available(session, job.owner_id, exclude=job.id)
+    pages = session.exec(select(ImportPage).where(ImportPage.job_id == job.id).order_by(ImportPage.file_id, ImportPage.page_no)).all()
+    current = next((p for p in pages if p.status != "completed"), None)
+    if current and current.id != origin.get("import_page_id"):
+        raise JobConflict("請先完成目前頁面的外觀確認")
+
+
 def mark_review_complete(session, rec):
     origin = json.loads(rec.current_json).get("origin") or {}
     page = session.get(ImportPage, origin.get("import_page_id", ""))
@@ -370,7 +447,13 @@ def mark_review_complete(session, rec):
         session.add(page)
     job = session.get(ImportJob, page.job_id)
     other = session.exec(select(ImportPage).where(ImportPage.job_id == page.job_id)).all()
-    if job and job.status == "awaiting_review" and all(p.status in ("completed","failed") for p in other):
+    if job and _sequential(job) and not job.cancel_requested:
+        if page.status == "completed":
+            state = "awaiting_review" if any(p.status == "preview_ready" for p in other) else "partial_failed" if any(p.status == "failed" for p in other) else "queued" if any(p.status == "queued" for p in other) else "completed"
+            job.status, job.phase = state, state
+            session.add(job)
+            _wake.set()
+    elif job and job.status == "awaiting_review" and all(p.status in ("completed","failed") for p in other):
         job.status, job.phase = "completed", "completed"
         session.add(job)
 
@@ -424,7 +507,8 @@ def _run_layout(job_id, page, file, operation, company):
                 child = review.save_voucher(voucher, company, review.ReviewStatus.prepared, source_parent_id=rec.id, session=session)
                 child_ids.append(child.id)
             data["quality"] = vouchers[0].quality
-            saved_page.status, saved_page.phase = "completed", "completed"
+            waiting = _sequential(session.get(ImportJob, job_id)) and bool(child_ids)
+            saved_page.status, saved_page.phase = ("preview_ready", "awaiting_review") if waiting else ("completed", "completed")
         else:
             data["quality"] = {"version":1,"state":"needs_review","content_kind":"unknown","issues":layout["issues"]}
             data["origin"]["preparation"]["document_mode"] = "manual_split"

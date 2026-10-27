@@ -87,6 +87,31 @@ class ImportApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 202)
         self.assertEqual(self.create_job.call_args.kwargs["mode"], "automatic")
 
+    def test_sequential_upload_rejects_multiple_files_and_removes_saved_uploads(self):
+        self.assertTrue(hasattr(import_jobs, "SingleFileRequired"))
+        self.create_job.side_effect = import_jobs.SingleFileRequired("僅支援單一 PDF 檔案")
+        response = self.client.post(
+            "/api/import-jobs", cookies={"session": "owner-1"},
+            files=[
+                ("files", ("first.pdf", b"first synthetic pdf", "application/pdf")),
+                ("files", ("second.pdf", b"second synthetic pdf", "application/pdf")),
+            ],
+        )
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("逐頁", response.json()["detail"])
+        self.assertFalse((self.root / "first.pdf").exists())
+        self.assertFalse((self.root / "second.pdf").exists())
+
+    def test_same_owner_job_conflict_returns_409_and_removes_saved_upload(self):
+        self.create_job.side_effect = import_jobs.JobConflict("已有尚未完成的逐頁確認工作")
+        response = self.client.post(
+            "/api/import-jobs", cookies={"session": "owner-1"},
+            files=[("files", ("conflicting.pdf", b"synthetic pdf", "application/pdf"))],
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("尚未完成", response.json()["detail"])
+        self.assertFalse((self.root / "conflicting.pdf").exists())
+
     def test_missing_session_returns_401_without_touching_job_service(self):
         response = self.client.get("/api/import-jobs/job-1")
         self.assertEqual(response.status_code, 401)

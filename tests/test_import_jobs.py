@@ -56,7 +56,7 @@ class ImportJobsTests(unittest.TestCase):
     def _job(self, name="synthetic.pdf", owner=1):
         # These contracts exercise the legacy automatic preparation path.
         return import_jobs.create_job([{"path": str(self.root / name), "name": name}], owner,
-                                      mode="automatic")
+                                      mode="automatic", sequential=False)
 
     def _rows(self, model):
         with Session(self.engine) as session:
@@ -230,7 +230,7 @@ class ImportJobsTests(unittest.TestCase):
         source_file = self.root / "mutable.pdf"
         source_file.write_bytes(b"original source bytes")
         job = import_jobs.create_job([{"path": str(source_file), "name": "mutable.pdf"}], 1,
-                                     mode="automatic")
+                                     mode="automatic", sequential=False)
 
         def mutate_during_prepare(_source, _path, page_no, *, token, group_id):
             source_file.write_bytes(b"changed source bytes")

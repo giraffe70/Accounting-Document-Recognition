@@ -18,6 +18,7 @@
     <button id="logoutBtn" class="btn hidden">登出</button>
     <span id="userChip" class="userchip hidden"></span>
   </header>
+  <div id="progress" class="callout hidden" role="status" style="position:fixed;top:64px;right:20px;z-index:1000"><span id="progressText"></span></div>
 
   <!-- 登入畫面 -->
   <div id="loginOverlay" class="login-overlay hidden">
@@ -57,19 +58,17 @@
           </label>
           <div id="dropZone" class="drop">
             <p>拖拉 PDF／圖片至此，或點擊選擇</p>
-            <p class="hint">支援 PDF、JPG、PNG、BMP、TIFF、WEBP（≤5MB）；可多選批次</p>
+            <p class="hint">每次一個檔案（≤5MB）；多頁 PDF 逐頁確認後繼續</p>
           </div>
-          <input id="fileInput" type="file" accept=".pdf,image/*" multiple hidden>
-          <label class="btn btn-sm folder-btn hidden">📁 選整個資料夾匯入
-            <input id="dirInput" type="file" webkitdirectory hidden>
-          </label>
-          <div id="progress" class="progress hidden">
-            <div class="bar"><div id="barFill" class="fill"></div></div>
-            <div id="progressText" class="hint"></div>
+          <input id="fileInput" type="file" accept=".pdf,image/*" hidden>
+          <div id="importState" class="hidden" aria-live="polite">
+            <p id="importHint" class="hint"></p>
+            <button id="btnImportReview" class="btn btn-sm hidden">繼續外觀確認</button>
+            <button id="btnImportRetry" class="btn btn-sm hidden">重試目前頁面</button>
+            <button id="btnImportCancel" class="btn btn-sm hidden">取消目前匯入</button>
           </div>
         </div>
 
-        <div id="importJobs" class="panel hidden" aria-live="polite"></div>
         <div id="scanSourcePanel" class="panel hidden">
           <div class="row-between">
             <h2>掃描來源目錄</h2>
@@ -77,7 +76,7 @@
           </div>
           <p class="hint" id="scanDirHint">按「讀取目錄」列出已設定來源目錄中的檔案。</p>
           <div id="scanFiles" class="scan-files"></div>
-          <button id="btnScanImport" class="btn btn-sm primary hidden">匯入勾選檔案</button>
+          <button id="btnScanImport" class="btn btn-sm primary hidden">匯入所選檔案</button>
         </div>
       </div>
 
@@ -99,14 +98,10 @@
           <div class="bar"><div id="eBarFill" class="fill"></div></div>
           <div id="eProgressText" class="hint"></div>
         </div>
-        <div id="appearanceBatch" class="callout hidden">
-          <p class="hint">勾選要處理的頁面；未勾選時操作全部待確認單據。</p>
-          <button id="btnBatchRotL" class="btn btn-sm">↺ 批次旋轉</button>
-          <button id="btnBatchRotR" class="btn btn-sm">↻ 批次旋轉</button>
-          <label><input id="batchDirection" type="checkbox">全部方向正確</label>
-          <label><input id="batchSingle" type="checkbox">全部一頁一張</label>
-          <select id="batchType" class="select select-sm" aria-label="批次指定單據類型"><option value="">自動判斷類型</option></select>
-          <button id="btnBatchAppearance" class="btn btn-sm primary">確認並加入掃描清單</button>
+        <div id="appearancePosition" class="hint hidden" aria-live="polite"></div>
+        <div id="appearanceRecovery" class="hidden">
+          <button id="btnAppearanceRetry" class="btn btn-sm">重試目前頁面</button>
+          <button id="btnAppearanceCancel" class="btn btn-sm">取消目前匯入</button>
         </div>
         <div id="listEmpty" class="hint">此階段目前沒有憑證。</div>
         <table id="listTable" class="list hidden">

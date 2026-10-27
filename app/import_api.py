@@ -19,6 +19,8 @@ async def create(request: Request, files: list[UploadFile] = File(...), company:
     paths = []
     try:
         user_id = owner(request)
+        if len(files) != 1:
+            raise import_jobs.SingleFileRequired("一次只能上傳一個檔案；多頁 PDF 將逐頁進行外觀確認")
         for file in files:
             path = await _save_upload(file)
             paths.append({"path": str(path), "name": file.filename})
@@ -27,7 +29,8 @@ async def create(request: Request, files: list[UploadFile] = File(...), company:
         for item in paths:
             from pathlib import Path
             Path(item["path"]).unlink(missing_ok=True)
-        return JSONResponse({"ok": False, "detail": str(exc)}, status_code=400)
+        code = 409 if isinstance(exc, import_jobs.JobConflict) else 422 if isinstance(exc, import_jobs.SingleFileRequired) else 400
+        return JSONResponse({"ok": False, "detail": str(exc)}, status_code=code)
 
 
 @router.get("")

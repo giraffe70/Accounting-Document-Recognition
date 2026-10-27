@@ -1,7 +1,7 @@
 (() => {
   const $ = (id) => document.getElementById(id);
   const dropZone = $("dropZone"), fileInput = $("fileInput");
-  const progress = $("progress"), barFill = $("barFill"), progressText = $("progressText");
+  const progress = $("progress"), progressText = $("progressText");
   const modal = $("modal");
   let jobTimer = null;
   const importJobs = new Map();
@@ -17,7 +17,6 @@
   let currentUser = null;
   let currentIsImport = false;
   let DOC_TYPES = {};   // 各單據類型欄位契約（/api/doc-types）
-  let appearanceRows = [];
   let cropping = false; // 裁切模式中
 
   // 後端錯誤轉人看得懂的字串：detail 可能是字串、FastAPI 422 的物件陣列、或整包物件。
@@ -52,9 +51,10 @@
   const nf = (n) => (n == null || n === "" ? "—" : Number(n).toLocaleString("zh-TW"));
   const esc = (s) => (s == null ? "" : String(s)).replace(/[<>&"]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" }[c]));
 
-  // ── 上傳 ──
-  dropZone.addEventListener("click", () => fileInput.click());
-  dropZone.addEventListener("dragover", (e) => { e.preventDefault(); dropZone.classList.add("over"); });
+  // ── 上傳：每位使用者一次一個檔案，頁面依序確認 ──
+  let uploadSending = false, importRestorePending = true;
+  dropZone.addEventListener("click", () => { if (!uploadsBlocked()) fileInput.click(); });
+  dropZone.addEventListener("dragover", (e) => { e.preventDefault(); if (!uploadsBlocked()) dropZone.classList.add("over"); });
   dropZone.addEventListener("dragleave", () => dropZone.classList.remove("over"));
   dropZone.addEventListener("drop", (e) => { e.preventDefault(); dropZone.classList.remove("over"); handleFiles(e.dataTransfer.files); });
   fileInput.addEventListener("change", (e) => handleFiles(e.target.files));
@@ -62,133 +62,150 @@
   function handleFiles(fileList) {
     const files = Array.from(fileList);
     if (!files.length) return;
+    if (files.length !== 1) { alert("一次只能上傳一個檔案；多頁 PDF 將逐頁進行外觀確認"); fileInput.value = ""; return; }
+    if (uploadsBlocked()) { alert("請先完成目前檔案的外觀確認，或取消目前匯入"); return; }
     runBatch(files);
   }
 
   async function runBatch(files) {
-    const fd = new FormData(); files.forEach((f) => fd.append("files", f));
+    if (files.length !== 1 || uploadsBlocked()) return;
+    uploadSending = true; renderImportState();
+    const fd = new FormData(); fd.append("files", files[0]);
     fd.append("company", $("uploadCompany").value);
     fd.append("mode", $("uploadMode").value);
     try {
-      const data = await (await fetch("/api/import-jobs", { method: "POST", body: fd })).json();
-      if (!data.ok) throw new Error(errText(data, "匯入失敗"));
-      trackImportJob(data, files);
-    } catch (err) { alert("錯誤：" + err.message); }
+      const response = await fetch("/api/import-jobs", { method: "POST", body: fd });
+      const data = await response.json();
+      if (!response.ok || !data.ok) throw new Error(errText(data, "匯入失敗"));
+      trackImportJob(data);
+    } catch (err) { alert("錯誤：" + err.message); await restoreImportJobs(); }
+    finally { uploadSending = false; fileInput.value = ""; renderImportState(); }
   }
 
   const IMPORT_ACTIVE = new Set(["queued", "running", "cancelling"]);
-  const IMPORT_STATUS_LABEL = {
-    queued: "排隊中", running: "處理中", cancelling: "取消中", interrupted: "已中斷",
-    completed: "完成", partial_failed: "部分失敗", failed: "失敗", cancelled: "已取消",
-    awaiting_review: "待人工確認",
-  };
-  const IMPORT_PHASE_LABEL = {
-    rendering: "頁面轉圖", orientation: "方向判斷", ocr: "文字辨識", layout: "版面分析", saving: "保存中",
-    preview: "準備預覽", layout_queued: "切分排隊中", preview_ready: "預覽已就緒",
-  };
-  function importJobLabel(value) { return IMPORT_STATUS_LABEL[value] || IMPORT_PHASE_LABEL[value] || value || ""; }
-
-  function trackImportJob(job, files) {
-    const id = String(job.job_id || job.id);
-    if (!id || id === "undefined") return;
-    const previous = importJobs.get(id);
-    const images = previous?.files || new Map();
-    (files || []).forEach((file) => {
-      if (!images.has(file.name) && /^image\//.test(file.type || "")) images.set(file.name, URL.createObjectURL(file));
-    });
-    importJobs.set(id, { ...previous, ...job, id, files: images });
-    if (!importSeenPages.has(id)) importSeenPages.set(id, new Set());
-    renderImportJobs(); pollImportJob(id);
+  function activeImportJob() {
+    return Array.from(importJobs.values()).filter(job => !["completed", "cancelled"].includes(job.status))
+      .sort((a,b) => String(a.created_at || "").localeCompare(String(b.created_at || "")))[0] || null;
+  }
+  function uploadsBlocked() { return uploadSending || importRestorePending || !!activeImportJob(); }
+  function recoveryImportJob() { return activeImportJob() || importJobs.get(currentVoucher.origin?.import_job_id) || null; }
+  function currentReviewIds(job = activeImportJob()) {
+    if (!job || job.status !== "awaiting_review") return [];
+    if (Array.isArray(job.review_ids)) return job.review_ids;
+    const page = (job.pages || []).find(page => page.status === "preview_ready");
+    return page ? page.voucher_ids?.length ? page.voucher_ids : [page.source_page_id].filter(Boolean) : [];
+  }
+  function renderImportState() {
+    const job = activeImportJob(), blocked = uploadsBlocked();
+    fileInput.disabled = blocked;
+    dropZone.setAttribute("aria-disabled", String(blocked));
+    dropZone.style.opacity = blocked ? "0.6" : "1";
+    $("uploadCompany").disabled = blocked; $("uploadMode").disabled = blocked;
+    $("btnScanImport").disabled = blocked;
+    $("importState").classList.toggle("hidden", !blocked);
+    const failed = job && ["failed", "partial_failed", "interrupted"].includes(job.status);
+    $("importHint").textContent = uploadSending ? "正在上傳，請稍候…" : importRestorePending ? "正在恢復目前檔案…" :
+      failed ? "目前頁面尚未完成，請重試或取消目前匯入。" : job?.status === "awaiting_review" ? "請先完成目前檔案的外觀確認。" : job ? "正在準備目前頁面，請稍候…" : "";
+    $("btnImportReview").classList.toggle("hidden", !currentReviewIds(job).length);
+    $("btnImportRetry").classList.toggle("hidden", !failed && !(importRestorePending && !uploadSending));
+    $("btnImportCancel").classList.toggle("hidden", !job || job.status === "cancelling");
+    const reviewJob = recoveryImportJob(), recoverable = reviewJob && ["failed","partial_failed","interrupted","cancelled"].includes(reviewJob.status);
+    $("appearanceRecovery").classList.toggle("hidden", currentStage !== "prepared" || !reviewJob);
+    $("btnAppearanceRetry").classList.toggle("hidden", !recoverable);
+    $("btnAppearanceCancel").classList.toggle("hidden", !reviewJob || ["completed","cancelled","cancelling"].includes(reviewJob.status));
+    $("btnAppearanceRetry").textContent = ["interrupted","cancelled"].includes(reviewJob?.status) ? "續跑目前頁面" : "重試目前頁面";
+    const position = $("appearancePosition");
+    position.classList.toggle("hidden", currentStage !== "prepared" || !job);
+    position.textContent = job ? `第 ${job.current_page || 1}／${job.total_pages || "…"} 頁${currentReviewIds(job).length > 1 ? ` · 本頁尚有 ${currentReviewIds(job).length} 張待確認` : ""}` : "";
   }
 
-  function renderImportJobs() {
-    const box = $("importJobs"); if (!box) return;
-    const jobs = Array.from(importJobs.values());
-    box.classList.toggle("hidden", !jobs.length);
-    box.innerHTML = jobs.map((job) => {
-      const total = job.total_pages == null ? job.total_files : job.total_pages;
-      const done = job.done_pages || 0, pct = total ? Math.min(1, done / total) : 0;
-      const cur = job.current ? `${job.current.file || ""} ${job.current.page_no == null ? "" : `p${job.current.page_no}`}` : "";
-      const pages = (job.pages || []).map((page) => {
-        const preview = page.preview_url || job.files?.get(page.file_name);
-        const resultIds = Array.isArray(page.voucher_ids) ? page.voucher_ids : [];
-        const reviewId = Number(resultIds[0] || page.source_page_id);
-        const reviewButton = ["completed", "preview_ready"].includes(page.status) && Number.isSafeInteger(reviewId) && reviewId > 0
-          ? `<button class="btn btn-sm" data-import-review-id="${reviewId}">外觀確認</button>` : "";
-        return `<div class="import-job-page">${preview ? `<img src="${esc(preview)}" alt="頁面縮圖" loading="lazy" style="width:64px;height:80px;object-fit:contain">` : ""}<span>${esc(page.file_name)}${page.page_no == null ? "" : ` · p${esc(page.page_no)}`}</span><span>${esc(importJobLabel(page.phase || page.status))}</span>${preview ? `<a href="${esc(preview)}" target="_blank" rel="noopener">預覽</a>` : ""}${reviewButton}${page.error ? `<span class="bad">${esc(page.error)}</span>` : ""}</div>`;
-      }).join("");
-      const actions = job.status === "running" || job.status === "queued" ? `<button class="btn btn-sm" data-job-action="cancel" data-job-id="${esc(job.id)}">取消</button>` :
-        job.status === "interrupted" || job.status === "cancelled" ? `<button class="btn btn-sm" data-job-action="resume" data-job-id="${esc(job.id)}">續跑</button>` :
-        job.status === "partial_failed" || job.status === "failed" ? `<button class="btn btn-sm" data-job-action="retry-failed" data-job-id="${esc(job.id)}">重跑失敗</button>` : "";
-      const shortId = job.id.length > 8 ? `${job.id.slice(0, 8)}…` : job.id;
-      return `<article class="import-job"><div class="row-between"><strong title="${esc(job.id)}">匯入工作 ${esc(shortId)} · ${esc(importJobLabel(job.status))}</strong>${actions}</div><div class="bar"><div class="fill" style="width:${Math.round(pct * 100)}%"></div></div><div class="hint">${done}/${total == null ? "…" : total} 頁　${esc(importJobLabel(job.phase))} ${esc(cur)}</div>${job.pollError ? `<div class="bad">${esc(job.pollError)}</div>` : ""}${job.error ? `<div class="bad">${esc(job.error)}</div>` : ""}${pages}</article>`;
-    }).join("");
-    box.querySelectorAll("[data-job-action]").forEach((button) => button.addEventListener("click", () => actOnImportJob(button.dataset.jobId, button.dataset.jobAction)));
-    box.querySelectorAll("[data-import-review-id]").forEach((button) => button.addEventListener("click", () => {
-      if (recognitionDirty || editBusy) { alert("請先儲存目前修改，再開啟外觀確認頁"); return; }
-      setStage("prepared");
-      openReview(Number(button.dataset.importReviewId));
-    }));
+  function trackImportJob(job) {
+    const id = String(job.job_id || job.id);
+    if (!id || id === "undefined") return;
+    importJobs.set(id, { ...importJobs.get(id), ...job, id });
+    renderImportState(); pollImportJob(id);
   }
 
   async function pollImportJob(id) {
-    clearTimeout(importJobTimers.get(id));
+    clearTimeout(importJobTimers.get(id)); importJobTimers.delete(id);
     if (!currentUser || !importJobs.has(id)) return;
     const generation = importJobGeneration;
     try {
       const response = await fetch(`/api/import-jobs/${encodeURIComponent(id)}`);
       if (generation !== importJobGeneration || !currentUser || !importJobs.has(id)) return;
       if (response.status === 401 || response.status === 404) {
-        const job = importJobs.get(id);
-        job.pollError = response.status === 401 ? "登入已過期，請重新登入。" : "找不到此匯入工作。";
-        importJobTimers.delete(id);
-        renderImportJobs();
-        return;
+        if (response.status === 404) importJobs.delete(id);
+        alert(response.status === 401 ? "登入已過期，請重新登入。" : "找不到此匯入工作。"); renderImportState(); return;
       }
       const job = await response.json();
       if (generation !== importJobGeneration || !currentUser || !importJobs.has(id)) return;
-      if (!response.ok || !job.id) throw new Error(errText(job, "讀取匯入進度失敗"));
-      const previous = importJobs.get(id);
-      importJobs.set(id, { ...previous, ...job, id, files: previous.files });
-      const seen = importSeenPages.get(id) || new Set();
-      let added = false;
-      (job.pages || []).forEach((page) => {
-        const key = page.id != null ? `id:${page.id}:${page.status}:${(page.voucher_ids || []).join(",")}` : `${page.file_name}:${page.page_no}:${page.source_page_id}`;
-        if (!seen.has(key) && (page.source_page_id || (page.voucher_ids || []).length) && page.status !== "failed") { seen.add(key); added = true; }
-      });
-      importSeenPages.set(id, seen);
-      renderImportJobs();
-      if (added) { loadList(); refreshStats(); }
-      if (IMPORT_ACTIVE.has(job.status) && generation === importJobGeneration && currentUser && importJobs.has(id)) importJobTimers.set(id, setTimeout(() => pollImportJob(id), 1500));
+      if (!response.ok || !job.id) throw new Error(errText(job, "讀取目前檔案失敗"));
+      importJobs.set(id, { ...importJobs.get(id), ...job, id });
+      const signature = JSON.stringify([job.status, job.review_ids, job.current_page, job.pages?.map(p => [p.id,p.status,p.voucher_ids])]);
+      const changed = importSeenPages.get(id) !== signature;
+      importSeenPages.set(id, signature); renderImportState();
+      if (changed) {
+        refreshStats();
+        if (["failed","partial_failed","interrupted"].includes(job.status)) alert(job.error || job.pages?.find(p => p.error)?.error || "目前頁面尚未完成，請重試或取消。");
+      }
+      const ids = currentReviewIds(job);
+      if (activeImportJob()?.id === id && ids.length && !recognitionDirty && !editBusy && changed) {
+        if (currentStage !== "prepared") setStage("prepared");
+        else await loadList();
+      } else if (changed && currentStage !== "import" && !recognitionDirty && !editBusy) await loadList();
+      if ((IMPORT_ACTIVE.has(job.status) || job.status === "awaiting_review") && generation === importJobGeneration && currentUser && importJobs.has(id))
+        importJobTimers.set(id, setTimeout(() => pollImportJob(id), 1500));
     } catch (err) {
       if (generation !== importJobGeneration || !currentUser || !importJobs.has(id)) return;
-      console.warn("import job poll failed", id, err);
+      console.warn("import poll failed", id, err);
+      $("importHint").textContent = "連線中斷，正在重新連線…";
       importJobTimers.set(id, setTimeout(() => pollImportJob(id), 1500));
     }
   }
 
   function stopImportPolling() {
     importJobGeneration += 1;
-    importJobTimers.forEach((timer) => clearTimeout(timer));
-    importJobTimers.clear();
-    importJobs.forEach((job) => job.files?.forEach((url) => URL.revokeObjectURL(url)));
-    importJobs.clear(); importSeenPages.clear();
-    renderImportJobs();
+    importJobTimers.forEach(timer => clearTimeout(timer)); importJobTimers.clear();
+    importJobs.clear(); importSeenPages.clear(); importRestorePending = true;
+    renderImportState();
   }
 
   async function actOnImportJob(id, action) {
-    const response = await fetch(`/api/import-jobs/${encodeURIComponent(id)}/${action}`, { method: "POST" });
-    const data = await response.json();
-    if (!response.ok || data.ok === false) { alert(errText(data, "無法更新匯入工作")); return; }
-    pollImportJob(id);
+    try {
+      const response = await fetch(`/api/import-jobs/${encodeURIComponent(id)}/${action}`, { method: "POST" });
+      const data = await response.json();
+      if (!response.ok || data.ok === false) throw new Error(errText(data, "無法更新目前匯入"));
+      importJobs.set(id, {...importJobs.get(id), ...data, id}); renderImportState();
+      if (action === "cancel") { clearReview(); setStage("import"); }
+      await pollImportJob(id);
+    } catch (err) { alert(err.message); }
   }
 
   async function restoreImportJobs() {
+    const generation = importJobGeneration;
     try {
-      const data = await (await fetch("/api/import-jobs")).json();
-      (data.items || []).forEach((job) => trackImportJob(job));
-    } catch (err) { console.warn("could not restore import jobs", err); }
+      const response = await fetch("/api/import-jobs");
+      const data = await response.json();
+      if (generation !== importJobGeneration || !currentUser) return;
+      if (!response.ok) throw new Error(errText(data,"恢復目前檔案失敗"));
+      const jobs = data.items || [];
+      jobs.forEach(job => importJobs.set(String(job.id), {...importJobs.get(String(job.id)),...job}));
+      importRestorePending = false; renderImportState();
+      const job = activeImportJob();
+      if (job) await pollImportJob(job.id);
+    } catch (err) { console.warn("could not restore import", err); renderImportState(); }
   }
+  async function retryCurrentImport() {
+    const job = recoveryImportJob();
+    if (!job) { await restoreImportJobs(); return; }
+    await actOnImportJob(job.id, ["interrupted","cancelled"].includes(job.status) ? "resume" : "retry-failed");
+  }
+  function cancelCurrentImport() { const job = recoveryImportJob(); if (job) actOnImportJob(job.id,"cancel"); }
+  $("btnImportReview").addEventListener("click", () => setStage("prepared"));
+  $("btnImportRetry").addEventListener("click", retryCurrentImport);
+  $("btnAppearanceRetry").addEventListener("click", retryCurrentImport);
+  $("btnImportCancel").addEventListener("click", cancelCurrentImport);
+  $("btnAppearanceCancel").addEventListener("click", cancelCurrentImport);
 
   // ── ③掃描清單：一鍵批次提取 ──
   $("btnExtractAll").addEventListener("click", async () => {
@@ -210,29 +227,28 @@
   function eProgress(text, pct) { $("eProgress").classList.remove("hidden"); $("eBarFill").style.width = Math.round(pct * 100) + "%"; $("eProgressText").textContent = text; }
   function eProgressHide() { $("eProgress").classList.add("hidden"); }
 
-  // ── ①匯入：瀏覽器選整個資料夾 ──
-  $("dirInput").addEventListener("change", (e) => {
-    const files = Array.from(e.target.files).filter((f) => /\.(pdf|jpe?g|png|bmp|tiff?|webp)$/i.test(f.name));
-    if (!files.length) { alert("資料夾內沒有可匯入的檔案"); return; }
-    runBatch(files);
-  });
-
   // ── ①匯入：伺服器端掃描來源目錄 ──
   $("btnScanList").addEventListener("click", async () => {
     const d = await (await fetch("/api/scan-source/list")).json();
     const box = $("scanFiles");
     if (!d.ok) { box.innerHTML = ""; $("scanDirHint").textContent = errText(d, "讀取失敗"); $("btnScanImport").classList.add("hidden"); return; }
     if (!d.files.length) { box.innerHTML = ""; $("scanDirHint").textContent = `目錄 ${d.dir} 內沒有可匯入的檔案。`; $("btnScanImport").classList.add("hidden"); return; }
-    $("scanDirHint").textContent = `目錄：${d.dir}（勾選後匯入）`;
-    box.innerHTML = d.files.map((f) => `<label class="scan-row"><input type="checkbox" value="${esc(f.name)}" checked>${esc(f.name)}<span class="hint">${(f.size / 1024).toFixed(0)} KB</span></label>`).join("");
+    $("scanDirHint").textContent = `目錄：${d.dir}（一次選擇一個檔案）`;
+    box.innerHTML = d.files.map((f) => `<label class="scan-row"><input type="radio" name="scanFile" value="${esc(f.name)}">${esc(f.name)}<span class="hint">${(f.size / 1024).toFixed(0)} KB</span></label>`).join("");
     $("btnScanImport").classList.remove("hidden");
   });
   $("btnScanImport").addEventListener("click", async () => {
     const names = Array.from($("scanFiles").querySelectorAll("input:checked")).map((i) => i.value);
-    if (!names.length) { alert("請勾選要匯入的檔案"); return; }
-    const d = await (await fetch("/api/scan-source/import", { method: "POST", headers: json(), body: JSON.stringify({ filenames: names, company: $("uploadCompany").value, background: true, mode: $("uploadMode").value }) })).json();
-    if (!d.ok) { alert(errText(d, "匯入失敗")); return; }
-    toast(`開始匯入 ${d.total_files || names.length} 個檔案…`); trackImportJob(d);
+    if (names.length !== 1) { alert("請選擇一個檔案"); return; }
+    if (uploadsBlocked()) { alert("請先完成目前檔案的外觀確認，或取消目前匯入"); return; }
+    uploadSending = true; renderImportState();
+    try {
+      const response = await fetch("/api/scan-source/import", { method: "POST", headers: json(), body: JSON.stringify({ filenames: names, company: $("uploadCompany").value, background: true, mode: $("uploadMode").value }) });
+      const d = await response.json();
+      if (!response.ok || !d.ok) throw new Error(errText(d,"匯入失敗"));
+      trackImportJob(d);
+    } catch (err) { alert(err.message); await restoreImportJobs(); }
+    finally { uploadSending = false; renderImportState(); }
   });
 
   function hideProgress() { progress.classList.add("hidden"); }
@@ -251,8 +267,8 @@
     $("queueView").classList.toggle("hidden", isImport);
     $("btnExtractAll").classList.toggle("hidden", stage !== "queued");
     $("confirmationFilter").classList.toggle("hidden", stage !== "pending");
-    $("btnMerge").classList.toggle("hidden", !(stage === "prepared" || stage === "queued"));
-    $("appearanceBatch").classList.toggle("hidden", stage !== "prepared");
+    $("btnMerge").classList.toggle("hidden", stage !== "queued");
+    renderImportState();
     if (!isImport) { $("queueTitle").textContent = STAGE_TITLE[stage] || "佇列"; loadList(); }
     refreshStats();
   }
@@ -324,17 +340,24 @@
   // ── 清單 ──
   async function loadList() {
     if (currentStage === "import") { refreshStats(); return; }
+    const stage = currentStage;
     const status = currentStage === "pending" ? $("confirmationFilter").value : STAGE_STATUS[currentStage] || "";
     const url = "/api/vouchers" + (status ? `?status=${encodeURIComponent(status)}` : "");
     const data = await (await fetch(url)).json();
+    if (stage !== currentStage) return;
     const view = queueViewModel(data.items || [], currentStage);
-    const rows = view.vouchers;
-    appearanceRows = rows;
+    let rows = view.vouchers;
+    if (stage === "prepared") {
+      const job = activeImportJob(), ids = currentReviewIds(job);
+      if (job) rows = rows.filter(row => ids.includes(row.id));
+      rows = [rows.find(row => row.id === currentId) || rows.slice().sort((a,b) => a.id-b.id)[0]].filter(Boolean);
+    }
     const body = $("listBody");
-    $("listEmpty").textContent = view.emptyText;
-    if (!rows.length) { body.innerHTML = ""; $("listTable").classList.add("hidden"); $("listEmpty").classList.remove("hidden"); updateMergeBtn(); refreshStats(); return; }
+    const activeJob = stage === "prepared" ? activeImportJob() : null;
+    $("listEmpty").textContent = activeJob && IMPORT_ACTIVE.has(activeJob.status) ? "正在準備目前頁面，請稍候…" : activeJob && ["failed","partial_failed","interrupted"].includes(activeJob.status) ? "目前頁面尚未完成，請重試或取消目前匯入。" : activeJob?.status === "awaiting_review" && !currentReviewIds(activeJob).length ? "目前工作沒有可確認的單據，請取消目前匯入後重新上傳。" : view.emptyText;
+    if (!rows.length) { body.innerHTML = ""; $("listTable").classList.add("hidden"); $("listEmpty").classList.remove("hidden"); updateMergeBtn(); refreshStats(); if (stage === "prepared" && !recognitionDirty && !editBusy) clearReview(); renderImportState(); return; }
     $("listEmpty").classList.add("hidden"); $("listTable").classList.remove("hidden");
-    const mergeable = currentStage === "prepared" || currentStage === "queued";
+    const mergeable = currentStage === "queued";
     const selectedIds = new Set(Array.from(body.querySelectorAll(".mchk:checked"), (cb) => cb.dataset.id));
     body.innerHTML = rows.map((r) => {
       const chk = mergeable ? `<input type="checkbox" class="mchk" data-id="${r.id}"${selectedIds.has(String(r.id)) ? " checked" : ""}>` : "";
@@ -363,33 +386,9 @@
     body.querySelectorAll(".mchk").forEach((cb) => cb.addEventListener("click", (e) => { e.stopPropagation(); updateMergeBtn(); }));
     updateMergeBtn();
     refreshStats();
+    renderImportState();
+    if (stage === "prepared" && rows[0].id !== currentId && !recognitionDirty && !editBusy) await openReview(rows[0].id);
   }
-
-  async function batchAppearance(operation) {
-    if (editBusy || recognitionDirty) { alert("請先儲存目前修改"); return; }
-    const selected = new Set(Array.from(document.querySelectorAll(".mchk:checked"), cb => Number(cb.dataset.id)));
-    const rows = appearanceRows.filter(row => !selected.size || selected.has(row.id));
-    if (!rows.length) return;
-    if (operation === "confirm" && (!$("batchDirection").checked || !$("batchSingle").checked)) {
-      alert("請先確認所選頁面全部方向正確，且全部一頁一張；多張混貼頁請逐頁選擇切分方式。"); return;
-    }
-    const items = rows.map(row => ({id:row.id,expected_updated_at:row.updated_at,
-      direction_confirmed:true,document_mode:"single",doc_type_key:$("batchType").value}));
-    try {
-      const response = await fetch("/api/vouchers/appearance-batch", {method:"POST",headers:json(),body:JSON.stringify({operation,items})});
-      const data = await response.json();
-      if (!response.ok) throw new Error(errText(data,"批次操作失敗"));
-      const errors = (data.items || []).filter(item => !item.ok);
-      if (errors.length) alert(errors.map(item => `#${item.id}：${item.detail}`).join("\n"));
-      else toast(`已完成 ${items.length} 張`);
-      $("batchDirection").checked = false; $("batchSingle").checked = false;
-      if (currentId && rows.some(row => row.id === currentId)) await openReview(currentId);
-      await loadList(); await restoreImportJobs();
-    } catch (err) { alert(err.message); }
-  }
-  $("btnBatchRotL").addEventListener("click", () => batchAppearance("rotate_ccw"));
-  $("btnBatchRotR").addEventListener("click", () => batchAppearance("rotate_cw"));
-  $("btnBatchAppearance").addEventListener("click", () => batchAppearance("confirm"));
 
   // 合併多頁為一張（主頁＋附頁）
   $("btnMerge").addEventListener("click", async () => {
@@ -1161,7 +1160,6 @@
       if (returnToImport && currentId === saved.id) {
         clearReview();
         fileInput.value = "";
-        $("dirInput").value = "";
         setStage("import");
         toast("已儲存，可開始匯入下一份");
       } else {
@@ -1190,7 +1188,7 @@
   $("btnConfirm").addEventListener("click", () => withEditLock(() => confirmCurrent()));
 
   const json = () => ({ "Content-Type": "application/json" });
-  function toast(msg) { progressText.textContent = msg; progress.classList.remove("hidden"); barFill.style.width = "100%"; setTimeout(hideProgress, 1200); }
+  function toast(msg) { progressText.textContent = msg; progress.classList.remove("hidden"); setTimeout(hideProgress, 1200); }
 
   // ── 引擎狀態列（OCR／VLM／LLM）+ 地端推論進度條 ──
   // 地端單張數十秒，使用者需要知道「還在跑」以及「卡在哪一段」。
@@ -1672,10 +1670,9 @@
     chip.classList.remove("hidden");
     applyRole();
     loadCompanies();
-    restoreImportJobs();
     try { DOC_TYPES = (await (await fetch("/api/doc-types")).json()).types || {}; } catch (e) { DOC_TYPES = {}; }
-    $("batchType").innerHTML = '<option value="">自動判斷類型</option>' + Object.entries(DOC_TYPES).map(([key,type]) => `<option value="${esc(key)}">${esc(type.label)}</option>`).join("");
-    setStage("import"); refreshStats(); openFromHash();
+    setStage("import"); refreshStats();
+    await restoreImportJobs(); openFromHash();
     refreshEngine(); startEnginePoll();
   }
 

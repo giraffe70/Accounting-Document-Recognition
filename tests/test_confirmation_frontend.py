@@ -31,7 +31,6 @@ const nodes = {
   'btnSave': { disabled: false, addEventListener: () => {} },
   'btnConfirm': { disabled: false, addEventListener: () => {} },
   'btnReturnImport': { disabled: false, addEventListener: () => {} },
-  'dirInput': { value: 'directory-selection' },
 };
 let currentId = input.currentId ?? 12;
 let currentVoucher = { fields: { amount: 125 }, items: [], entries: [{ id: 'untouched-entry' }], status: 'pending' };
@@ -107,7 +106,6 @@ globalThis.api = { confirmCurrent, saveDraft, persistCurrentEdits };`, context);
   process.stdout.write(JSON.stringify({
     events,
     fileValue: context.fileInput.value,
-    dirValue: context.nodes.dirInput.value,
     currentId: vm.runInContext('currentId', context),
     currentVersion: vm.runInContext('currentVersion', context),
   }));
@@ -500,7 +498,6 @@ class ConfirmationFrontendTests(unittest.TestCase):
         self.assertFalse(any(event["type"] in {"clearReview", "setStage"} for event in saved["events"]))
         self.assertLess(self.event_types(returned).index("clearReview"), self.event_types(returned).index("setStage"))
         self.assertEqual(returned["fileValue"], "")
-        self.assertEqual(returned["dirValue"], "")
 
     def test_failed_save_and_conflict_keep_review_input_open(self):
         for status in (500, 409):
@@ -509,7 +506,6 @@ class ConfirmationFrontendTests(unittest.TestCase):
                 self.assertEqual(len(self.requests(result)), 1)
                 self.assertFalse(any(e["type"] in {"clearReview", "setStage"} for e in result["events"]))
                 self.assertEqual(result["fileValue"], "selected-file")
-                self.assertEqual(result["dirValue"], "directory-selection")
                 self.assertEqual(result["currentId"], 12)
                 self.assertTrue(any(e["type"] == "alert" and "儲存失敗" in e["message"] for e in result["events"]))
 
@@ -525,7 +521,6 @@ class ConfirmationFrontendTests(unittest.TestCase):
         self.assertEqual(result["currentId"], 12)
         self.assertEqual(result["currentVersion"], "original-ts")
         self.assertEqual(result["fileValue"], "selected-file")
-        self.assertEqual(result["dirValue"], "directory-selection")
         self.assertFalse(any(e["type"] in {"clearReview", "setStage"} for e in result["events"]))
 
     def test_latest_version_conflict_accept_retries_same_local_payload_at_latest_version(self):
@@ -781,12 +776,9 @@ class ConfirmationFrontendTests(unittest.TestCase):
         self.assertIn('class="btn btn-sm danger"', html[tag_start:html.index(">", tag_start)])
         self.assertIn('status === "confirmed" && !isAdminUser()', self.source)
 
-    def test_folder_import_and_scan_source_directory_are_hidden(self):
+    def test_scan_source_directory_is_hidden_and_file_picker_remains(self):
         html = APP_HTML.read_text(encoding="utf-8")
 
-        folder_start = html.index('<label class="btn btn-sm folder-btn')
-        folder_tag = html[folder_start:html.index(">", folder_start)]
-        self.assertIn("hidden", folder_tag.split('"')[1].split())
 
         panel_start = html.index('id="scanSourcePanel"')
         panel_tag = html[html.rindex("<div", 0, panel_start):html.index(">", panel_start)]

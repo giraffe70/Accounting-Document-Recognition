@@ -160,6 +160,14 @@ class RecognitionProtected(ValueError):
 
 
 def _check_model_write(rec):
+    from app.services import import_jobs
+    from app.db.models import ImportJob
+    if rec and rec.status == ReviewStatus.prepared:
+        origin = json.loads(rec.current_json).get("origin") or {}
+        with get_session() as session:
+            job = session.get(ImportJob, origin.get("import_job_id", ""))
+            if job and import_jobs._sequential(job):
+                raise RecognitionProtected("請先完成目前頁面的外觀確認")
     if rec.record_role == "source_page":
         raise RecognitionProtected("來源頁只保存原圖，請辨識子單據或先人工分割")
     from app.core import preparation
@@ -785,8 +793,15 @@ def split_voucher(rec_id: int, box, *, expected_updated_at=None, actor=None):
     from app.models.schemas import Voucher
     from app.core import preparation
     current_rec = get_voucher(rec_id)
-    if current_rec and preparation.manual(json.loads(current_rec.current_json)):
-        return _split_manual(rec_id, box, expected_updated_at=expected_updated_at, actor=actor)
+    if current_rec:
+        from app.services import import_jobs
+        from app.db.models import ImportJob
+        current_data = json.loads(current_rec.current_json)
+        with get_session() as session:
+            job = session.get(ImportJob, current_data.get("origin", {}).get("import_job_id", ""))
+            sequential = job is not None and import_jobs._sequential(job)
+        if preparation.manual(current_data) or sequential:
+            return _split_manual(rec_id, box, expected_updated_at=expected_updated_at, actor=actor)
 
     p = _image_path_of(get_voucher(rec_id))
     if not p or not isinstance(box, (list, tuple)) or len(box) < 4:
@@ -848,10 +863,16 @@ def _split_manual(rec_id, box, *, expected_updated_at=None, actor=None):
     with _source_edit(rec_id, expected_updated_at) as (session, rec):
         if not rec or rec.record_role == "source_page":
             raise RecognitionProtected("請對工作副本分割，原始來源保持不變")
+        from app.services import import_jobs
+        import_jobs.check_review_turn(session, rec, (actor or {}).get("id"))
         if not isinstance(box, (list,tuple)) or len(box) != 4 or any(not isinstance(v,(int,float)) or not 0 <= v <= 1 for v in box):
             raise RecognitionProtected("裁切範圍無效")
         source = _image_path_of(rec)
         parent_data = json.loads(rec.current_json)
+        if not preparation.manual(parent_data):
+            parent_data.setdefault("origin", {})["preparation"] = preparation.fresh()
+            rec.current_json = json.dumps(parent_data, ensure_ascii=False)
+            session.add(rec)
         token = uuid.uuid4().hex
         folder = config.UPLOAD_DIR / "_pages" / token
         folder.mkdir(parents=True, exist_ok=True)
@@ -1044,6 +1065,7 @@ def confirm_appearance(rec_id: int, type_key: str = "", *, expected_updated_at=N
         if rec.status not in (ReviewStatus.prepared, ReviewStatus.queued):
             raise RecognitionProtected("此憑證已完成內容辨識，請至確認頁操作")
         data = json.loads(rec.current_json)
+        import_jobs.check_review_turn(s, rec, (actor or {}).get("id"))
         if preparation.manual(data):
             if expected_updated_at is None or direction_confirmed is not True:
                 raise RecognitionProtected("請確認目前版本的影像方向")
@@ -1080,7 +1102,9 @@ def confirm_appearance(rec_id: int, type_key: str = "", *, expected_updated_at=N
             _apply_type(rec, type_key)
         rec.status = ReviewStatus.queued
         rec.updated_at = datetime.now()
-        s.add(rec); s.commit(); s.refresh(rec)
+        s.add(rec)
+        import_jobs.mark_review_complete(s, rec)
+        s.commit(); s.refresh(rec)
         return rec
 
 
@@ -1453,6 +1477,12 @@ def delete_vouchers(rec_id: int, scope: str, *, is_admin: bool = False, actor: s
         if not rec:
             return None
         targets = _delete_targets(s, rec, scope)
+        from app.db.models import ImportJob
+        from app.services import import_jobs
+        for target in targets.values():
+            job = s.get(ImportJob, _origin_of(target).get("import_job_id", ""))
+            if job and import_jobs._sequential(job) and job.status not in ("cancelled", "completed"):
+                raise DeleteForbidden("請先完成外觀確認或取消目前匯入，再刪除這份檔案的單據")
         if not is_admin and any(t.status == ReviewStatus.confirmed for t in targets.values()):
             raise DeleteForbidden("範圍內含已確認的憑證，只有管理員可以刪除")
         deleted = [{"id": t.id, "role": t.record_role, "status": t.status.value, "image_path": t.image_path,

@@ -19,7 +19,7 @@ from app.db.models import ReviewStatus, VoucherRecord
 from app.db.session import init_db
 from app.models.schemas import ConfigUpdate, Voucher
 from app.services import (accounts, auth, backup, classify, database_view, importdecl, journal,
-                          reports, review, sysconfig, taxid, companies, item_account_mapping, entry_workflow)
+                          reports, review, sysconfig, taxid, companies, item_account_mapping, entry_workflow, import_jobs)
 
 _LOG_FMT = "[%(asctime)s] %(levelname)s %(name)s: %(message)s"
 logging.basicConfig(level=logging.INFO, format=_LOG_FMT)
@@ -31,6 +31,16 @@ logging.getLogger().addHandler(_fh)
 logger = logging.getLogger("pdf_scan")
 
 app = FastAPI(title="憑證辨識系統 API")
+
+
+@app.exception_handler(import_jobs.JobConflict)
+async def import_conflict_handler(request, exc):
+    return JSONResponse({"ok": False, "detail": str(exc)}, status_code=409)
+
+
+@app.exception_handler(import_jobs.JobNotFound)
+async def import_not_found_handler(request, exc):
+    return JSONResponse({"ok": False, "detail": str(exc)}, status_code=404)
 
 
 @app.exception_handler(review.RecognitionProtected)
@@ -351,11 +361,18 @@ def api_scan_import(request: Request, filenames: list = Body(..., embed=True), c
     if d is None:
         return JSONResponse({"detail": "尚未設定或找不到掃描來源目錄"}, status_code=400)
     from app.services import import_jobs
+    if len(filenames) != 1:
+        return JSONResponse({"ok": False, "detail": "一次只能選擇一個檔案"}, status_code=422)
     paths = [{"path": str(d / Path(str(name)).name), "name": Path(str(name)).name} for name in filenames]
     valid = [p for p in paths if Path(p["path"]).is_file() and Path(p["path"]).suffix.lower() in config.ALLOWED_SUFFIXES]
     if not valid:
         return JSONResponse({"ok": False, "detail": "無有效檔案可匯入"}, status_code=400)
-    created = import_jobs.create_job(valid, import_api.owner(request), company, mode=mode)
+    try:
+        created = import_jobs.create_job(valid, import_api.owner(request), company, mode=mode)
+    except import_jobs.JobConflict as exc:
+        return JSONResponse({"ok": False, "detail": str(exc)}, status_code=409)
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "detail": str(exc)}, status_code=400)
     if background:
         return JSONResponse(created, status_code=202)
     return {"ok": True, "job_id": created["id"], "total": len(valid)}
@@ -386,17 +403,7 @@ async def api_analyze(file: UploadFile = File(...), company: str = Form("")):
 # ── 批次（背景執行 + 輪詢）──────────────────────────────────────
 @app.post("/api/batch")
 async def api_batch(request: Request, files: list[UploadFile] = File(...), company: str = Form("")):
-    from app.services import import_jobs
-    paths, errors = [], []
-    for file in files:
-        try:
-            paths.append({"path": str(await _save_upload(file)), "name": file.filename})
-        except ValueError as exc:
-            errors.append(f"{file.filename}: {exc}")
-    if not paths:
-        return JSONResponse({"ok": False, "detail": "無有效檔案可匯入", "errors": errors}, status_code=400)
-    created = import_jobs.create_job(paths, import_api.owner(request), company, mode="automatic")
-    return {"ok": True, "job_id": created["id"], "total": len(paths), "errors": errors}
+    return await import_api.create(request, files, company, mode="automatic")
 
 
 @app.get("/api/job")
@@ -674,8 +681,8 @@ def api_set_type(request: Request, rec_id: int, doc_type_key: str = Body(..., em
 
 @app.post("/api/vouchers/appearance-batch")
 def api_appearance_batch(request: Request, items: list[dict] = Body(..., embed=True), operation: str = Body(..., embed=True)):
-    if len(items) > 500:
-        return JSONResponse({"detail":"每次最多操作500筆"},status_code=400)
+    if len(items) != 1:
+        return JSONResponse({"detail":"外觀確認一次只能操作一張單據"},status_code=422)
     return review.appearance_batch(items,operation,actor=auth.get_user_by_token(request.cookies.get("session")))
 
 

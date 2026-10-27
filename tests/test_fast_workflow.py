@@ -53,6 +53,7 @@ class FastWorkflowContracts(unittest.TestCase):
         self.addCleanup(self.engine.dispose)
         with Session(self.engine) as session:
             session.add(UserAccount(id=1, username="workflow-owner"))
+            session.add(UserAccount(id=2, username="other-workflow-owner"))
             session.commit()
 
     @contextmanager
@@ -65,11 +66,11 @@ class FastWorkflowContracts(unittest.TestCase):
         Image.new("RGB", (40, 30), (240, 240, 240)).save(path)
         return path
 
-    def _job(self, *, name="source.png", mode=None):
+    def _job(self, *, name="source.png", mode=None, owner=1):
         source = self._source(name)
         kwargs = {} if mode is None else {"mode": mode}
         return source, import_jobs.create_job(
-            [{"path": str(source), "name": name}], 1, **kwargs
+            [{"path": str(source), "name": name}], owner, **kwargs
         )
 
     def _rows(self, model):
@@ -105,7 +106,7 @@ class FastWorkflowContracts(unittest.TestCase):
 
     def test_default_manual_job_prepares_copies_without_model_work_and_worker_moves_on(self):
         source1, first = self._job(name="first.png")
-        source2, second = self._job(name="second.png")
+        source2, second = self._job(name="second.png", owner=2)
 
         with patch.object(import_jobs.pipeline, "page_count", return_value=1), \
              patch.object(import_jobs.pipeline, "render_page", side_effect=lambda *_: source1), \
@@ -140,7 +141,7 @@ class FastWorkflowContracts(unittest.TestCase):
             # The first job is now waiting for a person; the worker can take another job.
             with patch.object(import_jobs.pipeline, "render_page", side_effect=lambda *_: source2):
                 self.assertTrue(import_jobs.run_once())
-            self.assertEqual(import_jobs.get_job(second["id"], 1)["status"], "awaiting_review")
+            self.assertEqual(import_jobs.get_job(second["id"], 2)["status"], "awaiting_review")
 
     def test_legacy_snapshot_without_mode_uses_automatic_path(self):
         source, job = self._job(name="legacy.png", mode="automatic")
@@ -148,6 +149,7 @@ class FastWorkflowContracts(unittest.TestCase):
             saved = session.get(ImportJob, job["id"])
             snapshot = json.loads(saved.settings_json)
             snapshot.pop("mode")
+            snapshot.pop("sequential_review")
             saved.settings_json = json.dumps(snapshot)
             session.add(saved)
             session.commit()
@@ -348,7 +350,7 @@ class FastWorkflowContracts(unittest.TestCase):
         self.assertEqual(observed["ocr_text"], "Invoice Left 001\nInvoice Right 002")
         self.assertEqual([line["text"] for line in observed["ocr_lines"]],
                          ["Invoice Left 001", "Invoice Right 002"])
-        self.assertEqual(import_jobs.get_job(job["id"], 1)["pages"][0]["status"], "completed")
+        self.assertEqual(import_jobs.get_job(job["id"], 1)["pages"][0]["status"], "preview_ready")
         source_page = review.get_voucher(rec_id)
         self.assertEqual(source_page.record_role, "source_page")
         page = self._rows(ImportPage)[0]
@@ -362,7 +364,7 @@ class FastWorkflowContracts(unittest.TestCase):
         self.assertEqual(sorted(text_evidence.read(self.uploads / child.image_path, folder=folder)["text"]
                                 for child in children), ["Invoice Left 001", "Invoice Right 002"])
 
-        # Resuming a completed layout job keeps the committed source and children unchanged.
+        # Resume returns to human review without repeating the committed layout.
         record_count = len(self._rows(VoucherRecord))
         with Session(self.engine) as session:
             saved_job = session.get(ImportJob, job["id"])
@@ -371,7 +373,7 @@ class FastWorkflowContracts(unittest.TestCase):
             session.commit()
         import_jobs.recover_interrupted()
         import_jobs.action(job["id"], 1, "resume")
-        self.assertTrue(import_jobs.run_once())
+        self.assertFalse(import_jobs.run_once())
         self.assertEqual(len(self._rows(VoucherRecord)), record_count)
         self.assertEqual(json.loads(self._rows(ImportPage)[0].voucher_ids_json), child_ids)
 
