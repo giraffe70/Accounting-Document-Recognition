@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlmodel import Session, SQLModel, create_engine
 
 from app.services import auth, database_view
 
@@ -16,6 +17,13 @@ class DatabaseViewTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         root = Path(self.tmp.name)
+        self.auth_engine = create_engine(f"sqlite:///{root / 'auth.db'}", connect_args={"check_same_thread": False})
+        self.addCleanup(self.auth_engine.dispose)
+        SQLModel.metadata.create_all(self.auth_engine)
+        auth_patch = patch.object(auth, "get_session", side_effect=lambda: Session(self.auth_engine))
+        auth_patch.start()
+        self.addCleanup(auth_patch.stop)
+        self.identities = {}
         self.db = root / "app.db"
         con = sqlite3.connect(self.db)
         con.executescript("""
@@ -51,7 +59,9 @@ class DatabaseViewTests(unittest.TestCase):
         self.addCleanup(lambda: [auth.logout(token) for token in self.tokens])
 
     def login(self, role="admin"):
-        token = auth.create_token({"username": "test", "role": role, "name": "測試"})
+        if role not in self.identities:
+            self.identities[role] = auth.create_user(f"test-{role}", "測試", "Synthetic-123", role)
+        token = auth.create_token(self.identities[role])
         self.tokens.append(token)
         self.client.cookies.set("session", token)
 
@@ -135,7 +145,7 @@ class DatabaseViewTests(unittest.TestCase):
         for table in tables:
             columns = self.rows(table=table["name"]).json()["columns"]
             self.assertTrue(all(c["label"] for c in columns))
-        self.assertEqual(sum(len(meta["columns"]) for meta in database_view.TABLE_META.values()), 130)
+        self.assertEqual(sum(len(meta["columns"]) for meta in database_view.TABLE_META.values()), 131)
         columns = database_view.TABLE_META[("app", "voucher_records")]["columns"]
         self.assertEqual(columns["confirmed_by"], "辨識確認者編號")
         self.assertEqual(columns["confirmed_by_name"], "辨識確認者名稱")

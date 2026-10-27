@@ -43,7 +43,8 @@ class ItemAccountMappingTests(unittest.TestCase):
         self.addCleanup(self.session_patch.stop)
 
     def actor(self, username="reviewer"):
-        return {"username": username, "id": 987654, "name": "偽造名稱", "role": "admin"}
+        # Real sessions carry the database ID; the supplied display name remains untrusted.
+        return {"username": username, "id": self.user_id, "name": "偽造名稱", "role": "admin"}
 
     def voucher(self, description="影印紙", *, doc_type="receipt", account_code="", account_name="",
                 **extra):

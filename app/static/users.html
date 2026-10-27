@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>權限管理 — 憑證辨識系統</title>
+  <link rel="stylesheet" href="/css/styles.css">
+  <link rel="stylesheet" href="/css/users.css?v=20261027-edit">
+  <script src="/js/users.js?v=20261027-edit" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="logo">權</span> 權限管理</div>
+    <div class="spacer"></div>
+    <a class="btn" href="/">返回主頁</a>
+  </header>
+  <main class="users-layout">
+    <p id="accessMessage" role="status">正在確認管理員權限…</p>
+    <section id="usersPanel" class="panel hidden" aria-label="帳號管理">
+      <h2>新增帳號</h2>
+      <form id="userForm" class="users-form">
+        <label for="role">角色
+          <select id="role" class="select" name="role" required>
+            <option value="clerk" selected>記帳士</option>
+            <option value="accountant">會計師</option>
+            <option value="other">其他</option>
+          </select>
+        </label>
+        <label id="customRoleWrap" for="customRole" class="hidden">其他角色名稱
+          <input id="customRole" class="select" name="customRole" maxlength="100" aria-describedby="customRoleHint">
+          <span id="customRoleHint" class="hint">自訂角色具一般使用者權限，不能使用管理員功能。</span>
+        </label>
+        <label for="displayName">顯示名稱
+          <input id="displayName" class="select" name="displayName" maxlength="100" required>
+        </label>
+        <label for="username">帳號
+          <input id="username" class="select" name="username" autocomplete="username" maxlength="64" required>
+        </label>
+        <label for="password">密碼
+          <input id="password" class="select" name="password" type="password" minlength="8" maxlength="128" autocomplete="new-password" required>
+        </label>
+        <label for="confirmPassword">確認密碼
+          <input id="confirmPassword" class="select" name="confirmPassword" type="password" minlength="8" maxlength="128" autocomplete="new-password" required>
+        </label>
+        <p class="users-password-hint hint">密碼至少 8 個字，請勿使用常見或預設密碼。</p>
+        <button id="createUserBtn" class="btn primary" type="submit">新增帳號</button>
+        <p id="formMessage" class="users-message" role="status" aria-live="polite"></p>
+      </form>
+
+      <section id="editPanel" class="users-edit hidden" aria-labelledby="editTitle">
+        <h2 id="editTitle">編輯帳號</h2>
+        <p class="hint">新密碼留空即不變更；變更密碼後，該帳號所有既有登入都會失效。</p>
+        <form id="editForm" class="users-form">
+          <label for="editUsername">帳號
+            <input id="editUsername" class="select" maxlength="64" autocomplete="off" required>
+          </label>
+          <label for="editDisplayName">顯示名稱
+            <input id="editDisplayName" class="select" maxlength="100" required>
+          </label>
+          <label for="editPassword">新密碼（選填）
+            <input id="editPassword" class="select" type="password" minlength="8" maxlength="128" autocomplete="new-password">
+          </label>
+          <label for="editConfirmPassword">確認新密碼
+            <input id="editConfirmPassword" class="select" type="password" minlength="8" maxlength="128" autocomplete="new-password">
+          </label>
+          <div class="users-edit-actions">
+            <button id="editSave" class="btn primary" type="submit">儲存修改</button>
+            <button id="editCancel" class="btn" type="button">取消</button>
+          </div>
+          <p id="editMessage" class="users-message" role="status" aria-live="polite"></p>
+        </form>
+      </section>
+
+      <section class="users-list" aria-labelledby="usersListTitle">
+        <div class="users-list-heading">
+          <h2 id="usersListTitle">帳號列表</h2>
+          <button id="refreshUsers" class="btn" type="button">重新整理</button>
+        </div>
+        <p id="listMessage" class="users-message" role="status" aria-live="polite"></p>
+        <p class="users-deactivation-note hint">刪除帳號會停用該帳號、使既有登入失效，並保留歷史紀錄。</p>
+        <div class="users-table-wrap" tabindex="0" aria-label="帳號列表，可水平捲動">
+          <table class="users-table">
+            <thead>
+              <tr>
+                <th scope="col">帳號</th>
+                <th scope="col">顯示名稱</th>
+                <th scope="col">角色</th>
+                <th scope="col">狀態</th>
+                <th scope="col">建立時間</th>
+                <th scope="col">操作</th>
+              </tr>
+            </thead>
+            <tbody id="usersBody"></tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+  </main>
+</body>
+</html>

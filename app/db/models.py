@@ -35,6 +35,7 @@ class ReviewStatus(str, Enum):
 
 class UserAccount(SQLModel, table=True):
     __tablename__ = "users"
+    __table_args__ = (UniqueConstraint("username", name="uq_users_username"),)
 
     id: Optional[int] = Field(default=None, primary_key=True)
     username: str = Field(index=True)
@@ -42,6 +43,7 @@ class UserAccount(SQLModel, table=True):
     salt: str = ""
     role: str = "clerk"          # clerk（記帳士）/ accountant（會計師）/ admin（管理員）
     name: str = ""
+    is_active: bool = Field(default=True, sa_column_kwargs={"server_default": "1"})
     created_at: datetime = Field(default_factory=datetime.now)
 
 

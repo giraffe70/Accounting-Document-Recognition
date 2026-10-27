@@ -1659,6 +1659,7 @@
     const canAdmin = currentUser && currentUser.role === "admin";
     $("accountsBtn").classList.toggle("hidden", !canAdmin);
     $("databaseBtn").classList.toggle("hidden", !canAdmin);
+    $("usersBtn").classList.toggle("hidden", !canAdmin);
   }
 
   async function enterApp() {
@@ -1666,7 +1667,8 @@
     $("loginOverlay").classList.add("hidden");
     $("logoutBtn").classList.remove("hidden");
     const chip = $("userChip");
-    chip.textContent = `${currentUser.name}（${ROLE_LABEL[currentUser.role] || currentUser.role}）`;
+    const roleLabel = currentUser.role.startsWith("other:") ? `其他：${currentUser.role.slice(6)}` : (ROLE_LABEL[currentUser.role] || currentUser.role);
+    chip.textContent = `${currentUser.name}（${roleLabel}）`;
     chip.classList.remove("hidden");
     applyRole();
     loadCompanies();

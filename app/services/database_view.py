@@ -30,7 +30,7 @@ TABLE_META = {
         "date_label": "帳號建立日期", "date_column": "created_at",
         "columns": {
             "id": "帳號編號", "username": "登入帳號", "password_hash": "密碼雜湊",
-            "salt": "密碼鹽值", "role": "角色", "name": "顯示名稱", "created_at": "建立時間",
+            "salt": "密碼鹽值", "role": "角色", "name": "顯示名稱", "is_active": "啟用狀態", "created_at": "建立時間",
         },
     },
     ("app", "voucher_records"): {

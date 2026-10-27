@@ -20,6 +20,7 @@ from app.db.session import init_db
 from app.models.schemas import ConfigUpdate, Voucher
 from app.services import (accounts, auth, backup, classify, database_view, importdecl, journal,
                           reports, review, sysconfig, taxid, companies, item_account_mapping, entry_workflow, import_jobs)
+from app.services import user_management
 
 _LOG_FMT = "[%(asctime)s] %(levelname)s %(name)s: %(message)s"
 logging.basicConfig(level=logging.INFO, format=_LOG_FMT)
@@ -65,6 +66,7 @@ validation.init_validation()
 app.include_router(validation.router)
 app.include_router(database_view.router)
 app.include_router(import_api.router)
+app.include_router(user_management.router)
 
 
 @app.on_event("startup")
@@ -88,7 +90,7 @@ async def auth_guard(request: Request, call_next):
     if path.startswith("/api/") and path not in _PUBLIC_API:
         user = auth.get_user_by_token(request.cookies.get("session"))
         if not user:
-            return JSONResponse({"detail": "未登入"}, status_code=401)
+            return JSONResponse({"detail": "未登入"}, status_code=401, headers={"Cache-Control": "no-store"})
         role = user["role"]
         if role != "admin":
             if path == "/api/accounts" and request.method == "POST":
@@ -99,17 +101,21 @@ async def auth_guard(request: Request, call_next):
                 return JSONResponse({"detail": "需管理員權限"}, status_code=403)
             elif path == "/api/feedback":
                 return JSONResponse({"detail": "需管理員權限"}, status_code=403)
-    return await call_next(request)
+    response = await call_next(request)
+    if path == "/api/users" or path.startswith("/api/users/"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 # ── 登入 / 角色 ──────────────────────────────────────────────────
 @app.post("/api/login")
 def api_login(body: dict = Body(...)):
-    user = auth.authenticate(body.get("username", ""), body.get("password", ""))
-    if not user:
+    authenticated = auth.authenticate_session(body.get("username", ""), body.get("password", ""))
+    if not authenticated:
         return JSONResponse({"detail": "帳號或密碼錯誤"}, status_code=401)
+    user, token = authenticated
     resp = JSONResponse(user)
-    resp.set_cookie("session", auth.create_token(user), httponly=True, samesite="lax")
+    resp.set_cookie("session", token, httponly=True, samesite="lax")
     return resp
 
 

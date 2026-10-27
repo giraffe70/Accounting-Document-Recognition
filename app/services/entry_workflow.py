@@ -8,11 +8,12 @@ import re
 from uuid import UUID, uuid4
 
 from sqlmodel import select
-from app.db.models import ReviewStatus, UserAccount, VoucherRecord, utc_now
+from app.db.models import ReviewStatus, VoucherRecord, utc_now
 from app.core import doc_types
 from app import config
 from app.core.normalization import norm_amount
 from app.services.item_account_mapping import ACCOUNT_FIELDS, strip_accounting
+from app.services import auth
 
 ENTRY_META = {"entry_id", "entry_origin", "source_entry_index"}
 
@@ -147,7 +148,7 @@ def source_fingerprint(rec, data=None):
 def user_identity(session, actor):
     if not actor:
         return None, "系統"
-    user = session.exec(select(UserAccount).where(UserAccount.username == actor.get("username", ""))).first()
+    user = auth.resolve_user(session, actor)
     if not user:
         raise ValueError("無法識別登入人員")
     return user.id, user.name or user.username

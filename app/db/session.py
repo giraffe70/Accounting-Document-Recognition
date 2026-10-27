@@ -21,9 +21,23 @@ def init_db():
     from app.db import models  # noqa: F401
 
     SQLModel.metadata.create_all(_engine)
+    _migrate_users()
     _migrate()
     _migrate_account_mappings()
     _migrate_entries()
+
+
+def _migrate_users():
+    """Keep account identities unique and retain disabled users for foreign keys."""
+    with _engine.begin() as conn:
+        duplicate = conn.exec_driver_sql(
+            "SELECT 1 FROM users GROUP BY username HAVING COUNT(*) > 1 LIMIT 1").first()
+        if duplicate:
+            raise RuntimeError("帳號資料遷移失敗：存在重複帳號，請先由管理員人工處理；未自動合併或更名。")
+        columns = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(users)")}
+        if "is_active" not in columns:
+            conn.exec_driver_sql("ALTER TABLE users ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1")
+        conn.exec_driver_sql("CREATE UNIQUE INDEX IF NOT EXISTS uq_users_username ON users(username)")
 
 
 # 已由 correction_note、confirmed_at 與新狀態取代的舊審核欄位（遷移後移除）。

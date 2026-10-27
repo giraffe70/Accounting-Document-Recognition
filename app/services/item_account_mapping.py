@@ -5,7 +5,8 @@ import re
 from uuid import UUID, uuid4
 
 from sqlmodel import select
-from app.db.models import ItemAccountMapping, MappingHistory, UserAccount, VoucherRecord, utc_now
+from app.db.models import ItemAccountMapping, MappingHistory, VoucherRecord, utc_now
+from app.services import auth
 
 ACCOUNT_FIELDS = frozenset({"item_id", "account_code", "account_name", "mapping_id", "mapping_version",
     "account_source", "account_needs_review", "remember_mapping", "account_company_id", "account_item_key",
@@ -192,7 +193,7 @@ def audit_items(session, data, previous, actor):
         for key in ("account_code", "account_name", "account_company_id", "account_needs_review"))]
     if not changed:
         return
-    user = session.exec(select(UserAccount).where(UserAccount.username == actor.get("username", ""))).first()
+    user = auth.resolve_user(session, actor)
     if not user:
         raise ValueError("無法識別登入人員")
     for row in changed:
@@ -256,7 +257,7 @@ def publish(session, rec, data, actor, choices=None, *, nonblocking=False):
                        for conflict in conflicts for row in conflict["rows"]]
             return notices + publish(session, rec, data, actor, local_choices)
         raise MappingConflict("請選擇只修改本張或更新共用規則；規則有變更時請重新選擇", conflicts)
-    user = session.exec(select(UserAccount).where(UserAccount.username == actor.get("username", ""))).first()
+    user = auth.resolve_user(session, actor)
     if pending and not user:
         raise ValueError("無法識別登入人員")
     for key, row, rows, rule in pending:
