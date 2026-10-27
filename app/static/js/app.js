@@ -1445,62 +1445,6 @@
     loadList();
   });
 
-  // ── 科目表 modal ──
-  $("accountsBtn").addEventListener("click", openAccounts);
-  $("closeAccounts").addEventListener("click", () => $("accountsModal").classList.add("hidden"));
-  $("accAdd").addEventListener("click", () => { $("accBody").insertAdjacentHTML("beforeend", accRow({})); bindAccDel(); });
-  $("accSave").addEventListener("click", saveAccounts);
-
-  async function openAccounts() {
-    if (!isAdminUser()) return;
-    const sel = $("accCompany");
-    if (!sel.options.length) {
-      sel.innerHTML = `<option value="">通用（未指定公司）</option>`
-        + COMPANIES.map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join("");
-      sel.addEventListener("change", loadAccountsFor);
-    }
-    await loadAccountsFor();
-    $("accountsModal").classList.remove("hidden");
-  }
-  async function loadAccountsFor() {
-    const company = $("accCompany").value;
-    const data = await (await fetch(`/api/accounts?company=${encodeURIComponent(company)}`)).json();
-    const own = (data.with_chart || []).includes(company);
-    $("accBody").innerHTML = (data.accounts || []).map(accRow).join("");
-    bindAccDel();
-    // 顯示的是不是這家公司自己的表——沒講清楚會誤以為在改 A 公司卻改到通用表
-    $("accCompany").title = company && !own
-      ? `${company} 尚未自訂科目表，目前顯示的是通用表；儲存後即成為 ${company} 專屬` : "";
-    $("accChartSource").textContent = company && !own
-      ? `${company} 尚未自訂科目表，目前使用通用科目表；明細科目核對亦使用此表。`
-      : company ? `目前使用 ${company} 的公司專屬科目表。` : "目前使用通用科目表。";
-  }
-  function accRow(a) {
-    return `<tr>
-      <td><input class="ac-code" value="${esc(a.code)}"></td>
-      <td><input class="ac-name" value="${esc(a.name)}"></td>
-      <td><input class="ac-cat" value="${esc(a.category)}"></td>
-      <td><button class="btn btn-sm del">✕</button></td></tr>`;
-  }
-  function bindAccDel() {
-    $("accBody").querySelectorAll(".del").forEach((b) =>
-      b.addEventListener("click", (e) => e.target.closest("tr").remove()));
-  }
-  async function saveAccounts() {
-    const accounts = Array.from($("accBody").querySelectorAll("tr")).map((tr) => ({
-      code: tr.querySelector(".ac-code").value.trim(),
-      name: tr.querySelector(".ac-name").value.trim(),
-      category: tr.querySelector(".ac-cat").value.trim(),
-    })).filter((a) => a.code || a.name);
-    const company = $("accCompany").value;
-    const r = await fetch("/api/accounts", { method: "POST", headers: json(), body: JSON.stringify({ accounts, company }) });
-    if (!r.ok) { alert(`科目表儲存失敗（HTTP ${r.status}，需管理員權限）`); return; }
-    $("accountsModal").classList.add("hidden");
-    toast(`${company || "通用"}科目表已儲存（${accounts.length} 個科目）`);
-    await loadItemAccountChart();
-    await refreshCurrentStatus();
-  }
-
   // ── 模型設定 modal ──
   $("settingsBtn").addEventListener("click", openSettings);
   $("closeModal").addEventListener("click", () => modal.classList.add("hidden"));
@@ -1563,7 +1507,6 @@
 
   // 深連結：#v=<id> 自動開啟該筆審核
   function openFromHash() {
-    if (/accounts/.test(location.hash)) { openAccounts(); return; }
     const m = location.hash.match(/v=(\d+)/);
     if (m) openReview(Number(m[1]));
   }
@@ -1587,7 +1530,6 @@
 
   function applyRole() {
     const canAdmin = currentUser && currentUser.is_admin === true;
-    $("accountsBtn").classList.toggle("hidden", !canAdmin);
     $("databaseBtn").classList.toggle("hidden", !canAdmin);
     $("usersBtn").classList.toggle("hidden", !canAdmin);
     $("settingsBtn").classList.toggle("hidden", !canAdmin);

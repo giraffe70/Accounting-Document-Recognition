@@ -244,12 +244,6 @@ table.items-edit .item-extras label { display: block; margin: 5px 0; font-size: 
 .login-overlay { position: fixed; inset: 0; background: linear-gradient(135deg,#eef2f7,#e6ecf5); display: grid; place-items: center; z-index: 100; }
 .login-box { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 30px; width: min(360px, 92vw); box-shadow: 0 10px 40px rgba(0,0,0,.12); }
 
-.acc-wrap { max-height: 55vh; overflow-y: auto; margin: 10px 0; }
-table.acc-edit { width: 100%; border-collapse: collapse; font-size: 13px; }
-table.acc-edit th, table.acc-edit td { border: 1px solid var(--border); padding: 2px; text-align: left; }
-table.acc-edit th { background: var(--bg3); padding: 6px 8px; position: sticky; top: 0; }
-table.acc-edit input { width: 100%; border: none; padding: 5px 7px; font-size: 13px; background: transparent; }
-table.acc-edit input:focus { outline: 1px solid var(--blue); border-radius: 4px; }
 
 .up-company { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); margin-bottom: 12px; }
 .up-company .select { width: auto; min-width: 140px; }
@@ -279,8 +273,6 @@ table.journal tfoot td { font-weight: 700; background: var(--bg3); }
 .select { width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 7px; font-size: 14px; }
 .modal-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 18px; }
 
-/* 科目表分公司選擇 */
-.acc-company { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; margin-bottom: 10px; }
 
 /* 明細科目對應與衝突確認。 */
 #itemsSection { overflow-x: auto; }

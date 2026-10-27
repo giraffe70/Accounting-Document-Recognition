@@ -263,7 +263,7 @@ vm.runInContext(reviewCode + '\nglobalThis.api = { openReview, clearReview, appl
     out.absentNodes = [...removed].every((id) => !nodes[id]);
   } else if (input.action === 'role') {
     context.api.applyRole();
-    out.visible = Object.fromEntries(['accountsBtn', 'databaseBtn', 'usersBtn', 'settingsBtn'].map((id) => [id, !node(id).classList.contains('hidden')]));
+    out.visible = Object.fromEntries(['databaseBtn', 'usersBtn', 'settingsBtn'].map((id) => [id, !node(id).classList.contains('hidden')]));
   } else if (input.action === 'recognize') {
     await context.api.openReview(input.recordId);
     if (input.clearBetween) {
@@ -290,10 +290,8 @@ const end = source.indexOf('  window.addEventListener("hashchange", openFromHash
 if (start < 0 || end < 0) throw new Error('could not locate hash routing function');
 const events = [];
 const location = { hash: '' };
-function openJournal() { events.push({ handler: 'journal' }); }
-function openAccounts() { events.push({ handler: 'accounts' }); }
 function openReview(id) { events.push({ handler: 'review', id }); }
-const context = { events, location, openJournal, openAccounts, openReview };
+const context = { events, location, openReview };
 vm.createContext(context);
 vm.runInContext(source.slice(start, end) + '\nglobalThis.api = { openFromHash };', context);
 for (const hash of input.hashes) { location.hash = hash; context.api.openFromHash(); }
@@ -554,11 +552,16 @@ class ConfirmationFrontendTests(unittest.TestCase):
         admin = self.run_review(action="role", is_admin=True)
         self.assertTrue(all(admin["visible"].values()))
 
-    def test_removed_sysconfig_hash_is_noop_and_supported_hashes_still_route(self):
+    def test_accounts_management_is_removed_from_frontend(self):
+        html = (ROOT / "app" / "static" / "index.html").read_text(encoding="utf-8")
+        self.assertNotIn('id="accountsBtn"', html)
+        self.assertNotIn('id="accountsModal"', html)
+        self.assertNotIn('function openAccounts()', self.source)
+
+    def test_removed_navigation_hashes_are_noop_and_review_still_routes(self):
         events = self.run_hashes(["#sysconfig", "#journal", "#accounts", "#v=47"])
 
         self.assertEqual(events, [
-            {"handler": "accounts"},
             {"handler": "review", "id": 47},
         ])
 

@@ -10,7 +10,6 @@
   <header class="topbar">
     <div class="brand"><span class="logo">憑</span> 憑證辨識系統 </div>
     <div class="spacer"></div>
-    <button id="accountsBtn" class="btn hidden">🧾 科目表</button>
     <button id="databaseBtn" class="btn hidden" onclick="location.href='/database.html'">🗃️ 歷史紀錄</button>
     <button id="usersBtn" class="btn hidden" onclick="location.href='/users.html'">👥 權限管理</button>
     <button id="settingsBtn" class="btn hidden">⚙️ 模型設定</button>
@@ -247,33 +246,6 @@
     </div>
   </div>
 
-  <!-- 科目表 modal -->
-  <div id="accountsModal" class="modal hidden">
-    <div class="modal-box modal-wide">
-      <div class="row-between">
-        <h3>客製會計科目表</h3>
-        <button id="closeAccounts" class="btn btn-sm">關閉</button>
-      </div>
-      <p class="hint">各公司的科目代號不同（如運費：仲彬 6205、實業 6050），故科目表<b>分公司</b>存放。
-        自動分類會依憑證的「歸屬公司」取用對應科目表；該公司未自訂時退回通用表。</p>
-      <label class="acc-company">科目表：
-        <select id="accCompany" class="select select-sm"></select>
-      </label>
-      <p id="accChartSource" class="hint" aria-live="polite"></p>
-      <div class="acc-wrap">
-        <table class="acc-edit">
-          <thead><tr><th>代號</th><th>名稱</th><th>類別</th><th></th></tr></thead>
-          <tbody id="accBody"></tbody>
-        </table>
-      </div>
-      <div class="modal-actions">
-        <button id="accAdd" class="btn btn-sm">＋ 新增科目</button>
-        <div class="spacer"></div>
-        <button id="accSave" class="btn primary">儲存科目表</button>
-      </div>
-    </div>
-  </div>
-
   <!-- 設定 modal -->
   <div id="modal" class="modal hidden">
     <div class="modal-box">
@@ -301,6 +273,6 @@
     <span class="eng-hint" id="engHint"></span>
   </div>
 
-  <script src="/js/app.js?v=20261027-admin-navigation"></script>
+  <script src="/js/app.js?v=20261027-remove-accounts"></script>
 </body>
 </html>
