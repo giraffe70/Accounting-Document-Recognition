@@ -92,7 +92,9 @@ async def auth_guard(request: Request, call_next):
         if not user:
             return JSONResponse({"detail": "未登入"}, status_code=401, headers={"Cache-Control": "no-store"})
         if not user.get("is_admin"):
-            if path == "/api/accounts" and request.method == "POST":
+            if path == "/api/config":
+                return JSONResponse({"detail": "需管理員權限"}, status_code=403)
+            elif path == "/api/accounts" and (request.method != "GET" or "company_id" not in request.query_params):
                 return JSONResponse({"detail": "需管理員權限"}, status_code=403)
             elif path.startswith("/api/backup"):
                 return JSONResponse({"detail": "需管理員權限"}, status_code=403)

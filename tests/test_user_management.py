@@ -39,6 +39,8 @@ def isolated_app():
     app.post("/api/login")(namespace["api_login"])
     app.post("/api/logout")(namespace["api_logout"])
     app.get("/api/me")(namespace["api_me"])
+    app.api_route("/api/config", methods=["GET", "POST"])(lambda: {"ok": True})
+    app.api_route("/api/accounts", methods=["GET", "POST"])(lambda: {"ok": True})
     return app
 
 
@@ -90,6 +92,19 @@ class UserManagementTests(unittest.TestCase):
                     response = self.client.request(method, path, **({"json": payload} if payload else {}))
                     self.assertEqual(response.status_code, success if expected == 200 else expected)
                     self.assertEqual(response.headers["cache-control"], "no-store")
+
+    def test_navigation_settings_authorization_and_shared_chart_read(self):
+        self.add_user("ordinary")
+        for identity, expected in ((None, 401), ("ordinary", 403), ("root", 200)):
+            self.client.cookies.clear()
+            if identity:
+                self.login(identity)
+            for method, path in (("GET", "/api/config"), ("POST", "/api/config"),
+                                 ("GET", "/api/accounts?company=example"), ("POST", "/api/accounts")):
+                with self.subTest(identity=identity, method=method, path=path):
+                    self.assertEqual(self.client.request(method, path).status_code, expected)
+            shared_status = 401 if identity is None else 200
+            self.assertEqual(self.client.get("/api/accounts?company_id=1").status_code, shared_status)
 
     def test_create_user_and_login_returns_safe_identity(self):
         response = self.client.post("/api/users", json={"username": "new-user", "name": "合成人員",

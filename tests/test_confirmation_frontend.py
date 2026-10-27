@@ -263,7 +263,7 @@ vm.runInContext(reviewCode + '\nglobalThis.api = { openReview, clearReview, appl
     out.absentNodes = [...removed].every((id) => !nodes[id]);
   } else if (input.action === 'role') {
     context.api.applyRole();
-    out.visible = Object.fromEntries(['accountsBtn', 'databaseBtn', 'usersBtn'].map((id) => [id, !node(id).classList.contains('hidden')]));
+    out.visible = Object.fromEntries(['accountsBtn', 'databaseBtn', 'usersBtn', 'settingsBtn'].map((id) => [id, !node(id).classList.contains('hidden')]));
   } else if (input.action === 'recognize') {
     await context.api.openReview(input.recordId);
     if (input.clearBetween) {
@@ -558,7 +558,6 @@ class ConfirmationFrontendTests(unittest.TestCase):
         events = self.run_hashes(["#sysconfig", "#journal", "#accounts", "#v=47"])
 
         self.assertEqual(events, [
-            {"handler": "journal"},
             {"handler": "accounts"},
             {"handler": "review", "id": 47},
         ])

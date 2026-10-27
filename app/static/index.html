@@ -10,12 +10,10 @@
   <header class="topbar">
     <div class="brand"><span class="logo">憑</span> 憑證辨識系統 </div>
     <div class="spacer"></div>
-    <button class="btn" onclick="location.href='/validation.html'">🧪 資料集驗證</button>
-    <button id="journalBtn" class="btn">📒 日記帳</button>
-    <button id="accountsBtn" class="btn">🧾 科目表</button>
-    <button id="databaseBtn" class="btn hidden" onclick="location.href='/database.html'">🗃️ 資料庫檢視</button>
+    <button id="accountsBtn" class="btn hidden">🧾 科目表</button>
+    <button id="databaseBtn" class="btn hidden" onclick="location.href='/database.html'">🗃️ 歷史紀錄</button>
     <button id="usersBtn" class="btn hidden" onclick="location.href='/users.html'">👥 權限管理</button>
-    <button id="settingsBtn" class="btn">⚙️ 模型設定</button>
+    <button id="settingsBtn" class="btn hidden">⚙️ 模型設定</button>
     <button id="logoutBtn" class="btn hidden">登出</button>
     <span id="userChip" class="userchip hidden"></span>
   </header>
@@ -233,32 +231,6 @@
       <button id="voucherVersionContinue" class="btn primary">以目前輸入重新儲存</button></div>
   </dialog>
 
-  <!-- 日記帳 modal -->
-  <div id="journalModal" class="modal hidden">
-    <div class="modal-box modal-wide">
-      <div class="row-between">
-        <h3>單月日記帳</h3>
-        <button id="closeJournal" class="btn btn-sm">關閉</button>
-      </div>
-      <div class="journal-toolbar">
-        <label>期別 <select id="journalPeriod" class="select select-sm"></select></label>
-        <label>公司 <input id="journalCompany" class="jc-input" placeholder="全部"></label>
-        <button id="journalRefresh" class="btn btn-sm">查詢</button>
-        <div class="spacer"></div>
-        <button id="btnPrintJournal" class="btn btn-sm">🖨 列印/PDF</button>
-      </div>
-      <div id="journalEmpty" class="hint">選擇期別以檢視日記帳（僅彙整「已確認」的憑證）。</div>
-      <div id="journalWrap" class="journal-wrap hidden">
-        <table class="journal">
-          <thead><tr><th>日期</th><th>憑證號</th><th>摘要</th><th>借方科目</th><th>貸方科目</th><th>借方金額</th><th>貸方金額</th></tr></thead>
-          <tbody id="journalBody"></tbody>
-          <tfoot><tr><td colspan="5">合計</td><td id="journalDebit" class="num"></td><td id="journalCredit" class="num"></td></tr></tfoot>
-        </table>
-        <div id="journalBalance" class="hint"></div>
-      </div>
-    </div>
-  </div>
-
   <!-- 刪除確認 modal -->
   <div id="deleteModal" class="modal hidden">
     <div class="modal-box">
@@ -329,6 +301,6 @@
     <span class="eng-hint" id="engHint"></span>
   </div>
 
-  <script src="/js/app.js?v=20261027-admin-flag"></script>
+  <script src="/js/app.js?v=20261027-admin-navigation"></script>
 </body>
 </html>

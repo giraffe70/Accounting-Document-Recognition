@@ -1452,6 +1452,7 @@
   $("accSave").addEventListener("click", saveAccounts);
 
   async function openAccounts() {
+    if (!isAdminUser()) return;
     const sel = $("accCompany");
     if (!sel.options.length) {
       sel.innerHTML = `<option value="">通用（未指定公司）</option>`
@@ -1506,6 +1507,7 @@
   $("saveSettings").addEventListener("click", saveSettings);
 
   async function openSettings() {
+    if (!isAdminUser()) return;
     const [models, cfg] = await Promise.all([
       (await fetch("/api/models?local_only=true")).json(), (await fetch("/api/config")).json(),
     ]);
@@ -1540,65 +1542,6 @@
     }
   }
 
-  // ── 日記帳 ──
-  $("journalBtn").addEventListener("click", openJournal);
-  $("closeJournal").addEventListener("click", () => $("journalModal").classList.add("hidden"));
-  $("journalRefresh").addEventListener("click", loadJournal);
-  $("journalPeriod").addEventListener("change", loadJournal);
-  let journalData = null;
-
-  async function openJournal() {
-    const company = $("journalCompany").value.trim();
-    const data = await (await fetch("/api/journal/periods" + (company ? `?company=${encodeURIComponent(company)}` : ""))).json();
-    const periods = data.periods || [];
-    $("journalPeriod").innerHTML = periods.length
-      ? periods.map((p) => `<option value="${p}">${p}</option>`).join("")
-      : `<option value="">（無已確認憑證）</option>`;
-    $("journalModal").classList.remove("hidden");
-    if (periods.length) loadJournal(); else showJournal(null);
-  }
-
-  async function loadJournal() {
-    const period = $("journalPeriod").value;
-    if (!period) { showJournal(null); return; }
-    const company = $("journalCompany").value.trim();
-    const url = `/api/journal?period=${encodeURIComponent(period)}` + (company ? `&company=${encodeURIComponent(company)}` : "");
-    journalData = await (await fetch(url)).json();
-    showJournal(journalData);
-  }
-
-  function showJournal(d) {
-    if (!d || !d.rows || !d.rows.length) {
-      $("journalWrap").classList.add("hidden"); $("journalEmpty").classList.remove("hidden");
-      $("journalEmpty").textContent = d ? `此期別尚無可供入帳分錄。未納入 ${d.excluded_count || 0} 張分錄待核對單據。` : "選擇期別以檢視日記帳（辨識已確認且分錄可供入帳）。";
-      return;
-    }
-    $("journalEmpty").classList.add("hidden"); $("journalWrap").classList.remove("hidden");
-    $("journalBody").innerHTML = d.rows.map((r) => `
-      <tr><td>${esc(r.date)}</td><td>${esc(r.voucher_id)}</td><td>${esc(r.summary)}</td>
-        <td>${esc(r.debit_account)}</td><td>${esc(r.credit_account)}</td>
-        <td class="num">${r.debit_amount == null ? "" : nf(r.debit_amount)}</td>
-        <td class="num">${r.credit_amount == null ? "" : nf(r.credit_amount)}</td></tr>`).join("");
-    $("journalDebit").textContent = nf(d.debit_total);
-    $("journalCredit").textContent = nf(d.credit_total);
-    $("journalBalance").innerHTML = `${d.count} 張可供入帳　未納入 ${d.excluded_count || 0} 張分錄待核對單據　` +
-      (d.balance_check ? '<span class="ok">借貸平衡 ✓</span>' : '<span class="bad">未平衡，請人工核對</span>');
-  }
-
-  // ── 列印 / PDF（瀏覽器列印，可另存 PDF）──
-  function printWindow(title, bodyHtml, targetWindow = null) {
-    const w = targetWindow || window.open("", "_blank");
-    w.document.write(`<!DOCTYPE html><html lang="zh-TW"><head><meta charset="UTF-8"><title>${esc(title)}</title>
-      <style>body{font-family:"Microsoft JhengHei",sans-serif;padding:24px;color:#1f2328;}
-      h1{font-size:20px;margin-bottom:4px;} .meta{color:#636c76;font-size:12px;margin-bottom:16px;}
-      table{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:10px;}
-      th,td{border:1px solid #999;padding:5px 8px;text-align:left;} th{background:#eee;}
-      .num{text-align:right;} .kv td{border:none;padding:2px 8px;}
-      tfoot td{font-weight:700;background:#f3f3f3;} pre.audit{white-space:pre-wrap;overflow-wrap:anywhere;font-size:10.5px;}</style></head><body>${bodyHtml}
-      <script>window.onload=function(){window.print();}<\/script></body></html>`);
-    w.document.close();
-  }
-
   async function printVoucher() {
     if (!recognitionReady || recognitionDirty || editBusy) { alert("請先儲存並確認目前內容，再列印報告"); return; }
     const id = currentId, version = currentVersion;
@@ -1618,20 +1561,8 @@
   }
   $("btnPrintVoucher").addEventListener("click", printVoucher);
 
-  $("btnPrintJournal").addEventListener("click", () => {
-    if (!journalData || !journalData.rows || !journalData.rows.length) { alert("無資料可列印"); return; }
-    const rows = journalData.rows.map((r) => `<tr><td>${esc(r.date)}</td><td>${esc(r.voucher_id)}</td><td>${esc(r.summary)}</td><td>${esc(r.debit_account)}</td><td>${esc(r.credit_account)}</td><td class="num">${r.debit_amount == null ? "" : nf(r.debit_amount)}</td><td class="num">${r.credit_amount == null ? "" : nf(r.credit_amount)}</td><td>${esc(r.amount_source)}</td><td>${esc((r.evidence_paths || []).join("、"))}</td><td>${esc(r.payment_state == null ? "" : JSON.stringify(r.payment_state))}</td></tr>`).join("");
-    printWindow(`日記帳 ${journalData.period}`, `
-      <h1>單月日記帳　${esc(journalData.period)}</h1>
-      <div class="meta">${journalData.company ? "公司 " + esc(journalData.company) + "　" : ""}${journalData.count} 張可供入帳憑證；未納入 ${journalData.excluded_count || 0} 張分錄待核對單據</div>
-      <table><thead><tr><th>日期</th><th>憑證號</th><th>摘要</th><th>借方科目</th><th>貸方科目</th><th>借方金額</th><th>貸方金額</th><th>主要金額來源</th><th>輔助證據路徑</th><th>付款狀態</th></tr></thead>
-      <tbody>${rows}</tbody>
-      <tfoot><tr><td colspan="5">合計</td><td class="num">${nf(journalData.debit_total)}</td><td class="num">${nf(journalData.credit_total)}</td><td></td></tr></tfoot></table>`);
-  });
-
   // 深連結：#v=<id> 自動開啟該筆審核
   function openFromHash() {
-    if (/journal/.test(location.hash)) { openJournal(); return; }
     if (/accounts/.test(location.hash)) { openAccounts(); return; }
     const m = location.hash.match(/v=(\d+)/);
     if (m) openReview(Number(m[1]));
@@ -1659,6 +1590,7 @@
     $("accountsBtn").classList.toggle("hidden", !canAdmin);
     $("databaseBtn").classList.toggle("hidden", !canAdmin);
     $("usersBtn").classList.toggle("hidden", !canAdmin);
+    $("settingsBtn").classList.toggle("hidden", !canAdmin);
   }
 
   async function enterApp() {

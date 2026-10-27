@@ -17,7 +17,7 @@ const vm = require('vm');
 const input = JSON.parse(fs.readFileSync(0, 'utf8'));
 const source = input.source;
 const start = source.indexOf('  $("settingsBtn").addEventListener("click", openSettings)');
-const end = source.indexOf('  // ── 日記帳 ──', start);
+const end = source.indexOf('  async function printVoucher()', start);
 if (start < 0 || end < 0) throw new Error('could not locate settings modal functions');
 
 const events = [], requests = [], nodes = {};
@@ -57,7 +57,8 @@ async function fetch(url, options = {}) {
   return { ok: input.postOk !== false, status: input.postStatus || 500, json: async () => input.postBody || { detail: 'server rejected config' } };
 }
 
-const context = vm.createContext({ console, input, events, requests, nodes, $, modal, esc, json, responseError, alert, fetch });
+const isAdminUser = () => input.isAdmin !== false;
+const context = vm.createContext({ console, input, events, requests, nodes, $, modal, esc, json, responseError, alert, fetch, isAdminUser });
 vm.runInContext(source.slice(start, end) + '\nglobalThis.api = { openSettings, fillSelect, saveSettings };', context);
 (async () => {
   await context.api.openSettings();
@@ -101,6 +102,11 @@ class ModelSettingsFrontendTests(unittest.TestCase):
             "structure": ["ollama/local-vlm", "h200/remote-vlm", "google/cloud-vlm"],
             "classify": ["ollama/local-llm", "openai/cloud-llm"],
         }
+
+    def test_non_admin_cannot_open_settings(self):
+        result = self.run_settings(isAdmin=False)
+        self.assertFalse(result["modalOpen"])
+        self.assertEqual(result["requests"], [])
 
     def test_open_requests_local_models_and_shows_only_local_options(self):
         result = self.run_settings(
