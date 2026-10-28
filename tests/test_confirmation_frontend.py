@@ -330,6 +330,7 @@ DELETE_HARNESS = r"""
 const fs = require('fs');
 const vm = require('vm');
 const input = JSON.parse(fs.readFileSync(0, 'utf8'));
+input.previewResolvers = [];
 const source = input.source;
 const start = source.indexOf('  function isAdminUser()');
 const end = source.indexOf('  $("btnDelete").addEventListener', start);
@@ -345,37 +346,63 @@ const document = {
   querySelector: () => (input.scope ? { value: input.scope } : checked),
   querySelectorAll: () => [],
 };
-let currentId = 12, editBusy = false;
+let currentId = 12, currentVersion = input.currentVersion || 'opened-version', editBusy = false;
 const currentUser = { is_admin: true };
 const esc = (s) => (s == null ? '' : String(s));
 const errText = (d, fallback) => (d && d.detail) || fallback;
 const $ = (id) => node(id);
 function alert(message) { events.push({ type: 'alert', message }); }
 function toast(message) { events.push({ type: 'toast', message }); }
-function clearReview() { events.push({ type: 'clearReview' }); currentId = null; }
+function clearReview() { events.push({ type: 'clearReview', editBusy: runtimeContext.editBusy }); currentId = null; }
 function loadList() { events.push({ type: 'loadList' }); }
 function refreshStats() { events.push({ type: 'refreshStats' }); }
+async function restoreImportJobs() { events.push({ type: 'restoreImportJobs', editBusy: runtimeContext.editBusy }); }
+let runtimeContext;
+let previewRequest = 0;
 async function fetch(url, options = {}) {
   requests.push({ url, method: options.method || 'GET' });
   if (options.method === 'DELETE') {
+    events.push({ type: 'deleteStarted', editBusy: runtimeContext.editBusy, cancelDisabled: node('deleteCancel').disabled,
+      confirmDisabled: node('deleteConfirm').disabled });
     const status = input.deleteStatus || 200;
     return { ok: status < 300, status, json: async () => input.deleteBody || { ok: true, deleted_ids: [12] } };
   }
-  return { ok: true, status: 200, json: async () => input.data };
+  const previewIndex = previewRequest++;
+  if (input.deferPreview) await new Promise((resolve) => { input.previewResolvers[previewIndex] = resolve; });
+  return { ok: true, status: 200, json: async () => (input.previewData && input.previewData[previewIndex]) || input.data };
 }
 const context = { events, requests, document, $, esc, errText, alert, toast, clearReview, loadList, refreshStats, fetch, input,
-  get currentId() { return currentId; }, set currentId(v) { currentId = v; }, editBusy, currentUser, console };
+  restoreImportJobs, get currentId() { return currentId; }, set currentId(v) { currentId = v; },
+  get currentVersion() { return currentVersion; }, set currentVersion(v) { currentVersion = v; }, editBusy, currentUser, console };
+runtimeContext = context;
 vm.createContext(context);
 vm.runInContext(source.slice(start, end) + '\nglobalThis.api = { deleteChoices, openDelete, confirmDelete, closeDeleteModal };', context);
 (async () => {
   const out = {};
   if (input.action === 'choices') out.choices = context.api.deleteChoices(input.data);
+  else if (input.action === 'cancelDuringPreview' || input.action === 'changeDuringPreview') {
+    const pending = context.api.openDelete();
+    if (input.action === 'cancelDuringPreview') context.api.closeDeleteModal();
+    else { context.currentId = input.nextId || 13; context.currentVersion = input.nextVersion || 'new-version'; }
+    input.previewResolvers[0]();
+    await pending;
+  } else if (input.action === 'supersedePreview') {
+    const older = context.api.openDelete();
+    const newer = context.api.openDelete();
+    input.previewResolvers[1]();
+    await newer;
+    input.previewResolvers[0]();
+    await older;
+  }
   else {
     await context.api.openDelete();
+    if (input.afterOpenVersion) context.currentVersion = input.afterOpenVersion;
     if (input.action === 'cancel') context.api.closeDeleteModal();
     if (input.action === 'confirm') await context.api.confirmDelete();
+    if (input.action === 'confirmTwice') await Promise.all([context.api.confirmDelete(), context.api.confirmDelete()]);
   }
-  out.events = events; out.requests = requests;
+  out.events = events; out.requests = requests; out.choicesHtml = node('deleteChoices').innerHTML; out.currentId = currentId;
+  out.editBusy = editBusy; out.cancelDisabled = node('deleteCancel').disabled; out.confirmDisabled = node('deleteConfirm').disabled;
   out.modalOpen = !node('deleteModal').classList.contains('hidden');
   process.stdout.write(JSON.stringify(out));
 })().catch((e) => { console.error(e.stack || e); process.exit(1); });
@@ -571,6 +598,20 @@ class ConfirmationFrontendTests(unittest.TestCase):
 
         pending = self.run_review(action="open", recordId=12, records={"12": self.review_record()})
         self.assertEqual(pending["hiddenTools"], {"btnReRecognize": False, "btnRestore": True})
+
+    def test_appearance_confirmation_does_not_require_direction_checkbox(self):
+        html = APP_HTML.read_text(encoding="utf-8")
+        self.assertNotIn('id="directionConfirmed"', html)
+        self.assertIn("調整方向、微調或裁切後，按「確認外觀」即可加入掃描清單", html)
+
+        start = self.source.index("  async function confirmAppearance()")
+        end = self.source.index('  $("btnReRecognize").addEventListener', start)
+        appearance = self.source[start:end]
+        self.assertNotIn("directionConfirmed", appearance)
+        self.assertNotIn("direction_confirmed", appearance)
+        self.assertIn('expected_updated_at:currentVersion', appearance)
+        self.assertIn('document_mode:"single"', appearance)
+        self.assertNotIn("請先確認目前影像方向正確", self.source)
 
     def test_appearance_toolbar_has_one_crop_and_no_split_or_page_mode(self):
         html = APP_HTML.read_text(encoding="utf-8")
@@ -792,6 +833,19 @@ process.stdout.write(JSON.stringify(input.cases.map(([dx, dy]) => context.f(dx, 
         warning = self.run_delete("choices", data=admin)["choices"][1]["warning"]
         self.assertIn("日記帳與報表", warning)
 
+    def test_importing_page_is_the_only_choice_and_carries_page_metadata(self):
+        page = self.preview([12], sources=1)
+        page.update(page_no=3, blocked_reason="此頁已確認")
+        data = {"previews": {"page": page, "record": self.preview([12]), "upload": self.preview([10, 12])},
+                "can_delete": {"page": False, "record": True, "upload": True}}
+        choices = self.run_delete("choices", data=data)["choices"]
+        self.assertEqual([c["scope"] for c in choices], ["page"])
+        self.assertEqual(choices[0]["label"], "刪除此頁（第 3 頁）")
+        self.assertEqual(choices[0]["blockedReason"], "此頁已確認")
+        opened = self.run_delete("open", data=data)
+        self.assertIn('value="page" checked disabled', opened["choicesHtml"])
+        self.assertIn("此頁已確認", opened["choicesHtml"])
+
     def test_delete_flow_cancel_failure_and_success(self):
         data = {"previews": {"record": self.preview([12]), "upload": self.preview([11, 12], sources=1)},
                 "can_delete": {"record": True, "upload": True}, "busy": False, "ok": True}
@@ -813,6 +867,14 @@ process.stdout.write(JSON.stringify(input.cases.map(([dx, dy]) => context.f(dx, 
         self.assertTrue(any(e["type"] == "alert" and "只有管理員" in e["message"] for e in failed["events"]))
         self.assertFalse(any(e["type"] in {"clearReview", "loadList", "toast"} for e in failed["events"]))
         self.assertTrue(failed["modalOpen"])
+        self.assertEqual(failed["currentId"], 12)
+        started = next(e for e in failed["events"] if e["type"] == "deleteStarted")
+        self.assertTrue(started["editBusy"])
+        self.assertTrue(started["cancelDisabled"])
+        self.assertTrue(started["confirmDisabled"])
+        self.assertFalse(failed["editBusy"])
+        self.assertFalse(failed["cancelDisabled"])
+        self.assertFalse(failed["confirmDisabled"])
 
         done = self.run_delete("confirm", data=data, scope="upload",
                                deleteBody={"ok": True, "deleted_ids": [11, 12], "cleanup_failed": ["locked"]})
@@ -824,12 +886,60 @@ process.stdout.write(JSON.stringify(input.cases.map(([dx, dy]) => context.f(dx, 
         self.assertTrue(any(e["type"] == "alert" and "locked" in e["message"] for e in done["events"]))
         self.assertFalse(done["modalOpen"])
 
+    def test_late_preview_is_ignored_after_cancel_or_page_change(self):
+        data = {"previews": {"record": self.preview([12])}, "can_delete": {"record": True}, "busy": False}
+        cancelled = self.run_delete("cancelDuringPreview", data=data, deferPreview=True)
+        self.assertFalse(cancelled["modalOpen"])
+        self.assertFalse(any(e["type"] == "alert" for e in cancelled["events"]))
+        self.assertEqual(cancelled["choicesHtml"], "")
+
+        for change in ({"nextId": 13}, {"nextVersion": "updated-version"}):
+            with self.subTest(change=change):
+                stale = self.run_delete("changeDuringPreview", data=data, deferPreview=True, **change)
+                self.assertFalse(stale["modalOpen"])
+                self.assertFalse(any(e["type"] == "alert" for e in stale["events"]))
+                self.assertEqual(stale["choicesHtml"], "")
+
+        older_data = {"previews": {"record": self.preview([12], vouchers=1)}, "can_delete": {"record": True}}
+        newer_data = {"previews": {"record": self.preview([12], vouchers=2)}, "can_delete": {"record": True}}
+        superseded = self.run_delete("supersedePreview", data=data, deferPreview=True,
+                                     previewData=[older_data, newer_data])
+        self.assertTrue(superseded["modalOpen"])
+        self.assertIn("2 張單據", superseded["choicesHtml"])
+        self.assertNotIn("1 張單據", superseded["choicesHtml"])
+
+    def test_page_delete_uses_opened_version_and_restores_import_before_refresh(self):
+        page = self.preview([12], sources=1)
+        page.update(page_no=2, blocked_reason="")
+        data = {"previews": {"page": page}, "can_delete": {"page": True}, "busy": False}
+        done = self.run_delete("confirm", data=data, scope="page", currentVersion="version /+中文",
+                               afterOpenVersion="changed-after-open",
+                               deleteBody={"ok": True, "deleted_ids": [12]})
+        self.assertEqual(done["requests"][-1]["url"],
+                         "/api/vouchers/12?scope=page&expected_updated_at=version%20%2F%2B%E4%B8%AD%E6%96%87")
+        types = [e["type"] for e in done["events"]]
+        self.assertLess(types.index("restoreImportJobs"), types.index("loadList"))
+        self.assertIn("clearReview", types)
+        self.assertTrue(next(e for e in done["events"] if e["type"] == "clearReview")["editBusy"])
+        self.assertFalse(next(e for e in done["events"] if e["type"] == "restoreImportJobs")["editBusy"])
+        self.assertFalse(done["editBusy"])
+        self.assertFalse(done["cancelDisabled"])
+        general = self.run_delete("confirm", data={"previews": {"record": self.preview([12])},
+                                                    "can_delete": {"record": True}, "busy": False})
+        self.assertNotIn("restoreImportJobs", [e["type"] for e in general["events"]])
+
+    def test_duplicate_confirm_does_not_send_duplicate_delete(self):
+        data = {"previews": {"record": self.preview([12])}, "can_delete": {"record": True}, "busy": False}
+        done = self.run_delete("confirmTwice", data=data)
+        self.assertEqual(sum(r["method"] == "DELETE" for r in done["requests"]), 1)
+
     def test_delete_button_and_modal_markup_exist(self):
         html = APP_HTML.read_text(encoding="utf-8")
         for marker in ('id="btnDelete"', 'id="deleteModal"', 'id="deleteChoices"', 'id="deleteConfirm"'):
             self.assertIn(marker, html)
         tag_start = html.index('id="btnDelete"')
         self.assertIn('class="btn btn-sm danger"', html[tag_start:html.index(">", tag_start)])
+        self.assertIn('title="預覽並確認刪除範圍"', html[tag_start:html.index(">", tag_start)])
         self.assertIn('status === "confirmed" && !isAdminUser()', self.source)
 
     def test_scan_source_directory_is_hidden_and_file_picker_remains(self):

@@ -35,6 +35,10 @@ class SequentialImportTests(unittest.TestCase):
         self.upload_patch = patch.object(review.config, "UPLOAD_DIR", self.root / "uploads")
         self.upload_patch.start()
         self.addCleanup(self.upload_patch.stop)
+        for name, path in (("DATA_DIR", self.root / "data"), ("LOG_DIR", self.root / "logs")):
+            patcher = patch.object(review.config, name, path)
+            patcher.start()
+            self.addCleanup(patcher.stop)
         self.addCleanup(self.review_session_patch.stop)
         self.addCleanup(self.session_patch.stop)
         self.addCleanup(self.engine.dispose)
@@ -446,6 +450,229 @@ class SequentialImportTests(unittest.TestCase):
         self.assertEqual(source.read_bytes(), original_bytes)
         self.assertEqual(self._rows(VoucherRecord), [])
         self.assertTrue(self._create("after-legacy-cancel.pdf", owner=1)["id"])
+
+    @contextmanager
+    def _deletable_pdf(self, count=3):
+        """Exercise real PDF rendering and manual preparation, with no models."""
+        upload = review.config.UPLOAD_DIR
+        upload.mkdir(parents=True, exist_ok=True)
+        pdf = upload / ("a" * 32 + ".pdf")
+        images = [Image.new("RGB", (40, 50), (240 - n, 250, 255)) for n in range(count)]
+        images[0].save(pdf, "PDF", save_all=True, append_images=images[1:])
+        with self.engine.connect() as connection:
+            connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+        with patch.object(model_factory, "get_ocr", side_effect=AssertionError("OCR called")), \
+             patch.object(model_factory, "get_chat_model", side_effect=AssertionError("model called")):
+            job = import_jobs.create_job([{"path": str(pdf), "name": "synthetic.pdf"}], 1)
+            self.assertTrue(import_jobs.run_once())
+            yield job["id"], pdf
+
+    def _current_delete_record(self, job_id):
+        view = import_jobs.get_job(job_id, 1)
+        return review.get_voucher(view["review_ids"][0])
+
+    def _delete_page(self, rec, **kwargs):
+        return review.delete_vouchers(rec.id, "page", actor_id=1,
+                                      expected_updated_at=rec.updated_at.isoformat(), **kwargs)
+
+    def test_delete_every_pdf_page_advances_and_unlocks_upload_without_recreating_pages(self):
+        with self._deletable_pdf() as (job_id, pdf):
+            original_pdf = pdf.read_bytes()
+            for page_no in range(1, 4):
+                rec = self._current_delete_record(job_id)
+                preview = review.delete_previews(rec.id, actor_id=1)
+                self.assertEqual(list(preview["previews"]), ["page"])
+                info = preview["previews"]["page"]
+                self.assertEqual((info["page_no"], info["voucher_count"], info["source_page_count"]),
+                                 (page_no, 1, 1))
+                self.assertEqual(preview["can_delete"], {"page": True})
+                images = [review.config.UPLOAD_DIR / review.get_voucher(ident).image_path for ident in info["ids"]]
+                token = json.loads(rec.current_json)["origin"]["source_token"]
+                with patch.object(import_jobs._wake, "set") as wake:
+                    result = self._delete_page(rec)
+                    wake.assert_called_once()
+                self.assertEqual(result["deleted_ids"], info["ids"])
+                self.assertFalse(result["cleanup_failed"])
+                self.assertTrue(all(not path.exists() for path in images))
+                self.assertFalse((review.config.UPLOAD_DIR / "_pages" / token).exists())
+                view = import_jobs.get_job(job_id, 1)
+                deleted_page = view["pages"][page_no - 1]
+                self.assertEqual((deleted_page["status"], deleted_page["phase"]), ("completed", "discarded"))
+                self.assertIsNone(deleted_page["source_page_id"])
+                self.assertIsNone(deleted_page["preview_url"])
+                self.assertEqual(deleted_page["voucher_ids"], [])
+                if page_no < 3:
+                    self.assertEqual(view["status"], "queued")
+                    self.assertEqual(pdf.read_bytes(), original_pdf)
+                    self.assertTrue(import_jobs.run_once())
+                    import_jobs.recover_interrupted()
+                    self.assertEqual(import_jobs.get_job(job_id, 1)["current_page"], page_no + 1)
+                else:
+                    self.assertEqual(view["status"], "completed")
+                    self.assertFalse(view["blocks_upload"])
+                    self.assertFalse(pdf.exists())
+            import_jobs.recover_interrupted()
+            self.assertFalse(import_jobs.run_once())
+            self.assertEqual(self._rows(VoucherRecord), [])
+            self.assertTrue(self._create("next-upload.pdf")["id"])
+
+    def test_delete_middle_and_last_page_preserves_kept_page_and_other_records(self):
+        with self._deletable_pdf() as (job_id, pdf):
+            original_pdf = pdf.read_bytes()
+            kept = self._current_delete_record(job_id)
+            kept_image = review.config.UPLOAD_DIR / kept.image_path
+            original_image = kept_image.read_bytes()
+            unrelated = Voucher(doc_type_key="receipt", source_image=str(kept_image), source_file="other.png")
+            other = review.save_voucher(unrelated)
+            review.confirm_appearance(kept.id, expected_updated_at=kept.updated_at.isoformat(),
+                                      direction_confirmed=True, actor={"id": 1})
+            self.assertTrue(import_jobs.run_once())
+            self._delete_page(self._current_delete_record(job_id))
+            self.assertEqual(pdf.read_bytes(), original_pdf)
+            self.assertTrue(import_jobs.run_once())
+            self._delete_page(self._current_delete_record(job_id))
+            self.assertEqual(import_jobs.get_job(job_id, 1)["status"], "completed")
+            self.assertEqual(review.get_voucher(kept.id).status, ReviewStatus.queued)
+            self.assertIsNotNone(review.get_voucher(other.id))
+            self.assertEqual(kept_image.read_bytes(), original_image)
+            self.assertEqual(pdf.read_bytes(), original_pdf)
+            restored = review.delete_previews(kept.id, actor_id=1)
+            self.assertEqual(list(restored["previews"]), ["record", "upload"])
+
+    def test_page_delete_api_guards_agree_with_preview(self):
+        from types import SimpleNamespace
+        from fastapi.responses import JSONResponse
+        from tests.test_confirmation_workflow import _load_endpoint
+        busy = [False]
+        users = {"owner": {"id": 1}, "other": {"id": 2, "is_admin": True}}
+        namespace = {"review": review, "JSONResponse": JSONResponse,
+                     "auth": SimpleNamespace(get_user_by_token=lambda token: users.get(token)),
+                     "_delete_busy": lambda: busy[0]}
+        preview = _load_endpoint("api_delete_preview", dict(namespace))
+        delete = _load_endpoint("api_delete", dict(namespace))
+        request = lambda token: SimpleNamespace(cookies={"session": token})
+        with self._deletable_pdf() as (job_id, pdf):
+            rec = self._current_delete_record(job_id)
+            version = rec.updated_at.isoformat()
+            self.assertTrue(preview(request("owner"), rec.id)["can_delete"]["page"])
+            blocked = preview(request("other"), rec.id)
+            self.assertFalse(blocked["can_delete"]["page"])
+            self.assertIn("只有", blocked["previews"]["page"]["blocked_reason"])
+            self.assertEqual(delete(request("other"), rec.id, "page", version).status_code, 403)
+            self.assertEqual(delete(request("owner"), rec.id, "page").status_code, 422)
+            self.assertEqual(delete(request("owner"), rec.id, "page", "old-version").status_code, 409)
+            for scope in ("record", "upload"):
+                self.assertFalse(preview(request("owner"), rec.id, scope)["can_delete"][scope])
+                self.assertEqual(delete(request("owner"), rec.id, scope).status_code, 403)
+            busy[0] = True
+            self.assertFalse(preview(request("owner"), rec.id)["can_delete"]["page"])
+            self.assertEqual(delete(request("owner"), rec.id, "page", version).status_code, 409)
+            busy[0] = False
+            for status in ("queued", "running", "interrupted", "failed", "cancelled"):
+                with Session(self.engine) as session:
+                    job = session.get(ImportJob, job_id)
+                    job.status = status
+                    session.add(job)
+                    session.commit()
+                self.assertFalse(preview(request("owner"), rec.id, "page")["can_delete"]["page"])
+                self.assertEqual(delete(request("owner"), rec.id, "page", version).status_code, 409)
+            with Session(self.engine) as session:
+                job = session.get(ImportJob, job_id)
+                job.status = "awaiting_review"
+                session.add(job)
+                session.commit()
+            self.assertEqual(review.get_voucher(rec.id).updated_at.isoformat(), version)
+            self.assertTrue(pdf.exists())
+            result = delete(request("owner"), rec.id, "page", version)
+            self.assertTrue(result["ok"])
+            self.assertEqual(delete(request("owner"), rec.id, "page", version).status_code, 404)
+            self.assertTrue(import_jobs.run_once())
+            # SQLite may reuse this ID for the next page; the old version still cannot delete it.
+            self.assertEqual(delete(request("owner"), rec.id, "page", version).status_code, 409)
+            self.assertEqual(import_jobs.get_job(job_id, 1)["current_page"], 2)
+
+    def test_page_delete_is_atomic_when_commit_fails(self):
+        with self._deletable_pdf() as (job_id, pdf):
+            rec = self._current_delete_record(job_id)
+            before = import_jobs.get_job(job_id, 1)
+            image = review.config.UPLOAD_DIR / rec.image_path
+            with patch.object(Session, "commit", side_effect=RuntimeError("commit failed")), \
+                 patch.object(review, "_cleanup_deleted_files") as cleanup, \
+                 patch.object(import_jobs._wake, "set") as wake:
+                with self.assertRaisesRegex(RuntimeError, "commit failed"):
+                    self._delete_page(rec)
+                cleanup.assert_not_called()
+                wake.assert_not_called()
+            self.assertEqual(import_jobs.get_job(job_id, 1), before)
+            self.assertIsNotNone(review.get_voucher(rec.id))
+            self.assertTrue(pdf.exists() and image.exists())
+
+    def test_noncurrent_or_already_confirmed_page_cannot_be_deleted(self):
+        with self._deletable_pdf(count=2) as (job_id, pdf):
+            current = self._current_delete_record(job_id)
+            future = next(page for page in self._rows(ImportPage) if page.page_no == 2)
+            origin = {"source_token": future.source_token, "import_job_id": job_id,
+                      "import_page_id": future.id, "preparation": preparation.fresh()}
+            vouchers = [Voucher(origin={**origin, "record_role": "source_page"}), Voucher(origin=origin)]
+            for voucher in vouchers:
+                voucher.source_image = str(review.config.UPLOAD_DIR / current.image_path)
+            with Session(self.engine) as session:
+                records = review.save_prepared_page(vouchers, "", session)
+                page = session.get(ImportPage, future.id)
+                page.status, page.phase = "preview_ready", "awaiting_review"
+                page.source_page_id = records[0].id
+                page.voucher_ids_json = json.dumps([records[1].id])
+                session.add(page)
+                session.commit()
+                future_id = records[1].id
+            future_rec = review.get_voucher(future_id)
+            preview = review.delete_previews(future_id, actor_id=1)
+            self.assertFalse(preview["can_delete"]["page"])
+            with self.assertRaises(review.DeleteConflict):
+                self._delete_page(future_rec)
+            with Session(self.engine) as session:
+                rec = session.get(VoucherRecord, current.id)
+                rec.status = ReviewStatus.queued
+                session.add(rec)
+                session.commit()
+            self.assertFalse(review.delete_previews(current.id, actor_id=1)["can_delete"]["page"])
+            with self.assertRaises(review.DeleteConflict):
+                self._delete_page(current)
+            self.assertEqual(import_jobs.get_job(job_id, 1)["current_page"], 1)
+            self.assertIsNotNone(review.get_voucher(future_id))
+
+    def test_page_cleanup_preserves_files_when_worker_reuses_deleted_record_ids(self):
+        with self._deletable_pdf(count=2) as (job_id, pdf):
+            rec = self._current_delete_record(job_id)
+            old_token = json.loads(rec.current_json)["origin"]["source_token"]
+            cleanup = review._cleanup_deleted_files
+            def advance_before_cleanup(deleted):
+                self.assertTrue(import_jobs.run_once())
+                return cleanup(deleted)
+            with patch.object(review, "_cleanup_deleted_files", side_effect=advance_before_cleanup):
+                result = self._delete_page(rec)
+            self.assertFalse(result["cleanup_failed"])
+            next_rec = self._current_delete_record(job_id)
+            self.assertEqual(next_rec.id, rec.id)
+            self.assertTrue((review.config.UPLOAD_DIR / next_rec.image_path).is_file())
+            self.assertTrue(pdf.is_file())
+            self.assertFalse((review.config.UPLOAD_DIR / "_pages" / old_token).exists())
+
+    def test_page_scope_includes_all_derived_documents_and_preserves_confirmed_permissions(self):
+        with self._deletable_pdf(count=1) as (job_id, pdf):
+            rec = self._current_delete_record(job_id)
+            sibling_data = Voucher.model_validate(json.loads(rec.current_json))
+            sibling_data.source_image = str(review.config.UPLOAD_DIR / rec.image_path)
+            sibling = review.save_voucher(sibling_data, status=ReviewStatus.confirmed,
+                                          source_parent_id=rec.source_parent_id)
+            preview = review.delete_previews(rec.id, actor_id=1)
+            self.assertEqual(preview["previews"]["page"]["voucher_count"], 2)
+            self.assertFalse(preview["can_delete"]["page"])
+            with self.assertRaises(review.DeleteForbidden):
+                self._delete_page(rec)
+            result = self._delete_page(rec, is_admin=True)
+            self.assertEqual(result["deleted_ids"], sorted([rec.id, rec.source_parent_id, sibling.id]))
+            self.assertEqual(import_jobs.get_job(job_id, 1)["status"], "completed")
 
 
 if __name__ == "__main__":

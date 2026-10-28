@@ -531,21 +531,24 @@ def _delete_busy() -> bool:
 
 @app.get("/api/vouchers/{rec_id}/delete-preview")
 def api_delete_preview(request: Request, rec_id: int, scope: str = ""):
-    """刪除前預覽影響範圍（scope 省略時回傳 record 與 upload 兩種）。"""
-    scopes = [scope] if scope else list(review.DELETE_SCOPES)
-    if any(item not in review.DELETE_SCOPES for item in scopes):
+    """逐頁匯入期間提供 page；其餘沿用 record 與 upload。"""
+    if scope and scope not in review.DELETE_SCOPES:
         return JSONResponse({"detail": "刪除範圍不合法"}, status_code=422)
-    previews = {item: review.delete_preview(rec_id, item) for item in scopes}
-    if any(preview is None for preview in previews.values()):
+    user = auth.get_user_by_token(request.cookies.get("session")) or {}
+    is_admin = bool(user.get("is_admin"))
+    busy = _delete_busy()
+    try:
+        result = review.delete_previews(rec_id, scope, is_admin=is_admin, actor_id=user.get("id"), busy=busy)
+    except review.DeleteConflict as exc:
+        return JSONResponse({"ok": False, "detail": str(exc)}, status_code=409)
+    if result is None:
         return JSONResponse({"detail": "查無此紀錄"}, status_code=404)
-    is_admin = bool((auth.get_user_by_token(request.cookies.get("session")) or {}).get("is_admin"))
-    return {"ok": True, "is_admin": is_admin, "busy": _delete_busy(), "previews": previews,
-            "can_delete": {item: is_admin or not preview["requires_admin"] for item, preview in previews.items()}}
+    return {"ok": True, "is_admin": is_admin, "busy": busy, **result}
 
 
 @app.delete("/api/vouchers/{rec_id}")
-def api_delete(request: Request, rec_id: int, scope: str = "record"):
-    """刪除單據（record）或整份上傳檔（upload）。已確認憑證僅管理員可刪。"""
+def api_delete(request: Request, rec_id: int, scope: str = "record", expected_updated_at: str = ""):
+    """刪除單據、整份上傳檔或目前待確認頁面。"""
     if scope not in review.DELETE_SCOPES:
         return JSONResponse({"detail": "刪除範圍不合法"}, status_code=422)
     if _delete_busy():
@@ -553,9 +556,14 @@ def api_delete(request: Request, rec_id: int, scope: str = "record"):
     user = auth.get_user_by_token(request.cookies.get("session")) or {}
     try:
         result = review.delete_vouchers(rec_id, scope, is_admin=bool(user.get("is_admin")),
-                                        actor=user.get("username", ""))
+                                        actor=user.get("username", ""), actor_id=user.get("id"),
+                                        expected_updated_at=expected_updated_at)
     except review.DeleteForbidden as exc:
         return JSONResponse({"ok": False, "detail": str(exc)}, status_code=403)
+    except review.DeleteConflict as exc:
+        return JSONResponse({"ok": False, "detail": str(exc)}, status_code=409)
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "detail": str(exc)}, status_code=422)
     return result or JSONResponse({"detail": "查無此紀錄"}, status_code=404)
 
 

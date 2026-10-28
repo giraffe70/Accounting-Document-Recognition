@@ -436,7 +436,7 @@ def check_review_turn(session, rec, actor_id=None):
         raise JobConflict("請先完成目前頁面的外觀確認")
 
 
-def mark_review_complete(session, rec):
+def mark_review_complete(session, rec, *, wake=True):
     origin = json.loads(rec.current_json).get("origin") or {}
     page = session.get(ImportPage, origin.get("import_page_id", ""))
     if page is None or page.status != "preview_ready":
@@ -451,8 +451,10 @@ def mark_review_complete(session, rec):
         if page.status == "completed":
             state = "awaiting_review" if any(p.status == "preview_ready" for p in other) else "partial_failed" if any(p.status == "failed" for p in other) else "queued" if any(p.status == "queued" for p in other) else "completed"
             job.status, job.phase = state, state
+            job.updated_at = utc_now()
             session.add(job)
-            _wake.set()
+            if wake:
+                _wake.set()
     elif job and job.status == "awaiting_review" and all(p.status in ("completed","failed") for p in other):
         job.status, job.phase = "completed", "completed"
         session.add(job)

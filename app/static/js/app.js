@@ -424,41 +424,55 @@
       const warning = !preview.confirmed_count ? ""
         : allowed ? "含已確認的憑證：刪除後日記帳與報表將不再包含它們。"
           : "含已確認的憑證，只有管理員可以刪除。";
-      choices.push({ scope, label, summary: deleteScopeText(preview), allowed, warning });
+      choices.push({ scope, label, summary: deleteScopeText(preview), allowed, warning,
+        blockedReason: preview.blocked_reason || "" });
     };
-    if (previews.record) add("record", "只刪除此單據", previews.record);
-    if (previews.upload && previews.record && previews.upload.ids.length > previews.record.ids.length) {
+    if (previews.page) {
+      add("page", `刪除此頁（第 ${previews.page.page_no} 頁）`, previews.page);
+    } else if (previews.record) add("record", "只刪除此單據", previews.record);
+    if (!previews.page && previews.upload && previews.record && previews.upload.ids.length > previews.record.ids.length) {
       add("upload", "刪除整份上傳檔", previews.upload);
     }
     return choices;
   }
   let deleteTargetId = null;
+  let deleteTargetVersion = null;
   let deleteChoiceList = [];
-  function closeDeleteModal() { $("deleteModal").classList.add("hidden"); deleteTargetId = null; deleteChoiceList = []; }
+  let deleteSubmitting = false;
+  let deletePreviewGeneration = 0;
+  function closeDeleteModal() {
+    if (deleteSubmitting) return;
+    deletePreviewGeneration++;
+    $("deleteModal").classList.add("hidden"); deleteTargetId = null; deleteTargetVersion = null; deleteChoiceList = [];
+  }
   function selectedDeleteChoice() {
     const radio = document.querySelector('input[name="deleteScope"]:checked');
     return deleteChoiceList.find((c) => radio && c.scope === radio.value) || null;
   }
   function updateDeleteConfirm() {
     const choice = selectedDeleteChoice();
-    $("deleteConfirm").disabled = !choice || !choice.allowed;
+    $("deleteConfirm").disabled = deleteSubmitting || !choice || !choice.allowed;
   }
   async function openDelete() {
     if (!currentId || editBusy) return;
-    const id = currentId;
+    const id = currentId, version = currentVersion;
+    const generation = ++deletePreviewGeneration;
     $("deleteLoading").classList.remove("hidden"); $("deleteBody").classList.add("hidden");
     $("deleteConfirm").disabled = true;
     $("deleteModal").classList.remove("hidden");
     try {
       const resp = await fetch(`/api/vouchers/${id}/delete-preview`);
       const data = await resp.json();
+      if (generation !== deletePreviewGeneration) return;
+      if (id !== currentId || version !== currentVersion) { closeDeleteModal(); return; }
       if (!resp.ok) throw new Error(errText(data, "無法取得刪除範圍"));
       if (data.busy) throw new Error("匯入或提取進行中，請稍後再刪除");
       deleteTargetId = id;
+      deleteTargetVersion = version;
       deleteChoiceList = deleteChoices(data);
       $("deleteChoices").innerHTML = deleteChoiceList.map((c, i) => `
         <label class="del-opt"><input type="radio" name="deleteScope" value="${c.scope}" ${i === 0 ? "checked" : ""} ${c.allowed ? "" : "disabled"}>
-          <span><b>${esc(c.label)}</b><br>${esc(c.summary)}${c.warning ? `<br><span class="del-warn">${esc(c.warning)}</span>` : ""}</span></label>`).join("");
+          <span><b>${esc(c.label)}</b><br>${esc(c.summary)}${c.blockedReason ? `<br><span class="del-warn">${esc(c.blockedReason)}</span>` : ""}${c.warning ? `<br><span class="del-warn">${esc(c.warning)}</span>` : ""}</span></label>`).join("");
       document.querySelectorAll('input[name="deleteScope"]').forEach((r) => r.addEventListener("change", updateDeleteConfirm));
       // 預設選取第一個可用範圍
       const firstAllowed = deleteChoiceList.findIndex((c) => c.allowed);
@@ -466,22 +480,39 @@
       if (firstAllowed >= 0 && radios[firstAllowed]) radios[firstAllowed].checked = true;
       $("deleteLoading").classList.add("hidden"); $("deleteBody").classList.remove("hidden");
       updateDeleteConfirm();
-    } catch (err) { closeDeleteModal(); alert(err.message || "無法取得刪除範圍"); }
+    } catch (err) {
+      if (generation !== deletePreviewGeneration) return;
+      closeDeleteModal(); alert(err.message || "無法取得刪除範圍");
+    }
   }
   async function confirmDelete() {
     const choice = selectedDeleteChoice();
     const id = deleteTargetId;
-    if (!choice || !choice.allowed || id == null) return;
+    if (deleteSubmitting || !choice || !choice.allowed || id == null) return;
+    deleteSubmitting = true;
+    editBusy = true;
     $("deleteConfirm").disabled = true;
+    $("deleteCancel").disabled = true;
     let resp, d = {};
     try {
-      resp = await fetch(`/api/vouchers/${id}?scope=${encodeURIComponent(choice.scope)}`, { method: "DELETE" });
+      const versionQuery = choice.scope === "page" ? `&expected_updated_at=${encodeURIComponent(deleteTargetVersion || "")}` : "";
+      resp = await fetch(`/api/vouchers/${id}?scope=${encodeURIComponent(choice.scope)}${versionQuery}`, { method: "DELETE" });
       d = await resp.json().catch(() => ({}));
-    } catch (err) { updateDeleteConfirm(); alert("刪除失敗：" + err.message); return; }
-    if (!resp.ok || d.ok === false) { updateDeleteConfirm(); alert(errText(d, "刪除失敗")); return; }   // 失敗時保留目前畫面
+    } catch (err) {
+      deleteSubmitting = false; editBusy = false; $("deleteCancel").disabled = false; updateDeleteConfirm();
+      alert("刪除失敗：" + err.message); return;
+    }
+    if (!resp.ok || d.ok === false) {
+      deleteSubmitting = false; editBusy = false; $("deleteCancel").disabled = false; updateDeleteConfirm();
+      alert(errText(d, "刪除失敗")); return;
+    }   // 失敗時保留目前畫面
+    deleteSubmitting = false;
     closeDeleteModal();
     if (currentId != null && (d.deleted_ids || []).includes(currentId)) clearReview();
+    editBusy = false;
+    $("deleteCancel").disabled = false;
     toast(`已刪除：${choice.summary}`);
+    if (choice.scope === "page") await restoreImportJobs();
     loadList(); refreshStats();
     if (d.cleanup_failed && d.cleanup_failed.length) alert("資料已刪除，但部分檔案未能清理（可稍後手動處理）：\n" + d.cleanup_failed.join("\n"));
   }
@@ -521,7 +552,6 @@
     $("fastTiming").classList.toggle("hidden", !timings);
     $("fastTiming").textContent = timings ? [["首次預覽",timings.first_preview_seconds],["人工確認等待",timings.human_wait_seconds],["本次辨識",timings.recognition_seconds],["OCR",timings.ocr_seconds],["補讀OCR",timings.supplement_ocr_seconds],["上傳至今",timings.overall_seconds]].filter(([,value]) => value != null).map(([label,value]) => `${label} ${Number(value).toFixed(1)} 秒`).join(" · ") : "";
     $("manualPreparation").classList.toggle("hidden", !(manualMode && isPrepared));
-    $("directionConfirmed").checked = false;
     $("revForm").classList.toggle("prepared", isPreExtract);
     $("prepHint").classList.toggle("hidden", !isPreExtract && !autoSplitSource);
     $("btnConfirmRecognize").classList.toggle("hidden", !isPreExtract);
@@ -539,7 +569,7 @@
       stageAction = "confirm";
       $("btnConfirmRecognize").textContent = "✅ 確認外觀（加入掃描清單）";
       $("prepHint").innerHTML = "<b>② 外觀確認</b>：確認上方「單據類型」正確，並用工具列旋轉／微調／裁切整理這一張影像（改壞了可按「復原」）；完成後按「✅ 確認外觀」加入③掃描清單。";
-      if (manualMode) $("prepHint").innerHTML = "<b>② 外觀確認</b>：一頁一張，先整理方向、微調與裁切，確認方向後再開始辨識。類型未指定時會自動判斷。";
+      if (manualMode) $("prepHint").innerHTML = "<b>② 外觀確認</b>：一頁一張，調整方向、微調或裁切後，按「確認外觀」即可加入③掃描清單。類型未指定時會自動判斷。";
     } else if (isQueued) {
       stageAction = "recognize";
       $("btnConfirmRecognize").textContent = "🔍 辨識此張";
@@ -1293,7 +1323,7 @@
     await refreshCurrentStatus();
     reloadImage();   // 旋轉後清框（不再對齊），並丟掉尚未套用的角度預覽
     if (currentVoucher.origin?.preparation?.mode === "manual_review") await openReview(currentId);
-    toast("已旋轉，請重新確認目前影像方向");
+    toast("已旋轉；完成影像整理後按「確認外觀」加入掃描清單");
   }
   $("btnRotL").addEventListener("click", () => rotateImage("ccw"));
   $("btnRotR").addEventListener("click", () => rotateImage("cw"));
@@ -1434,7 +1464,7 @@
       await refreshCurrentStatus();
       fineBusy = false;
       reloadImage(); if (currentVoucher.origin?.preparation?.mode === "manual_review") await openReview(currentId);
-      toast(reset ? "已還原微調，請重新確認目前影像方向" : `已套用微調，累計 ${angle}°，請重新確認目前影像方向`);
+      toast(reset ? "已還原微調；完成影像整理後按「確認外觀」加入掃描清單" : `已套用微調，累計 ${angle}°；完成影像整理後按「確認外觀」加入掃描清單`);
     } finally {
       fineBusy = false; updateFineControls();
     }
@@ -1445,13 +1475,13 @@
   // 復原：影像回到剛進入外觀確認時的狀態（旋轉、微調、裁切全部撤銷），不呼叫模型。
   $("btnRestore").addEventListener("click", async () => {
     if (!currentId || $("btnRestore").disabled) return;
-    if (!confirm("復原會把影像換回剛進入外觀確認時的狀態，旋轉、微調與裁切都會撤銷，方向確認也需重勾。\n\n確定要復原嗎？")) return;
+    if (!confirm("復原會把影像換回剛進入外觀確認時的狀態，旋轉、微調與裁切都會撤銷。\n\n確定要復原嗎？")) return;
     const resp = await fetch(`/api/vouchers/${currentId}/restore-image`, { method: "POST", headers: json(), body: JSON.stringify({ expected_updated_at:currentVersion }) });
     if (!resp.ok) { alert(await responseError(resp, "復原失敗")); return; }
     if (!(await resp.json()).ok) { alert("復原失敗"); return; }
     await refreshCurrentStatus();
     reloadImage(); await openReview(currentId);
-    toast("已復原為剛進入外觀確認時的影像，請重新確認目前影像方向");
+    toast("已復原為剛進入外觀確認時的影像；完成影像整理後按「確認外觀」加入掃描清單");
   });
 
   // ── 裁切模式（只修目前這一張，不拆出新憑證）──
@@ -1510,7 +1540,7 @@
     if (!(await r.json()).ok) { alert("裁切失敗"); return; }
     await refreshCurrentStatus();
     reloadImage(); if (currentVoucher.origin?.preparation?.mode === "manual_review") await openReview(currentId);
-    toast("已裁切，請重新確認目前影像方向");
+    toast("已裁切；完成影像整理後按「確認外觀」加入掃描清單");
   });
   function clearReview() {
     $("revForm").classList.add("hidden"); $("revEmpty").classList.remove("hidden"); currentId = null;
@@ -1521,10 +1551,8 @@
   async function confirmAppearance() {
     if (!currentId) return;
     const tk = $("revTypeSel").value;
-    const manual = currentVoucher.origin?.preparation?.mode === "manual_review";
-    if (manual && !$("directionConfirmed").checked) { alert("請先確認目前影像方向正確"); return; }
     // 外觀確認固定一頁一張、一次一張；不再提供多張切分。
-    const d = await (await fetch(`/api/vouchers/${currentId}/confirm-appearance`, { method: "POST", headers: json(), body: JSON.stringify({ doc_type_key: tk,expected_updated_at:currentVersion,direction_confirmed:manual && $("directionConfirmed").checked,document_mode:"single" }) })).json();
+    const d = await (await fetch(`/api/vouchers/${currentId}/confirm-appearance`, { method: "POST", headers: json(), body: JSON.stringify({ doc_type_key: tk,expected_updated_at:currentVersion,document_mode:"single" }) })).json();
     if (!d.ok) { alert(errText(d, "確認失敗")); return; }
     toast("已加入掃描清單"); clearReview(); loadList(); restoreImportJobs();
   }

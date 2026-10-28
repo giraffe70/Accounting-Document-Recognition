@@ -143,7 +143,7 @@
           <button id="btnCropCancel" class="btn btn-sm hidden">取消</button>
           <button id="btnRestore" class="btn btn-sm hidden" disabled title="影像回到剛進入外觀確認時的狀態（旋轉、微調、裁切全部撤銷）">↶ 復原</button>
           <button id="btnReRecognize" class="btn btn-sm">🔄 重新辨識</button>
-          <button id="btnDelete" class="btn btn-sm danger" title="刪除此憑證，或連同整份上傳檔一併刪除">🗑 刪除</button>
+          <button id="btnDelete" class="btn btn-sm danger" title="預覽並確認刪除範圍">🗑 刪除</button>
         </div>
         <!-- 地端推論進度（重新辨識／分類／確認辨識共用）-->
         <div id="revProgress" class="progress hidden">
@@ -183,8 +183,7 @@
           完成後按「<b>✅ 確認並辨識</b>」才進行內容辨識與審核。
         </div>
         <div id="manualPreparation" class="callout hidden">
-          <label><input id="directionConfirmed" type="checkbox">我已確認目前影像方向正確</label>
-          <p class="hint">一頁一張、一次處理一張。先完成旋轉、微調與裁切，再確認方向。類型可選自動判斷。</p>
+          <p class="hint">一頁一張、一次處理一張。調整方向、微調或裁切後，按「確認外觀」即可加入掃描清單。類型可選自動判斷。</p>
         </div>
         <div id="fastTiming" class="hint hidden"></div>
         <div id="reviewBody" class="prep-hide">
@@ -239,14 +238,14 @@
   <!-- 刪除確認 modal -->
   <div id="deleteModal" class="modal hidden">
     <div class="modal-box">
-      <h3>刪除憑證</h3>
+      <h3>刪除確認</h3>
       <div id="deleteLoading" class="hint">正在確認影響範圍…</div>
       <div id="deleteBody" class="hidden">
         <div id="deleteChoices"></div>
-        <p class="hint">影像與辨識資料會一併移除，無法復原。</p>
+        <p class="hint">所選範圍的影像與辨識資料會一併移除，無法復原。</p>
       </div>
       <div class="modal-actions">
-        <button id="deleteConfirm" class="btn danger" disabled>🗑 確認刪除</button>
+        <button id="deleteConfirm" class="btn danger" disabled>🗑 確認刪除所選範圍</button>
         <button id="deleteCancel" class="btn">取消</button>
       </div>
     </div>

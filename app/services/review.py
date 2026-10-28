@@ -1456,7 +1456,11 @@ class DeleteForbidden(PermissionError):
     """目前使用者不得刪除（例如非管理員刪除已確認憑證）。"""
 
 
-DELETE_SCOPES = ("record", "upload")
+class DeleteConflict(RuntimeError):
+    """匯入狀態或影像版本已改變，不能依舊畫面刪除。"""
+
+
+DELETE_SCOPES = ("record", "upload", "page")
 
 
 def _origin_of(rec) -> dict:
@@ -1472,6 +1476,14 @@ def _child_records(session, parent_ids):
     return session.exec(select(VoucherRecord).where(VoucherRecord.source_parent_id.in_(list(parent_ids)))).all()
 
 
+def _delete_import_context(session, rec):
+    from app.db.models import ImportJob, ImportPage
+    origin = _origin_of(rec)
+    job = session.get(ImportJob, origin.get("import_job_id", ""))
+    page = session.get(ImportPage, origin.get("import_page_id", ""))
+    return job, page if page and job and page.job_id == job.id else None
+
+
 def _delete_targets(session, rec, scope: str) -> dict:
     """刪除 rec 時一併移除的紀錄。
 
@@ -1482,6 +1494,18 @@ def _delete_targets(session, rec, scope: str) -> dict:
     if scope not in DELETE_SCOPES:
         raise ValueError("刪除範圍不合法")
     found = {rec.id: rec}
+    if scope == "page":
+        job, page = _delete_import_context(session, rec)
+        if page is None:
+            raise DeleteConflict("此單據沒有可刪除的匯入頁面")
+        for other in session.exec(select(VoucherRecord).where(VoucherRecord.current_json.contains(page.id))).all():
+            origin = _origin_of(other)
+            if origin.get("import_job_id") == job.id and origin.get("import_page_id") == page.id:
+                found[other.id] = other
+        if page.source_page_id is not None:
+            parent = session.get(VoucherRecord, page.source_page_id)
+            if parent:
+                found[parent.id] = parent
     if scope == "upload":
         root_id = rec.id if rec.record_role == "source_page" else rec.source_parent_id
         root = session.get(VoucherRecord, root_id) if root_id is not None else None
@@ -1505,6 +1529,31 @@ def _delete_targets(session, rec, scope: str) -> dict:
     return found
 
 
+def _check_delete(session, rec, targets, scope, *, is_admin=False, actor_id=None):
+    from app.services import import_jobs
+    if scope == "page":
+        job, page = _delete_import_context(session, rec)
+        if not job or not import_jobs._sequential(job) or page is None:
+            raise DeleteConflict("此單據不在逐頁外觀確認中")
+        if job.owner_id != actor_id:
+            raise DeleteForbidden("只有此匯入工作的使用者可以刪除頁面")
+        if job.cancel_requested or job.status != "awaiting_review" or page.status != "preview_ready":
+            raise DeleteConflict("此頁目前不在等待外觀確認，請重新載入後操作")
+        if rec.status != ReviewStatus.prepared:
+            raise DeleteConflict("此單據已完成外觀確認，請重新載入後操作")
+        try:
+            import_jobs.check_review_turn(session, rec, actor_id)
+        except import_jobs.JobConflict as exc:
+            raise DeleteConflict(str(exc)) from exc
+    else:
+        for target in targets.values():
+            job, _ = _delete_import_context(session, target)
+            if job and import_jobs._sequential(job) and job.status not in ("cancelled", "completed"):
+                raise DeleteForbidden("逐頁匯入期間僅能刪除目前待確認頁面，請使用「刪除此頁」")
+    if not is_admin and any(t.status == ReviewStatus.confirmed for t in targets.values()):
+        raise DeleteForbidden("範圍內含已確認的憑證，只有管理員可以刪除")
+
+
 def _delete_summary(targets: dict, scope: str, rec) -> dict:
     records = list(targets.values())
     confirmed = [r for r in records if r.status == ReviewStatus.confirmed]
@@ -1518,13 +1567,39 @@ def _delete_summary(targets: dict, scope: str, rec) -> dict:
     }
 
 
-def delete_preview(rec_id: int, scope: str) -> Optional[dict]:
-    """刪除前預覽影響範圍；不改動任何資料。"""
+def delete_previews(rec_id: int, scope: str = "", *, is_admin=False, actor_id=None, busy=False) -> Optional[dict]:
+    """預覽與執行共用刪除資格；逐頁匯入期間只提供目前頁刪除。"""
+    from app.services import import_jobs
     with get_session() as s:
         rec = s.get(VoucherRecord, rec_id)
         if not rec:
             return None
-        return _delete_summary(_delete_targets(s, rec, scope), scope, rec)
+        job, page = _delete_import_context(s, rec)
+        active = job and import_jobs._sequential(job) and job.status not in ("completed", "cancelled")
+        scopes = [scope] if scope else ["page"] if active else ["record", "upload"]
+        previews, allowed = {}, {}
+        for item in scopes:
+            targets = _delete_targets(s, rec, item)
+            preview = _delete_summary(targets, item, rec)
+            if item == "page":
+                preview["page_no"] = page.page_no
+            try:
+                _check_delete(s, rec, targets, item, is_admin=is_admin, actor_id=actor_id)
+                if busy:
+                    raise DeleteConflict("匯入或提取進行中，請稍後再刪除")
+                preview["blocked_reason"] = ""
+                allowed[item] = True
+            except (DeleteForbidden, DeleteConflict) as exc:
+                preview["blocked_reason"] = str(exc)
+                allowed[item] = False
+            previews[item] = preview
+        return {"previews": previews, "can_delete": allowed}
+
+
+def delete_preview(rec_id: int, scope: str) -> Optional[dict]:
+    """刪除前預覽影響範圍；不改動任何資料。"""
+    result = delete_previews(rec_id, scope)
+    return result["previews"][scope] if result else None
 
 
 def _still_referenced(session, needle: str) -> bool:
@@ -1532,6 +1607,15 @@ def _still_referenced(session, needle: str) -> bool:
 
 
 def _cleanup_deleted_files(deleted: list) -> tuple:
+    # SQLite can reuse a deleted integer ID before cleanup starts. Serialize file
+    # cleanup with new saves, and never remove the replacement record's files.
+    with get_session() as session:
+        session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+        reused_ids = {item["id"] for item in deleted if session.get(VoucherRecord, item["id"]) is not None}
+        return _cleanup_deleted_files_locked(deleted, session, reused_ids)
+
+
+def _cleanup_deleted_files_locked(deleted: list, session, reused_ids) -> tuple:
     """刪除紀錄後清理應用程式自己管理的檔案；失敗只回報，不中斷。
 
     只動 uploads/pages、uploads/_pages、data/recognition 內的路徑，以及 uploads/
@@ -1539,6 +1623,7 @@ def _cleanup_deleted_files(deleted: list) -> tuple:
     其他紀錄仍引用的 token／上傳檔會保留。"""
     import re
     from pathlib import Path
+    from app.db.models import ImportFile, ImportPage
 
     upload_dir = config.UPLOAD_DIR.resolve()
     roots = [upload_dir / "pages", upload_dir / "_pages", (config.DATA_DIR / "recognition").resolve()]
@@ -1565,6 +1650,8 @@ def _cleanup_deleted_files(deleted: list) -> tuple:
     pages = upload_dir / "pages"
     names = [p.name for p in pages.iterdir()] if pages.is_dir() else []
     for item in deleted:
+        if item["id"] in reused_ids:
+            continue
         for rel in [item["image_path"], *item["attachments"]]:
             if rel:
                 remove(upload_dir / rel)
@@ -1581,28 +1668,33 @@ def _cleanup_deleted_files(deleted: list) -> tuple:
 
     tokens = {item["origin"].get("source_token") for item in deleted}
     uploads = {item["origin"].get("upload_file") for item in deleted}
-    with get_session() as s:
-        for rec_id in ids:
-            if not _child_records(s, [rec_id]):
-                remove(config.DATA_DIR / "recognition" / str(rec_id))
-        for token in tokens:
-            if isinstance(token, str) and re.fullmatch(r"[a-f0-9]{32}", token) and not _still_referenced(s, token):
-                remove(upload_dir / "_pages" / token)
-        for name in uploads:
-            if not (isinstance(name, str) and re.fullmatch(r"[a-f0-9]{32}\.[a-z0-9]+", name)) or _still_referenced(s, name):
-                continue
-            source = upload_dir / name
-            try:
-                if source.is_file() and source.parent == upload_dir:
-                    source.unlink()
-                    removed += 1
-            except OSError as exc:
-                failed.append(f"{source}: {exc}")
-            rendered = re.compile(rf"^{re.escape(Path(name).stem)}_p\d+\.png$")
-            render_dir = upload_dir / "_pages"
-            for page in (render_dir.iterdir() if render_dir.is_dir() else []):
-                if page.is_file() and rendered.match(page.name):
-                    remove(page)
+    for rec_id in ids:
+        if rec_id not in reused_ids and not _child_records(session, [rec_id]):
+            remove(config.DATA_DIR / "recognition" / str(rec_id))
+    for token in tokens:
+        if isinstance(token, str) and re.fullmatch(r"[a-f0-9]{32}", token) and not _still_referenced(session, token):
+            remove(upload_dir / "_pages" / token)
+    for name in uploads:
+        if not (isinstance(name, str) and re.fullmatch(r"[a-f0-9]{32}\.[a-z0-9]+", name)) or _still_referenced(session, name):
+            continue
+        source = upload_dir / name
+        # A PDF is rendered lazily. Even with no vouchers left, later pages
+        # (including cancelled/interrupted work that can resume) need it.
+        needed = session.exec(select(ImportFile).outerjoin(ImportPage, ImportPage.file_id == ImportFile.id).where(
+            (ImportFile.indexed.is_(False)) | (ImportPage.status != "completed"))).all()
+        if any(Path(item.path).resolve() == source for item in needed):
+            continue
+        try:
+            if source.is_file() and source.parent == upload_dir:
+                source.unlink()
+                removed += 1
+        except OSError as exc:
+            failed.append(f"{source}: {exc}")
+        rendered = re.compile(rf"^{re.escape(Path(name).stem)}_p\d+\.png$")
+        render_dir = upload_dir / "_pages"
+        for page in (render_dir.iterdir() if render_dir.is_dir() else []):
+            if page.is_file() and rendered.match(page.name):
+                remove(page)
     return removed, failed
 
 
@@ -1619,22 +1711,23 @@ def _write_delete_audit(actor: str, scope: str, requested_id: int, deleted: list
         pass
 
 
-def delete_vouchers(rec_id: int, scope: str, *, is_admin: bool = False, actor: str = "") -> Optional[dict]:
+def delete_vouchers(rec_id: int, scope: str, *, is_admin: bool = False, actor: str = "",
+                    actor_id=None, expected_updated_at=None) -> Optional[dict]:
     """刪除紀錄並清理其檔案。已確認憑證僅管理員可刪（DeleteForbidden）。"""
     import logging
     with get_session() as s:
+        s.connection().exec_driver_sql("BEGIN IMMEDIATE")
         rec = s.get(VoucherRecord, rec_id)
         if not rec:
             return None
         targets = _delete_targets(s, rec, scope)
-        from app.db.models import ImportJob
         from app.services import import_jobs
-        for target in targets.values():
-            job = s.get(ImportJob, _origin_of(target).get("import_job_id", ""))
-            if job and import_jobs._sequential(job) and job.status not in ("cancelled", "completed"):
-                raise DeleteForbidden("請先完成外觀確認或取消目前匯入，再刪除這份檔案的單據")
-        if not is_admin and any(t.status == ReviewStatus.confirmed for t in targets.values()):
-            raise DeleteForbidden("範圍內含已確認的憑證，只有管理員可以刪除")
+        _check_delete(s, rec, targets, scope, is_admin=is_admin, actor_id=actor_id)
+        if scope == "page":
+            if not expected_updated_at:
+                raise ValueError("刪除頁面需要目前影像版本")
+            if rec.updated_at.isoformat() != expected_updated_at:
+                raise DeleteConflict("單據已被修改，請重新載入後操作")
         deleted = [{"id": t.id, "role": t.record_role, "status": t.status.value, "image_path": t.image_path,
                     "attachments": json.loads(t.attachments or "[]"), "origin": _origin_of(t)}
                    for t in targets.values()]
@@ -1654,8 +1747,17 @@ def delete_vouchers(rec_id: int, scope: str, *, is_admin: bool = False, actor: s
         # A single statement removes parents and their children together, even with
         # immediate SQLite foreign-key enforcement on the legacy self-reference.
         s.execute(delete(VoucherRecord).where(VoucherRecord.id.in_(list(targets))))
+        if scope == "page":
+            _, page = _delete_import_context(s, rec)
+            page.source_page_id, page.voucher_ids_json = None, "[]"
+            page.preview_path, page.preparation_json, page.error = "", "{}", ""
+            s.add(page)
+            import_jobs.mark_review_complete(s, rec, wake=False)
+            page.phase = "discarded"
         s.commit()
     removed, failed = _cleanup_deleted_files(deleted)
+    if scope == "page":
+        import_jobs._wake.set()
     _write_delete_audit(actor, scope, rec_id, deleted)
     log = logging.getLogger("pdf_scan.review")
     log.info("刪除憑證 %s（範圍 %s，操作者 %s），清理 %d 個檔案", sorted(targets), scope, actor or "-", removed)
