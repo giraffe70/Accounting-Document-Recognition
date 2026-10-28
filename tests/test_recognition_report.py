@@ -91,6 +91,24 @@ class RecognitionReportTests(unittest.TestCase):
         self.assertNotIn("買方統編<small class=\"company-filled-tag\">", result)
         self.assertNotIn('"field_evidence"', result)
 
+    def test_statement_issuer_and_customer_each_use_a_full_row(self):
+        result = render(
+            self.record,
+            {"doc_type_key": "statement", "items": [], "fields": {
+                "issuer": "捷和物流股份有限公司",
+                "customer": "仲杉股份有限公司",
+            }},
+        )
+        self.assertIn(".field-full { grid-column: 1 / -1; }", result)
+        self.assertIn(
+            '<div class="field field-full"><dt>開立廠商（賣方／收款方）</dt><dd>捷和物流股份有限公司</dd></div>',
+            result,
+        )
+        self.assertIn(
+            '<div class="field field-full"><dt>客戶名稱（買方／付款方）</dt><dd>仲杉股份有限公司</dd></div>',
+            result,
+        )
+
     def test_journal_voucher_prints_distinct_source_totals_and_no_technical_json(self):
         result = render(
             self.record,

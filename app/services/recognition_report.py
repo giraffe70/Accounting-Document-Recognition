@@ -57,7 +57,7 @@ def _image_url(rec, attachment_index: int | None = None) -> str:
     return f"/api/vouchers/{quote(str(rec_id), safe='')}/image?{urlencode(params)}"
 
 
-def _field_rows(spec, fields, field_evidence=None) -> str:
+def _field_rows(type_key, spec, fields, field_evidence=None) -> str:
     field_evidence = field_evidence if isinstance(field_evidence, Mapping) else {}
     rows = []
     for field in spec.get("fields", []):
@@ -71,8 +71,9 @@ def _field_rows(spec, fields, field_evidence=None) -> str:
                                       and record.get("selected") is True
                                       for record in evidence))
             source_label = '<small class="company-filled-tag">公司帶入</small>' if company_filled else ""
+            layout_class = " field-full" if type_key == "statement" and key in {"issuer", "customer"} else ""
             rows.append(
-                f'<div class="field"><dt>{_text(field.get("label", key))}{source_label}</dt>'
+                f'<div class="field{layout_class}"><dt>{_text(field.get("label", key))}{source_label}</dt>'
                 f'<dd>{_text(value)}</dd></div>'
             )
     return "".join(rows)
@@ -178,6 +179,7 @@ def render(rec, voucher, account_warnings=None) -> str:
 .no-image {{ color: #66717c; }}
 h1 {{ text-align: center; font-size: 20pt; margin: 0 0 8mm; }} h2 {{ font-size: 14pt; margin: 7mm 0 3mm; }}
 .fields {{ display: grid; grid-template-columns: 1fr 1fr; gap: 2mm 8mm; }}
+.field-full {{ grid-column: 1 / -1; }}
 .field, .total {{ display: flex; gap: 8px; min-width: 0; }} dt {{ color: #53606c; min-width: 7em; }} dd {{ margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }}
 .company-filled-tag {{ margin-left: 5px; color: #53606c; font-size: 8pt; font-weight: 400; white-space: nowrap; }}
 table {{ width: 100%; border-collapse: collapse; table-layout: fixed; }} thead {{ display: table-header-group; }}
@@ -200,7 +202,7 @@ tr {{ break-inside: avoid; page-break-inside: avoid; }}
 <div class="field"><dt>號碼</dt><dd>{_text(voucher.get("voucher_id"))}</dd></div>
 <div class="field"><dt>日期</dt><dd>{_text(voucher.get("date"))}</dd></div>
 <div class="field"><dt>金額幣別</dt><dd>{_text(voucher.get("currency"))}</dd></div>
-{_field_rows(spec, fields, field_evidence)}
+{_field_rows(type_key, spec, fields, field_evidence)}
 <div class="field"><dt>確認人</dt><dd>{_text(confirmed_by)}</dd></div>
 <div class="field"><dt>確認時間</dt><dd>{_text(confirmed_at)}</dd></div>
 </section>

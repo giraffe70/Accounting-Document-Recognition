@@ -23,13 +23,13 @@ DOC_TYPES = {
         "has_items": True,
         "fields": [
             _f("voucher_id", "發票號碼"), _f("date", "發票日期", "date"),
-            _f("invoice_type", "發票格式（三聯式／二聯式／電子發票／收銀機）"),
+            _f("invoice_type", "發票格式"),
             _f("tax_type", "課稅別（應稅／零稅率／免稅）"),
             _f("seller_name", "賣方名稱"), _f("seller_tax_id", "賣方統編"),
             _f("buyer_name", "買方名稱"), _f("buyer_tax_id", "買方統編"),
             _f("subtotal", "未稅銷售額", "number"), _f("tax_amount", "營業稅額", "number"),
             _f("total_amount", "總計（含稅）", "number"),
-            _f("amount_words", "總計金額中文大寫（如有）"),
+            _f("amount_words", "總計金額中文大寫"),
             _f("usage_note", "買受人註記（進貨及費用／固定資產）"),
         ],
     },
@@ -361,7 +361,7 @@ def receipt_tax_ambiguous(type_key: str, fields: dict, evidence: dict | None = N
 
 # 只保存定位與語意；格式、算術與公司政策由程式負責。
 TYPE_HINTS = {
-    "invoice": ["日期取填發日，不是發票期別。賣方資料可能在專用章；amount_words 抄錄大寫原文。"],
+    "invoice": ["日期取填發日，不是發票期別。invoice_type 只填三聯式、二聯式、電子發票或收銀機。賣方資料可能在專用章；amount_words 抄錄大寫原文，文件沒有則留空。"],
     "cheque": ["只讀支票區域；出票人與受款人不同。amount_words 抄錄票面大寫原文。"],
     "remittance": ["交易金額是本金，扣款金額及手續費分別讀取；付款人與收款人分開。"],
     "customs_tax": ["多聯內容相同時讀完整一聯，不跨聯混填；營業稅稅基不是營業稅。"],
