@@ -2,7 +2,6 @@
 
 將掃描 PDF／圖片轉為結構化憑證資料，提供原圖核對、欄位與明細編輯、會計分錄草稿、人工確認及報表輸出，供會計師、記帳士處理帳務。
 
-本文件依目前 `app/` 正式程式整理（2026-10-28）。操作與架構細節見 [開發線上手冊](docs/manual/index.html)（用瀏覽器開啟）及 [目前系統架構](docs/dev-notes/architecture.md)。
 
 ## 快速開始（Windows／Python 3.12）
 
@@ -62,7 +61,6 @@ python -B -X utf8 scripts/manage_users.py passwd admin
 
 辨識內容可先確認，即使科目或分錄尚待核對。原始會計傳票保留紙面分錄；單面傳票可保存草稿，需人工補齊並核對後才能確認入帳。編輯來源欄位、公司或影像等內容後，相關確認狀態會撤銷，需重新覆核。
 
-細節見 [分錄編輯與入帳確認](docs/dev-notes/entry-workflow.md)、[品名科目對應](docs/dev-notes/item-account-mapping.md) 及 [公司會計政策](docs/dev-notes/accounting-policy.md)。
 
 ## 模型與技術架構
 
@@ -70,20 +68,6 @@ python -B -X utf8 scripts/manage_users.py passwd admin
 - **辨識**：PaddleOCR 取得文字與座標，VLM／LLM 進行單據分類及欄位萃取，另提供會計分類與人工覆核。
 - **模型來源**：可在「模型設定」切換 Ollama 地端模型、內網 H200 vLLM 或雲端 Gemini／Claude／GPT；連線與金鑰設定見 [.env.example](.env.example)。H200 部署資訊見 [部署需求](docs/dev-notes/H200-VLM-佈署需求.md)。
 
-
-### 預設與限制
-
-| 設定 | 預設值 | 可調範圍／方式 |
-| --- | --- | --- |
-| 圖片長邊 | 1180 像素 | 640–2400；大圖等比例縮小，小圖不放大 |
-| 每組重複次數 | 1 | 1–10 |
-| 辨識逾時 | 600 秒 | 30–3600 秒，套用於版面分析及單據辨識子流程 |
-| 每組先暖機一次 | 關閉 | 啟用後額外處理第一頁，不納入主要統計 |
-| 單檔大小 | 100 MB | `VALIDATION_MAX_FILE_MB` |
-| 資料集解壓總量 | 2 GB | `VALIDATION_MAX_TOTAL_MB`（以 MB 設定） |
-| 檔案數 | 5,000 | `VALIDATION_MAX_FILES` |
-
-驗證資料獨立保存在 `app/data/validation/`，與正式憑證資料庫分開。比較模型時應固定資料集、圖片長邊、辨識模式、重複與暖機條件，並保存程式／模型版本；評分方式見 [Agent 工作與驗證指南](docs/dev-notes/agent-workflow.md)。
 
 ## 資料庫檢視（管理員）
 
@@ -97,8 +81,5 @@ python -B -X utf8 scripts/manage_users.py passwd admin
 - `app/`：正式程式碼、WebUI 與執行期資料目錄。
 - `tests/`：離線契約與功能回歸測試。
 - `scripts/`：驗證入口、帳號維護與資料處理工具。
-- [開發線上手冊](docs/manual/index.html)：瀏覽器開啟的單一自包含手冊。
 - [目前系統架構](docs/dev-notes/architecture.md)：FastAPI、SQLite、辨識及審核資料流。
-- [Agent 工作與驗證指南](docs/dev-notes/agent-workflow.md)：測試範圍、部署核對與保存結果評分。
-- `archive/phase0_poc_flask/`：已封存的 Flask／Gemini POC；歷史說明見 [POC 架構](docs/dev-notes/architecture-phase0.md)。
 - `ref/`：本機參考文件與合約資料，另行保存。
