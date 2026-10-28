@@ -4,6 +4,7 @@ import tempfile
 import unittest
 import uuid
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -277,6 +278,137 @@ class FastWorkflowContracts(unittest.TestCase):
         self.assertFalse(preparation.confirmed(data, self.uploads / updated.image_path))
         self.assertTrue(preparation.state(data)["type_confirmed"])
 
+    def _patterned(self, name):
+        """A manual working copy whose pixels change visibly under rotate/crop/deskew."""
+        rec_id = self._manual_record(name)
+        path = self.uploads / review.get_voucher(rec_id).image_path
+        image = Image.new("RGB", (60, 40), (250, 250, 250))
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((5, 8, 50, 12), fill=(0, 0, 0))
+        draw.rectangle((5, 22, 30, 24), fill=(20, 20, 120))
+        image.save(path)
+        return rec_id, path
+
+    @staticmethod
+    def _version(rec_id):
+        return review.get_voucher(rec_id).updated_at.isoformat()
+
+    def test_prepared_record_keeps_a_baseline_beside_the_working_image(self):
+        source = self._source("baseline-source.png")
+        voucher = Voucher(origin={"preparation": preparation.fresh()})
+        voucher.source_image = str(source)
+        prepared = review.save_voucher(voucher, status=ReviewStatus.prepared)
+        baseline = (self.uploads / prepared.image_path).with_suffix(".baseline.png")
+        self.assertEqual(baseline.read_bytes(), source.read_bytes())
+
+        voucher.source_image = str(source)
+        pending = review.save_voucher(voucher, status=ReviewStatus.pending)
+        self.assertFalse((self.uploads / pending.image_path).with_suffix(".baseline.png").exists())
+
+    def test_restore_returns_baseline_pixels_and_clears_direction_confirmation(self):
+        rec_id, path = self._patterned("restore.png")
+        original = path.read_bytes()
+        self.assertFalse(review.image_restore_available(review.get_voucher(rec_id)))
+        with self.assertRaises(review.RecognitionProtected):   # nothing was changed yet, so no restore point
+            review.restore_image(rec_id, expected_updated_at=self._version(rec_id))
+
+        review.confirm_appearance(rec_id, "invoice", expected_updated_at=self._version(rec_id), direction_confirmed=True)
+        self.assertTrue(review.rotate_image(rec_id, expected_updated_at=self._version(rec_id)))
+        self.assertTrue(review.crop_image(rec_id, [0, 0, 0.8, 1], expected_updated_at=self._version(rec_id)))
+        self.assertTrue(review.rotate_fine(rec_id, 2, expected_updated_at=self._version(rec_id)))
+        self.assertNotEqual(path.read_bytes(), original)
+        self.assertTrue(review.image_restore_available(review.get_voucher(rec_id)))
+
+        self.assertTrue(review.restore_image(rec_id, expected_updated_at=self._version(rec_id)))
+        restored = review.get_voucher(rec_id)
+        state = preparation.state(json.loads(restored.current_json))
+        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual(restored.status, ReviewStatus.prepared)
+        self.assertFalse(state["direction_confirmed"])
+        self.assertEqual(state["transforms"], [])
+        self.assertEqual(state["fine_angle"], 0)
+        self.assertFalse(path.with_suffix(".deskew.png").exists())
+        self.assertFalse(review.image_restore_available(restored))
+
+    def test_restore_is_version_checked_and_refused_for_source_pages(self):
+        rec_id, _path = self._patterned("restore-guard.png")
+        self.assertTrue(review.rotate_image(rec_id, expected_updated_at=self._version(rec_id)))
+        with self.assertRaises(review.entry_flow.EntryConflict):
+            review.restore_image(rec_id, expected_updated_at="2000-01-01T00:00:00")
+        with Session(self.engine) as session:
+            stored = session.get(VoucherRecord, rec_id)
+            stored.record_role = "source_page"
+            session.add(stored)
+            session.commit()
+        with self.assertRaises(review.RecognitionProtected):
+            review.restore_image(rec_id, expected_updated_at=self._version(rec_id))
+
+    def test_fine_rotation_is_cumulative_from_one_original(self):
+        stepped_id, stepped = self._patterned("fine-stepped.png")
+        direct_id, direct = self._patterned("fine-direct.png")
+        for angle in (1, 1.5):
+            self.assertTrue(review.rotate_fine(stepped_id, angle, expected_updated_at=self._version(stepped_id)))
+        self.assertTrue(review.rotate_fine(direct_id, 1.5, expected_updated_at=self._version(direct_id)))
+
+        with Image.open(stepped) as a, Image.open(direct) as b:
+            self.assertEqual(a.size, b.size)
+            self.assertEqual(a.tobytes(), b.tobytes())
+        state = preparation.state(json.loads(review.get_voucher(stepped_id).current_json))
+        self.assertEqual(state["fine_angle"], 1.5)
+        self.assertEqual(state["transforms"], [])
+        self.assertFalse(state["pdf_enabled"])
+
+    def test_resetting_fine_rotation_restores_the_deskew_original_and_keeps_other_edits(self):
+        rec_id, path = self._patterned("fine-reset.png")
+        self.assertTrue(review.rotate_image(rec_id, expected_updated_at=self._version(rec_id)))
+        rotated = path.read_bytes()
+        self.assertTrue(review.rotate_fine(rec_id, 3, expected_updated_at=self._version(rec_id)))
+        self.assertTrue(path.with_suffix(".deskew.png").is_file())
+        self.assertNotEqual(path.read_bytes(), rotated)
+
+        self.assertTrue(review.rotate_fine(rec_id, 0, reset=True, expected_updated_at=self._version(rec_id)))
+        state = preparation.state(json.loads(review.get_voucher(rec_id).current_json))
+        self.assertEqual(path.read_bytes(), rotated)
+        self.assertFalse(path.with_suffix(".deskew.png").exists())
+        self.assertEqual(state["fine_angle"], 0)
+        self.assertEqual(len(state["transforms"]), 1)
+
+    def test_rotating_or_cropping_finalizes_the_applied_fine_rotation(self):
+        for action in ("rotate", "crop"):
+            with self.subTest(action=action):
+                rec_id, path = self._patterned(f"fine-final-{action}.png")
+                self.assertTrue(review.rotate_fine(rec_id, 4, expected_updated_at=self._version(rec_id)))
+                if action == "rotate":
+                    self.assertTrue(review.rotate_image(rec_id, expected_updated_at=self._version(rec_id)))
+                else:
+                    self.assertTrue(review.crop_image(rec_id, [0.1, 0.1, 0.9, 0.9], expected_updated_at=self._version(rec_id)))
+                finalized = path.read_bytes()
+                state = preparation.state(json.loads(review.get_voucher(rec_id).current_json))
+                self.assertEqual(state["fine_angle"], 0)
+                self.assertFalse(path.with_suffix(".deskew.png").exists())
+
+                # The next deskew starts from the finalized working image, not from the old original.
+                self.assertTrue(review.rotate_fine(rec_id, 2, expected_updated_at=self._version(rec_id)))
+                self.assertEqual(path.with_suffix(".deskew.png").read_bytes(), finalized)
+
+    def test_fine_rotation_rejects_angles_beyond_the_limit(self):
+        rec_id, path = self._patterned("fine-limit.png")
+        before = path.read_bytes()
+        for angle in (15.5, -16, float("nan"), "abc"):
+            with self.subTest(angle=angle), self.assertRaises(review.RecognitionProtected):
+                review.rotate_fine(rec_id, angle, expected_updated_at=self._version(rec_id))
+        self.assertEqual(path.read_bytes(), before)
+        self.assertTrue(review.rotate_fine(rec_id, -15, expected_updated_at=self._version(rec_id)))
+
+    def test_manual_confirmation_only_accepts_one_document_per_page(self):
+        for mode in ("auto_split", "manual_split"):
+            with self.subTest(mode=mode):
+                rec_id = self._manual_record(f"mode-{mode}.png")
+                with self.assertRaises(review.RecognitionProtected):
+                    review.confirm_appearance(rec_id, "invoice", expected_updated_at=self._version(rec_id),
+                                              direction_confirmed=True, document_mode=mode)
+                self.assertEqual(review.get_voucher(rec_id).status, ReviewStatus.prepared)
+
     def test_appearance_batch_returns_success_and_version_conflict_per_item(self):
         good_id = self._manual_record("batch-good.png")
         stale_id = self._manual_record("batch-stale.png")
@@ -308,8 +440,21 @@ class FastWorkflowContracts(unittest.TestCase):
         page = self._rows(ImportPage)[0]
         rec_id = json.loads(page.voucher_ids_json)[0]
         rec = review.get_voucher(rec_id)
-        queued = review.confirm_appearance(rec_id, "invoice", expected_updated_at=rec.updated_at.isoformat(),
-                                           direction_confirmed=True, document_mode="auto_split", actor={"id": 1})
+        # 外觀確認已不再接受 auto_split；這裡直接重現舊請求留下的狀態，繼續驗證保留的版面背景工作。
+        with self.assertRaises(review.RecognitionProtected):
+            review.confirm_appearance(rec_id, "invoice", expected_updated_at=rec.updated_at.isoformat(),
+                                      direction_confirmed=True, document_mode="auto_split", actor={"id": 1})
+        with review.get_session() as session:
+            stored = session.get(VoucherRecord, rec_id)
+            stored_data = json.loads(stored.current_json)
+            preparation.confirm(stored_data, self.uploads / stored.image_path, document_mode="auto_split", type_confirmed=True)
+            stored_data["origin"]["preparation"]["layout_pending"] = True
+            stored.current_json = json.dumps(stored_data, ensure_ascii=False)
+            stored.updated_at = datetime.now()
+            session.add(stored)
+            import_jobs.queue_layout(session, stored, 1)
+            session.commit()
+        queued = review.get_voucher(rec_id)
         self.assertEqual(queued.status, ReviewStatus.prepared)
         self.assertTrue(json.loads(queued.current_json)["origin"]["preparation"]["layout_pending"])
         self.assertEqual(import_jobs.get_job(job["id"], 1)["pages"][0]["status"], "queued")

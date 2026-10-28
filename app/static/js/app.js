@@ -18,6 +18,8 @@
   let currentIsImport = false;
   let DOC_TYPES = {};   // 各單據類型欄位契約（/api/doc-types）
   let cropping = false; // 裁切模式中
+  let edgeMode = false; // 沿邊緣拉線對齊模式中
+  let imageToolsLocked = false; // 自動分割來源頁不可改影像
 
   // 後端錯誤轉人看得懂的字串：detail 可能是字串、FastAPI 422 的物件陣列、或整包物件。
   // 直接把 detail 丟給 alert()，遇到後兩者會顯示「[object Object]」，等於錯誤訊息被吃掉。
@@ -332,9 +334,9 @@
     if (autoSplit) {
       return trace.regions === 1
         ? "<b>來源頁</b>：此頁為單張完整單據，已建立對應的單據；來源頁僅保留原圖供追溯，請處理清單中的該單據，不需重複處理。"
-        : "<b>來源頁</b>：此頁已自動拆分為多張單據，來源頁僅保留原圖供追溯；請開啟清單中拆分出的單據處理。";
+        : "<b>來源頁</b>：這一頁含有多張單據，系統已自動拆分；來源頁僅保留原圖供追溯，請開啟清單中拆分出的單據逐張處理，或改以一頁一張重新處理。";
     }
-    return "<b>來源頁（待人工處理）</b>：系統無法自動分割此頁。請用上方「裁切為新憑證」建立單據；來源頁保留供追溯，不會確認或送入辨識。";
+    return "<b>來源頁（待人工處理）</b>：系統無法判定此頁只有一張單據。本系統一次只處理一頁一張，請改以一頁一張重新處理；來源頁保留供追溯，不會確認或送入辨識。";
   }
 
   // ── 清單 ──
@@ -520,20 +522,24 @@
     $("fastTiming").textContent = timings ? [["首次預覽",timings.first_preview_seconds],["人工確認等待",timings.human_wait_seconds],["本次辨識",timings.recognition_seconds],["OCR",timings.ocr_seconds],["補讀OCR",timings.supplement_ocr_seconds],["上傳至今",timings.overall_seconds]].filter(([,value]) => value != null).map(([label,value]) => `${label} ${Number(value).toFixed(1)} 秒`).join(" · ") : "";
     $("manualPreparation").classList.toggle("hidden", !(manualMode && isPrepared));
     $("directionConfirmed").checked = false;
-    $("documentMode").value = prep?.document_mode || "single";
     $("revForm").classList.toggle("prepared", isPreExtract);
     $("prepHint").classList.toggle("hidden", !isPreExtract && !autoSplitSource);
     $("btnConfirmRecognize").classList.toggle("hidden", !isPreExtract);
     $("btnConfirmRecognize").disabled = sourcePage;
+    // 外觀確認階段還沒有欄位可重辨；重新辨識只在待確認／已確認時出現，外觀確認改放「復原」。
+    $("btnReRecognize").classList.toggle("hidden", isPreExtract);
     $("btnReRecognize").disabled = sourcePage;
+    $("btnRestore").classList.toggle("hidden", !isPrepared);
     $("btnConfirm").disabled = sourcePage;
-    ["btnRotL", "btnRotR", "btnFineRot", "btnCrop", "btnSplit"].forEach((id) => { $(id).disabled = autoSplitSource; });
+    imageToolsLocked = autoSplitSource;
+    resetFineTool();
+    updateRestoreButton(rec.image_restore_available);
     $("revConfWrap").classList.toggle("hidden", isPreExtract || autoSplitSource);
     if (isPrepared) {
       stageAction = "confirm";
       $("btnConfirmRecognize").textContent = "✅ 確認外觀（加入掃描清單）";
-      $("prepHint").innerHTML = "<b>② 外觀確認</b>：確認上方「單據類型」正確，並用工具列旋轉／裁切／分割整理影像；完成後按「✅ 確認外觀」加入③掃描清單。";
-      if (manualMode) $("prepHint").innerHTML = "<b>② 外觀確認</b>：先整理方向與裁切，確認單據張數後再開始辨識。類型未指定時會自動判斷。";
+      $("prepHint").innerHTML = "<b>② 外觀確認</b>：確認上方「單據類型」正確，並用工具列旋轉／微調／裁切整理這一張影像（改壞了可按「復原」）；完成後按「✅ 確認外觀」加入③掃描清單。";
+      if (manualMode) $("prepHint").innerHTML = "<b>② 外觀確認</b>：一頁一張，先整理方向、微調與裁切，確認方向後再開始辨識。類型未指定時會自動判斷。";
     } else if (isQueued) {
       stageAction = "recognize";
       $("btnConfirmRecognize").textContent = "🔍 辨識此張";
@@ -633,6 +639,7 @@
     if ("manual_entry" in record) currentManualEntry = !!record.manual_entry;
     if (record.updated_at) currentVersion = record.updated_at;
     if (record.current?.origin) currentVoucher.origin = record.current.origin;
+    if ("image_restore_available" in record) updateRestoreButton(record.image_restore_available);
     setStatus(record.status);
     setPendingActionVisibility(record.status);
     applyRecognitionState(record);
@@ -766,7 +773,7 @@
     }, { passive: false });
     let panning = false, sx = 0, sy = 0;
     zoom.addEventListener("mousedown", (e) => {
-      if (cropping) return;
+      if (cropping || edgeMode) return;   // 裁切框選與沿邊緣拉線時，拖曳不做平移
       panning = true; sx = e.clientX; sy = e.clientY; zoom.classList.add("panning"); e.preventDefault();
     });
     window.addEventListener("mousemove", (e) => {
@@ -1284,10 +1291,7 @@
     const result = await resp.json();
     if (!result.ok) { alert("旋轉失敗"); return; }
     await refreshCurrentStatus();
-    const img = $("revImage");
-    img.onload = () => { resetZoom(); drawBoxes({}); };   // 旋轉後清框（不再對齊）
-    img.src = `/api/vouchers/${currentId}/image?t=${Date.now()}`;
-    if (currentVoucher) currentVoucher.boxes = {};
+    reloadImage();   // 旋轉後清框（不再對齊），並丟掉尚未套用的角度預覽
     if (currentVoucher.origin?.preparation?.mode === "manual_review") await openReview(currentId);
     toast("已旋轉，請重新確認目前影像方向");
   }
@@ -1299,37 +1303,171 @@
     img.onload = () => { resetZoom(); drawBoxes({}); };
     img.src = `/api/vouchers/${currentId}/image?t=${Date.now()}`;
     if (currentVoucher) currentVoucher.boxes = {};
+    resetFineTool();
   }
 
-  // 微調角度旋轉（去歪斜）
-  $("btnFineRot").addEventListener("click", async () => {
-    if (!currentId) return;
-    const angle = Number($("fineAngle").value) || 0;
-    if (!angle) return;
-    const resp = await fetch(`/api/vouchers/${currentId}/rotate-fine`, { method: "POST", headers: json(), body: JSON.stringify({ angle, expected_updated_at:currentVersion }) });
-    if (!resp.ok) { alert(await responseError(resp, "微調失敗")); return; }
-    if (!(await resp.json()).ok) { alert("微調失敗"); return; }
+  // ── 微調角度（去歪斜）：先用 CSS 預覽，按「套用」才寫入影像 ──
+  // fineDelta 是「這一次還要再轉的角度」；已套用的累計角度在 preparation.fine_angle。
+  // 寫入時送累計角度，伺服器每次都從微調前的原圖轉一次，不會一層層重取樣。
+  const FINE_LIMIT = 15;
+  let fineDelta = 0, fineBusy = false, edgeStart = null;
+  const round1 = (v) => Math.round(v * 10) / 10;
+  const round2 = (v) => Math.round(v * 100) / 100;
+  function fineApplied() { return Number(currentVoucher?.origin?.preparation?.fine_angle) || 0; }
+  function clampFineDelta(d) {
+    const applied = fineApplied();
+    return Math.max(-FINE_LIMIT - applied, Math.min(FINE_LIMIT - applied, d));
+  }
+  function updateFineControls(keepInput) {
+    const applied = fineApplied();
+    const locked = imageToolsLocked || cropping || fineBusy;
+    const slider = $("fineSlider");
+    slider.min = String(round2(-FINE_LIMIT - applied)); slider.max = String(round2(FINE_LIMIT - applied));
+    slider.value = String(fineDelta);
+    if (!keepInput) $("fineAngle").value = String(fineDelta);
+    ["btnFineMinus", "btnFinePlus", "fineSlider", "fineAngle", "btnFineEdge"].forEach((id) => { $(id).disabled = locked; });
+    $("btnFineRot").disabled = locked || fineDelta === 0;
+    $("btnFineCancel").disabled = locked || (fineDelta === 0 && !edgeMode);
+    $("btnFineReset").disabled = locked || applied === 0;
+    $("btnFineEdge").classList.toggle("active", edgeMode);
+    ["btnRotL", "btnRotR", "btnCrop"].forEach((id) => { $(id).disabled = imageToolsLocked || fineBusy; });
+    $("fineGuide").classList.toggle("hidden", !(fineDelta !== 0 || edgeMode));
+  }
+  function renderFinePreview() {
+    const img = $("revImage");
+    if (fineDelta === 0) { img.style.transform = ""; img.classList.remove("fine-preview"); return; }
+    const rad = Math.abs(fineDelta) * Math.PI / 180, c = Math.cos(rad), s = Math.sin(rad);
+    const w = img.clientWidth || 1, h = img.clientHeight || 1;
+    // 伺服器旋轉後畫布會變大、再縮放顯示；預覽用同樣縮放，整張才看得到。
+    const scale = Math.min(w / (w * c + h * s), h / (w * s + h * c));
+    img.classList.add("fine-preview");
+    img.style.transform = `rotate(${fineDelta}deg) scale(${scale})`;
+  }
+  function setFineDelta(value, opts = {}) {
+    let d = Number(value);
+    if (!Number.isFinite(d)) d = 0;
+    const clamped = round1(clampFineDelta(d));
+    if (clamped !== round1(d) && !opts.quiet) toast(`累計角度上限 ±${FINE_LIMIT}°（目前已套用 ${fineApplied()}°）`);
+    fineDelta = clamped;
+    renderFinePreview();
+    updateFineControls(opts.keepInput);
+  }
+  function exitEdgeMode() {
+    edgeMode = false; edgeStart = null;
+    $("edgeSvg").classList.add("hidden");
+    const inner = document.querySelector(".rev-image-inner");
+    if (inner) inner.classList.remove("in-edge");
+  }
+  /** 丟掉尚未套用的預覽與拉線，回到已套用的圖（取消、換圖、改圖後都走這裡）。 */
+  function resetFineTool() {
+    fineDelta = 0;
+    exitEdgeMode();
+    renderFinePreview();
+    updateFineControls();
+  }
+  function updateRestoreButton(available) {
+    $("btnRestore").disabled = !available || imageToolsLocked || fineBusy;
+  }
+  $("btnFineMinus").addEventListener("click", () => setFineDelta(round1(fineDelta - 0.5)));
+  $("btnFinePlus").addEventListener("click", () => setFineDelta(round1(fineDelta + 0.5)));
+  $("fineSlider").addEventListener("input", (e) => setFineDelta(e.target.value, { quiet: true }));
+  $("fineAngle").addEventListener("input", (e) => setFineDelta(e.target.value, { keepInput: true, quiet: true }));
+  $("fineAngle").addEventListener("change", (e) => setFineDelta(e.target.value));
+  $("btnFineCancel").addEventListener("click", resetFineTool);
+  $("btnFineEdge").addEventListener("click", () => {
+    if (cropping || imageToolsLocked) return;
+    if (edgeMode) { exitEdgeMode(); updateFineControls(); return; }
+    edgeMode = true;
+    document.querySelector(".rev-image-inner")?.classList.add("in-edge");
+    updateFineControls();
+    toast("沿單據邊緣或表格線拉一條線，放開後會算出要轉的角度");
+  });
+  /** 沿邊緣拉線 → 讓這條線變水平（或垂直）所需的最小順時針角度，折進 ±45°。 */
+  function edgeCorrection(dx, dy) {
+    const theta = Math.atan2(dy, dx) * 180 / Math.PI;      // 螢幕座標（y 向下），正值＝順時針
+    const folded = ((theta + 45) % 90 + 90) % 90 - 45;     // 與水平／垂直的夾角
+    return -folded;                                        // 反向轉掉這個夾角
+  }
+  (function initEdgeLine() {
+    const inner = document.querySelector(".rev-image-inner");
+    const svg = $("edgeSvg"), line = $("edgeLine");
+    if (!inner || !svg || !line) return;
+    const point = (e) => {
+      const r = inner.getBoundingClientRect();
+      return { x: Math.max(0, Math.min(r.width, e.clientX - r.left)), y: Math.max(0, Math.min(r.height, e.clientY - r.top)) };
+    };
+    inner.addEventListener("mousedown", (e) => {
+      if (!edgeMode) return;
+      edgeStart = point(e);
+      line.setAttribute("x1", edgeStart.x); line.setAttribute("y1", edgeStart.y);
+      line.setAttribute("x2", edgeStart.x); line.setAttribute("y2", edgeStart.y);
+      svg.classList.remove("hidden"); e.preventDefault();
+    });
+    window.addEventListener("mousemove", (e) => {
+      if (!edgeMode || !edgeStart) return;
+      const p = point(e);
+      line.setAttribute("x2", p.x); line.setAttribute("y2", p.y);
+    });
+    window.addEventListener("mouseup", (e) => {
+      if (!edgeMode || !edgeStart) return;
+      const p = point(e), dx = p.x - edgeStart.x, dy = p.y - edgeStart.y;
+      if (Math.hypot(dx, dy) < 30) {
+        edgeStart = null; svg.classList.add("hidden");
+        toast("線太短，請沿邊緣拉長一點");
+        return;
+      }
+      // 畫面上的線已包含目前預覽的旋轉，所以是在現有預覽上再加一次修正。
+      const next = fineDelta + edgeCorrection(dx, dy);
+      exitEdgeMode();
+      setFineDelta(next);
+    });
+  })();
+  async function applyFine(reset) {
+    if (!currentId || fineBusy) return;
+    const angle = reset ? 0 : round2(fineApplied() + fineDelta);
+    if (reset ? fineApplied() === 0 : fineDelta === 0) return;
+    fineBusy = true; updateFineControls();
+    try {
+      const resp = await fetch(`/api/vouchers/${currentId}/rotate-fine`, { method: "POST", headers: json(), body: JSON.stringify({ angle, reset, expected_updated_at:currentVersion }) });
+      if (!resp.ok) { alert(await responseError(resp, reset ? "還原微調失敗" : "微調失敗")); return; }
+      if (!(await resp.json()).ok) { alert(reset ? "還原微調失敗" : "微調失敗"); return; }
+      await refreshCurrentStatus();
+      fineBusy = false;
+      reloadImage(); if (currentVoucher.origin?.preparation?.mode === "manual_review") await openReview(currentId);
+      toast(reset ? "已還原微調，請重新確認目前影像方向" : `已套用微調，累計 ${angle}°，請重新確認目前影像方向`);
+    } finally {
+      fineBusy = false; updateFineControls();
+    }
+  }
+  $("btnFineRot").addEventListener("click", () => applyFine(false));
+  $("btnFineReset").addEventListener("click", () => applyFine(true));
+
+  // 復原：影像回到剛進入外觀確認時的狀態（旋轉、微調、裁切全部撤銷），不呼叫模型。
+  $("btnRestore").addEventListener("click", async () => {
+    if (!currentId || $("btnRestore").disabled) return;
+    if (!confirm("復原會把影像換回剛進入外觀確認時的狀態，旋轉、微調與裁切都會撤銷，方向確認也需重勾。\n\n確定要復原嗎？")) return;
+    const resp = await fetch(`/api/vouchers/${currentId}/restore-image`, { method: "POST", headers: json(), body: JSON.stringify({ expected_updated_at:currentVersion }) });
+    if (!resp.ok) { alert(await responseError(resp, "復原失敗")); return; }
+    if (!(await resp.json()).ok) { alert("復原失敗"); return; }
     await refreshCurrentStatus();
-    reloadImage(); if (currentVoucher.origin?.preparation?.mode === "manual_review") await openReview(currentId);
-    toast(`已微調 ${angle}°，請重新確認目前影像方向`);
+    reloadImage(); await openReview(currentId);
+    toast("已復原為剛進入外觀確認時的影像，請重新確認目前影像方向");
   });
 
-  // ── 裁切 / 分割模式 ──
+  // ── 裁切模式（只修目前這一張，不拆出新憑證）──
   let cropStart = null;
-  let splitMode = false;
   function setCropMode(on) {
     cropping = on;
     $("btnCrop").classList.toggle("hidden", on);
-    $("btnSplit").classList.toggle("hidden", on);
     $("btnCropOk").classList.toggle("hidden", !on);
     $("btnCropCancel").classList.toggle("hidden", !on);
     const inner = document.querySelector(".rev-image-inner");
     if (inner) inner.classList.toggle("in-crop", on);   // 十字游標（含影像區）
-    if (on) resetZoom();
-    if (!on) { $("cropSel").classList.add("hidden"); cropStart = null; splitMode = false; }
+    if (on) { resetZoom(); resetFineTool(); }   // 裁切座標以未旋轉預覽的影像為準
+    else updateFineControls();
+    if (!on) { $("cropSel").classList.add("hidden"); cropStart = null; }
   }
-  $("btnCrop").addEventListener("click", () => { splitMode = false; setCropMode(true); });
-  $("btnSplit").addEventListener("click", () => { splitMode = true; setCropMode(true); toast("框選一張憑證，按「確認」建立為新紀錄（該區會從原圖塗白）"); });
+  $("btnCrop").addEventListener("click", () => setCropMode(true));
   $("btnCropCancel").addEventListener("click", () => setCropMode(false));
 
   (function initCrop() {
@@ -1365,29 +1503,14 @@
     const W = parseFloat(sel.style.width) / iw, H = parseFloat(sel.style.height) / ih;
     if (W < 0.02 || H < 0.02) { alert("裁切範圍太小"); return; }
     const box = [L, T, L + W, T + H];
-    if (splitMode) {
-      setCropMode(false);
-      const srcId = currentId;
-      const d = await withInferProgress("分割工作副本中…", () =>
-        fetch(`/api/vouchers/${srcId}/split`, { method: "POST", headers: json(), body: JSON.stringify({ box, expected_updated_at:currentVersion }) }).then((r) => r.json()));
-      if (!d.ok) { alert(errText(d, "分割失敗")); return; }
-      toast("已建立新憑證（原圖該區已塗白）"); loadList();
-      if (d.source_blank) {
-        alert(`原憑證 #${srcId} 的內容已全部分割出去，剩下空白頁。請合併或不再處理它。`);
-      } else if (d.source_extracted) {
-        alert(`原憑證 #${srcId} 的影像已變動（該區塗白），先前辨識的欄位對應的是舊影像，請對它按「🔄 重新辨識」。`);
-      }
-      if (d.id) openReview(d.id);
-    } else {
-      if (!confirm("「裁切」會取代目前憑證的原圖且無法復原。\n若是要把一頁多張拆開，請改用「✂➕ 裁切為新憑證」。\n\n確定要裁切目前這張嗎？")) return;
-      const r = await fetch(`/api/vouchers/${currentId}/crop`, { method: "POST", headers: json(), body: JSON.stringify({ box, expected_updated_at:currentVersion }) });
-      setCropMode(false);
-      if (!r.ok) { alert("裁切失敗"); return; }
-      if (!(await r.json()).ok) { alert("裁切失敗"); return; }
-      await refreshCurrentStatus();
-      reloadImage(); if (currentVoucher.origin?.preparation?.mode === "manual_review") await openReview(currentId);
-      toast("已裁切，請重新確認目前影像方向");
-    }
+    if (!confirm("「裁切」會取代目前影像，框外的部分會被去除。\n要回到剛進入外觀確認時的影像，請按「復原」。\n\n確定要裁切目前這張嗎？")) return;
+    const r = await fetch(`/api/vouchers/${currentId}/crop`, { method: "POST", headers: json(), body: JSON.stringify({ box, expected_updated_at:currentVersion }) });
+    setCropMode(false);
+    if (!r.ok) { alert(await responseError(r, "裁切失敗")); return; }
+    if (!(await r.json()).ok) { alert("裁切失敗"); return; }
+    await refreshCurrentStatus();
+    reloadImage(); if (currentVoucher.origin?.preparation?.mode === "manual_review") await openReview(currentId);
+    toast("已裁切，請重新確認目前影像方向");
   });
   function clearReview() {
     $("revForm").classList.add("hidden"); $("revEmpty").classList.remove("hidden"); currentId = null;
@@ -1400,11 +1523,10 @@
     const tk = $("revTypeSel").value;
     const manual = currentVoucher.origin?.preparation?.mode === "manual_review";
     if (manual && !$("directionConfirmed").checked) { alert("請先確認目前影像方向正確"); return; }
-    const mode = manual ? $("documentMode").value : "single";
-    const d = await (await fetch(`/api/vouchers/${currentId}/confirm-appearance`, { method: "POST", headers: json(), body: JSON.stringify({ doc_type_key: tk,expected_updated_at:currentVersion,direction_confirmed:manual && $("directionConfirmed").checked,document_mode:mode }) })).json();
+    // 外觀確認固定一頁一張、一次一張；不再提供多張切分。
+    const d = await (await fetch(`/api/vouchers/${currentId}/confirm-appearance`, { method: "POST", headers: json(), body: JSON.stringify({ doc_type_key: tk,expected_updated_at:currentVersion,direction_confirmed:manual && $("directionConfirmed").checked,document_mode:"single" }) })).json();
     if (!d.ok) { alert(errText(d, "確認失敗")); return; }
-    if (mode === "manual_split") { toast("請使用「裁切為新憑證」框選每張單據"); await openReview(currentId); return; }
-    toast(d.layout_pending ? "已排入自動切分" : "已加入掃描清單"); clearReview(); loadList(); restoreImportJobs();
+    toast("已加入掃描清單"); clearReview(); loadList(); restoreImportJobs();
   }
 
   $("btnReRecognize").addEventListener("click", runRecognize);

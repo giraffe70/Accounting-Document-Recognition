@@ -42,11 +42,30 @@ def changed(data, operation=None):
     if not value.get("type_confirmed"):
         data["doc_type_key"], data["doc_type"] = "", ""
         data.setdefault("field_evidence",{}).pop("doc_type_key",None)
-    if operation and operation.get("kind") in ("rotate", "crop"):
+    kind = (operation or {}).get("kind")
+    # 第一次動影像時記住原本能否沿用 PDF 文字層，復原後才能還原。
+    value.setdefault("pdf_baseline", bool(value.get("pdf_enabled")))
+    if kind in ("rotate", "crop"):
         value.setdefault("transforms", []).append(operation)
+        value["fine_angle"] = 0   # 90° 與裁切會把已套用的微調定稿
+    elif kind == "fine":
+        # 微調只記目前累計角度，不逐次追加 transform。
+        value["fine_angle"] = float(operation.get("angle") or 0)
+        value["pdf_enabled"] = False
     else:
         value["pdf_enabled"] = False
     data.setdefault("origin", {})["preparation"] = value
+
+
+def restored(data):
+    """影像回到復原點：撤銷旋轉、裁切、微調與方向確認。"""
+    changed(data)
+    value = state(data)
+    if not value:
+        return
+    value["transforms"] = []
+    value["fine_angle"] = 0
+    value["pdf_enabled"] = bool(value.pop("pdf_baseline", value.get("pdf_enabled")))
 
 
 def confirm(data, path, *, document_mode="single", type_confirmed=False, actor_id=None):

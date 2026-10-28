@@ -35,6 +35,56 @@ def _apply_company(data, session, *, company_id=None, company="", fill_fields=Tr
     return data
 
 
+FINE_ANGLE_LIMIT = 15.0
+
+
+def _sidecar(path, kind):
+    """工作圖旁的衍生檔：baseline（復原點）、deskew（微調前原圖）。"""
+    return path.with_suffix("." + kind + path.suffix)
+
+
+def _ensure_baseline(path) -> None:
+    """舊資料沒有復原點時，第一次改圖前存下當時的工作圖；已存在就不覆寫。"""
+    baseline = _sidecar(path, "baseline")
+    if not baseline.exists():
+        shutil.copyfile(path, baseline)
+
+
+def _drop_sidecar(path, kind) -> None:
+    try:
+        _sidecar(path, kind).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _replace_image(source, target) -> None:
+    """先寫暫存檔再取代，避免中途失敗留下半張圖。"""
+    import uuid
+    temporary = target.with_name(f"{target.stem}.{uuid.uuid4().hex[:8]}.tmp{target.suffix}")
+    try:
+        shutil.copyfile(source, temporary)
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def image_restore_available(rec) -> bool:
+    """有復原點，且目前工作圖與復原點的像素不同。"""
+    if not rec or rec.record_role == "source_page" or rec.status not in (ReviewStatus.prepared, ReviewStatus.queued):
+        return False
+    path = _image_path_of(rec)
+    if not path or not _sidecar(path, "baseline").is_file():
+        return False
+    from PIL import Image, ImageChops
+    try:
+        with Image.open(path) as current, Image.open(_sidecar(path, "baseline")) as baseline:
+            if current.size != baseline.size:
+                return True
+            return ImageChops.difference(current.convert("RGB"), baseline.convert("RGB")).getbbox() is not None
+    except OSError:
+        return False
+
+
 def _ocr_cache_directory(rec):
     """An uploaded source keeps its scope after its document images are copied."""
     import re
@@ -104,6 +154,14 @@ def save_voucher(voucher: Voucher, company: str = "",
                     name = f"i{uuid.uuid4().hex}{ext}"
                     s.info.setdefault("import_images", []).append(pages / name)
                 shutil.copyfile(src, pages / name)
+                if status == ReviewStatus.prepared:
+                    # 外觀確認的復原點：只在進入外觀確認時存一次。
+                    try:
+                        shutil.copyfile(src, _sidecar(pages / name, "baseline"))
+                        if session is not None:
+                            s.info.setdefault("import_images", []).append(_sidecar(pages / name, "baseline"))
+                    except OSError:
+                        pass   # 沒有復原點不影響主流程；之後第一次改圖時會補存
                 rec.image_path = f"pages/{name}"
                 s.add(rec)
                 if session is None:
@@ -707,14 +765,17 @@ def set_notes(rec_id: int, **notes) -> Optional[VoucherRecord]:
         return rec
 
 
-def _clear_boxes(rec_id: int, *, session=None, actor=None, operation=None):
-    """影像變動後既有 boxes 不再對齊，清除之。"""
+def _clear_boxes(rec_id: int, *, session=None, actor=None, operation=None, restore=False):
+    """影像變動後既有 boxes 不再對齊，清除之。restore=True 表示影像回到復原點。"""
     with (nullcontext(session) if session is not None else get_session()) as s:
         r = s.get(VoucherRecord, rec_id)
         cur = json.loads(r.current_json)
         cur["boxes"] = {}
         from app.core import preparation
-        preparation.changed(cur, operation)
+        if restore:
+            preparation.restored(cur)
+        else:
+            preparation.changed(cur, operation)
         _invalidate_confirmation(r, entry_flow.user_identity(s, actor))
         if preparation.manual(cur):
             r.status = ReviewStatus.prepared
@@ -743,33 +804,84 @@ def rotate_image(rec_id: int, direction: str = "cw", *, expected_updated_at=None
         from PIL import Image
         tp = Image.Transpose.ROTATE_270 if direction == "cw" else Image.Transpose.ROTATE_90
         try:
+            _ensure_baseline(p)
             with Image.open(p) as image:
                 input_size = list(image.size)
                 image.transpose(tp).save(p)
         except OSError:
             return None
+        _drop_sidecar(p, "deskew")   # 已套用的微調在這裡定稿；下一次微調以新的工作圖為原圖
         _clear_boxes(rec_id, session=session, actor=actor, operation={"kind":"rotate","cw":90 if direction == "cw" else 270,"input_size":input_size})
         session.commit()
         return True
 
 
-def rotate_fine(rec_id: int, angle: float, *, expected_updated_at=None, actor=None):
-    """微調角度旋轉（去歪斜），正值＝順時針；空白處補白。"""
+def rotate_fine(rec_id: int, angle: float, *, reset: bool = False, expected_updated_at=None, actor=None):
+    """微調角度（去歪斜）。angle 是累計角度（正值＝順時針），不是再疊一次的增量。
+
+    每次都從 deskew 原圖（第一次微調前的工作圖）轉到累計角度，只重取樣一次；
+    angle 為 0 或 reset=True 時把 deskew 原圖蓋回工作圖。"""
+    from app.core import preparation
+    try:
+        target = 0.0 if reset else float(angle)
+    except (TypeError, ValueError):
+        raise RecognitionProtected("微調角度無效")
+    if target != target or abs(target) > FINE_ANGLE_LIMIT:
+        raise RecognitionProtected(f"微調角度需介於 ±{FINE_ANGLE_LIMIT:g}°")
+    target = round(target, 2)
     with _source_edit(rec_id, expected_updated_at) as (session, rec):
         if rec and rec.record_role == "source_page":
             raise RecognitionProtected("來源頁原圖保留不變，請對子憑證旋轉或裁切")
         p = _image_path_of(rec)
         if not p:
             return None
+        applied = float(preparation.state(json.loads(rec.current_json)).get("fine_angle") or 0)
+        deskew = _sidecar(p, "deskew")
+        if target == applied and (target != 0 or not deskew.exists()):
+            return True
         from PIL import Image
         try:
-            if float(angle) % 360 == 0:
-                return True
-            with Image.open(p) as image:
-                image.convert("RGB").rotate(-float(angle), expand=True, fillcolor=(255, 255, 255)).save(p)
-        except (OSError, ValueError):
+            if target == 0:
+                if not deskew.is_file():
+                    raise RecognitionProtected("找不到微調前的影像，無法還原微調")
+                _replace_image(deskew, p)
+                deskew.unlink(missing_ok=True)
+            else:
+                _ensure_baseline(p)
+                if not deskew.exists():
+                    if applied:
+                        raise RecognitionProtected("找不到微調前的影像，請先復原影像")
+                    shutil.copyfile(p, deskew)
+                with Image.open(deskew) as image:
+                    rotated = image.convert("RGB").rotate(-target, expand=True, resample=Image.Resampling.BICUBIC,
+                                                          fillcolor=(255, 255, 255))
+                rotated.save(p)
+        except OSError:
             return None
-        _clear_boxes(rec_id, session=session, actor=actor)
+        _clear_boxes(rec_id, session=session, actor=actor, operation={"kind": "fine", "angle": target})
+        session.commit()
+        return True
+
+
+def restore_image(rec_id: int, *, expected_updated_at=None, actor=None):
+    """把工作圖換回剛進入外觀確認時的影像（baseline），並撤銷旋轉、裁切、微調與方向確認。不呼叫模型。"""
+    with _source_edit(rec_id, expected_updated_at) as (session, rec):
+        if not rec:
+            return None
+        if rec.record_role == "source_page":
+            raise RecognitionProtected("來源頁原圖保留不變，請對子憑證復原")
+        if rec.status not in (ReviewStatus.prepared, ReviewStatus.queued):
+            raise RecognitionProtected("已完成內容辨識，無法復原影像")
+        p = _image_path_of(rec)
+        baseline = _sidecar(p, "baseline") if p else None
+        if not baseline or not baseline.is_file():
+            raise RecognitionProtected("沒有可復原的原始影像")
+        try:
+            _replace_image(baseline, p)
+        except OSError:
+            return None
+        _drop_sidecar(p, "deskew")
+        _clear_boxes(rec_id, session=session, actor=actor, restore=True)
         session.commit()
         return True
 
@@ -1007,10 +1119,12 @@ def crop_image(rec_id: int, box, *, expected_updated_at=None, actor=None):
                     return None
                 if (L, T, R, B) == (0, 0, w, h):
                     return True
+                _ensure_baseline(p)
                 _backup_once(p)
                 im.crop((L, T, R, B)).save(p)
         except (OSError, ValueError, TypeError):
             return None
+        _drop_sidecar(p, "deskew")   # 已套用的微調在這裡定稿
         _clear_boxes(rec_id, session=session, actor=actor, operation={"kind":"crop","pixels":[L,T,R,B],"input_size":[w,h]})
         session.commit()
         return True
@@ -1105,6 +1219,8 @@ def confirm_appearance(rec_id: int, type_key: str = "", *, expected_updated_at=N
                 raise RecognitionProtected("未知的單據類型")
             if document_mode not in preparation.DOCUMENT_MODES:
                 raise RecognitionProtected("未知的單據張數處理方式")
+            if document_mode != "single":
+                raise RecognitionProtected("外觀確認一次只處理一頁一張單據")
             if type_key:
                 _apply_type(rec, type_key)
                 data = json.loads(rec.current_json)
@@ -1452,6 +1568,11 @@ def _cleanup_deleted_files(deleted: list) -> tuple:
         for rel in [item["image_path"], *item["attachments"]]:
             if rel:
                 remove(upload_dir / rel)
+        if item["image_path"]:
+            image = upload_dir / item["image_path"]
+            for kind in ("baseline", "deskew", "orig"):
+                if _sidecar(image, kind).exists():
+                    remove(_sidecar(image, kind))
         prefix = re.compile(rf"^{item['id']}(?=[._])")
         for name in names:
             if prefix.match(name):

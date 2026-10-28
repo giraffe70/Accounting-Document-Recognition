@@ -203,6 +203,9 @@ const currentUser = { is_admin: !!input.is_admin };
 const companyRecords = input.companies || [{ id: 3, name: '甲公司', short: '甲公司', tax_id: '12345678' }];
 const fileInput = { value: 'selected-file' }, progressText = { textContent: '' }, progress = { classList: { remove() {} } }, barFill = { style: {} };
 function setCropMode() {}
+function resetFineTool() {}
+const restoreCalls = [];
+function updateRestoreButton(available) { restoreCalls.push(available); }
 function setStatus() {}
 function setPendingActionVisibility() {}
 function updateRecognitionState() {}
@@ -249,7 +252,7 @@ const context = { console, events, requests, input, nodes, $, currentUser, fileI
   updateRecognitionState, applyRecognitionState,
   DOC_TYPES: { other: { fields: [] } }, companyRecords,
   async loadItemAccountChart() { events.push({ type: 'loadItemAccountChart', company: node('revCompanySel').value }); },
-  setCropMode, setStatus, setPendingActionVisibility, populateTypeSel, buildActiveFields, renderFields, renderItems,
+  setCropMode, resetFineTool, updateRestoreButton, setStatus, setPendingActionVisibility, populateTypeSel, buildActiveFields, renderFields, renderItems,
   renderTaxcheck, renderDatecheck, renderAmountcheck, renderEntries, setupImage, renderPages, sourceHintHtml, sourceTrace,
   esc, loadList, alert, toast, confirm, json, persistCurrentEdits, withInferProgress, fetch };
 vm.createContext(context);
@@ -264,6 +267,8 @@ vm.runInContext(reviewCode + '\nglobalThis.api = { openReview, clearReview, appl
     out.currentVersion = context.currentVersion;
     out.reviewedItems = context.reviewedItems;
     out.absentNodes = [...removed].every((id) => !nodes[id]);
+    out.restoreCalls = restoreCalls;
+    out.hiddenTools = Object.fromEntries(['btnReRecognize', 'btnRestore'].map((id) => [id, node(id).classList.contains('hidden')]));
   } else if (input.action === 'role') {
     context.api.applyRole();
     out.visible = Object.fromEntries(['databaseBtn', 'usersBtn', 'settingsBtn'].map((id) => [id, !node(id).classList.contains('hidden')]));
@@ -555,6 +560,53 @@ class ConfirmationFrontendTests(unittest.TestCase):
         admin = self.run_review(action="role", is_admin=True)
         self.assertTrue(all(admin["visible"].values()))
 
+    def test_appearance_stage_swaps_re_recognize_for_restore(self):
+        prepared = {**self.review_record(), "status": "prepared", "image_restore_available": True}
+        opened = self.run_review(action="open", recordId=12, records={"12": prepared})
+        self.assertEqual(opened["hiddenTools"], {"btnReRecognize": True, "btnRestore": False})
+        self.assertEqual(opened["restoreCalls"], [True])
+
+        queued = self.run_review(action="open", recordId=12, records={"12": {**prepared, "status": "queued"}})
+        self.assertEqual(queued["hiddenTools"], {"btnReRecognize": True, "btnRestore": True})
+
+        pending = self.run_review(action="open", recordId=12, records={"12": self.review_record()})
+        self.assertEqual(pending["hiddenTools"], {"btnReRecognize": False, "btnRestore": True})
+
+    def test_appearance_toolbar_has_one_crop_and_no_split_or_page_mode(self):
+        html = APP_HTML.read_text(encoding="utf-8")
+        for removed in ('id="btnSplit"', 'id="documentMode"', "裁切為新憑證", "多張混貼"):
+            self.assertNotIn(removed, html)
+        for marker in ('id="btnCrop"', 'id="btnRestore"', 'id="btnFineMinus"', "−0.5°", 'id="btnFinePlus"', "+0.5°",
+                       'id="fineSlider"', 'id="btnFineEdge"', 'id="btnFineRot"', 'id="btnFineCancel"', 'id="btnFineReset"',
+                       'id="fineGuide"'):
+            self.assertIn(marker, html)
+        self.assertEqual(html.count("✂"), 1)
+        self.assertNotIn("/split", self.source)
+        self.assertNotIn("splitMode", self.source)
+        self.assertIn('document_mode:"single"', self.source)
+        self.assertIn("/restore-image", self.source)
+
+    def test_edge_line_correction_levels_the_line_with_the_smallest_turn(self):
+        script = r"""
+const fs = require('fs'); const vm = require('vm');
+const input = JSON.parse(fs.readFileSync(0, 'utf8')); const source = input.source;
+const start = source.indexOf('  function edgeCorrection('), end = source.indexOf('  (function initEdgeLine()', start);
+if (start < 0 || end < 0) throw new Error('could not locate edgeCorrection');
+const context = { Math }; vm.createContext(context);
+vm.runInContext(source.slice(start, end) + '\nglobalThis.f = edgeCorrection;', context);
+process.stdout.write(JSON.stringify(input.cases.map(([dx, dy]) => context.f(dx, dy))));
+"""
+        cases = [[100, 0], [100, 5], [100, -5], [-100, -5], [5, 100], [-5, 100], [100, 100]]
+        completed = subprocess.run([str(NODE), "-e", script],
+                                   input=json.dumps({"source": self.source, "cases": cases}).encode("utf-8"),
+                                   capture_output=True, check=False)
+        self.assertEqual(completed.returncode, 0, completed.stderr.decode("utf-8", errors="replace"))
+        result = json.loads(completed.stdout.decode("utf-8"))
+        # A line tilted clockwise on screen needs a counter-clockwise (negative) turn, and vice versa.
+        expected = [0, -2.862, 2.862, -2.862, 2.862, -2.862, 45]
+        for got, want in zip(result, expected):
+            self.assertAlmostEqual(got, want, places=2)
+
     def test_accounts_management_is_removed_from_frontend(self):
         html = (ROOT / "app" / "static" / "index.html").read_text(encoding="utf-8")
         self.assertNotIn('id="accountsBtn"', html)
@@ -694,7 +746,8 @@ class ConfirmationFrontendTests(unittest.TestCase):
         self.assertIn("不需重複處理", hint)
 
         hint = self.run_trace(None, hint={"row": self.source_row(3, "document", False), "autoSplit": False})["hint"]
-        self.assertIn("裁切為新憑證", hint)
+        self.assertNotIn("裁切為新憑證", hint)
+        self.assertIn("一頁一張", hint)
 
     def run_delete(self, action, **scenario):
         payload = {"source": self.source, "action": action, **scenario}

@@ -481,6 +481,7 @@ def _rec_to_dict(rec: VoucherRecord, full: bool = False) -> dict:
     d["has_image"] = bool(rec.image_path)
     d["attachments"] = len(json.loads(rec.attachments or "[]"))
     if full:
+        d["image_restore_available"] = review.image_restore_available(rec)
         d["ai"] = json.loads(rec.ai_json)
         d["current"] = json.loads(rec.current_json)
         recognition_details.ensure(d["current"], rec.id)
@@ -631,10 +632,19 @@ def api_rotate(request: Request, rec_id: int, direction: str = Body("cw", embed=
 
 
 @app.post("/api/vouchers/{rec_id}/rotate-fine")
-def api_rotate_fine(request: Request, rec_id: int, angle: float = Body(0, embed=True), expected_updated_at: str = Body(..., embed=True)):
-    ok = review.rotate_fine(rec_id, angle, expected_updated_at=expected_updated_at,
+def api_rotate_fine(request: Request, rec_id: int, angle: float = Body(0, embed=True), reset: bool = Body(False, embed=True), expected_updated_at: str = Body(..., embed=True)):
+    """angle 為累計角度（正值順時針，±15°）；reset=true 還原微調。"""
+    ok = review.rotate_fine(rec_id, angle, reset=reset, expected_updated_at=expected_updated_at,
         actor=auth.get_user_by_token(request.cookies.get("session")))
     return {"ok": bool(ok)} if ok else JSONResponse({"detail": "無影像可旋轉"}, status_code=404)
+
+
+@app.post("/api/vouchers/{rec_id}/restore-image")
+def api_restore_image(request: Request, rec_id: int, expected_updated_at: str = Body(..., embed=True)):
+    """外觀確認：影像復原到剛進入外觀確認時的狀態，不呼叫模型。"""
+    ok = review.restore_image(rec_id, expected_updated_at=expected_updated_at,
+        actor=auth.get_user_by_token(request.cookies.get("session")))
+    return {"ok": bool(ok)} if ok else JSONResponse({"detail": "無影像可復原"}, status_code=404)
 
 
 @app.post("/api/vouchers/{rec_id}/crop")

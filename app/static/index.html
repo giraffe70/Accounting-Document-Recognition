@@ -128,11 +128,20 @@
         <div class="rev-toolbar">
           <button id="btnRotL" class="btn btn-sm" title="逆時針旋轉 90°">↺</button>
           <button id="btnRotR" class="btn btn-sm" title="順時針旋轉 90°">↻</button>
-          <span class="fine-rot" title="微調角度去歪斜，正值＝順時針">微調<input id="fineAngle" type="number" step="0.5" value="0">°<button id="btnFineRot" class="btn btn-sm">套用</button></span>
-          <button id="btnCrop" class="btn btn-sm">✂ 裁切</button>
-          <button id="btnSplit" class="btn btn-sm" title="一頁多張憑證時，框選一張建立為新紀錄；該區會從原圖塗白，原圖只留其餘憑證">✂➕ 裁切為新憑證</button>
+          <span class="fine-rot" id="fineTool" title="微調角度去歪斜：先預覽，按「套用」才寫入影像。正值＝順時針，累計上限 ±15°">微調
+            <button id="btnFineMinus" class="btn btn-sm" title="逆時針 0.5°（預覽）">−0.5°</button>
+            <input id="fineSlider" type="range" min="-15" max="15" step="0.1" value="0" aria-label="微調角度滑桿">
+            <button id="btnFinePlus" class="btn btn-sm" title="順時針 0.5°（預覽）">+0.5°</button>
+            <input id="fineAngle" type="number" min="-15" max="15" step="0.1" value="0" aria-label="這次要再轉的角度">°
+            <button id="btnFineEdge" class="btn btn-sm" title="沿單據邊緣或表格線拉一條線，自動算出要轉的角度">沿邊緣對齊</button>
+            <button id="btnFineRot" class="btn btn-sm primary" disabled>套用</button>
+            <button id="btnFineCancel" class="btn btn-sm" disabled>取消預覽</button>
+            <button id="btnFineReset" class="btn btn-sm" disabled title="取消已套用的微調，90° 轉向與裁切保留">還原微調</button>
+          </span>
+          <button id="btnCrop" class="btn btn-sm" title="只保留框選範圍，取代目前這張的影像；要回到剛進外觀確認時的圖請按「復原」">✂ 裁切</button>
           <button id="btnCropOk" class="btn btn-sm primary hidden">✓ 確認</button>
           <button id="btnCropCancel" class="btn btn-sm hidden">取消</button>
+          <button id="btnRestore" class="btn btn-sm hidden" disabled title="影像回到剛進入外觀確認時的狀態（旋轉、微調、裁切全部撤銷）">↶ 復原</button>
           <button id="btnReRecognize" class="btn btn-sm">🔄 重新辨識</button>
           <button id="btnDelete" class="btn btn-sm danger" title="刪除此憑證，或連同整份上傳檔一併刪除">🗑 刪除</button>
         </div>
@@ -150,6 +159,8 @@
               <div id="revBoxes" class="rev-boxes"></div>
             </div>
             <div id="cropSel" class="crop-sel hidden"></div>
+            <div id="fineGuide" class="fine-guide hidden" aria-hidden="true"></div>
+            <svg id="edgeSvg" class="edge-svg hidden" aria-hidden="true"><line id="edgeLine" x1="0" y1="0" x2="0" y2="0"/></svg>
           </div>
           <div id="revPages" class="rev-pages hidden"></div>
           <div class="rev-image-bar">
@@ -168,19 +179,12 @@
           <span id="revConfWrap">　信心度：<span id="revConf" class="tag">—</span></span>
         </div>
         <div id="prepHint" class="callout warn hidden">
-          <b>外觀確認</b>：請先確認上方「單據類型」是否正確（可下拉修正），並用上方工具列<b>旋轉／裁切／分割</b>把影像整理好；
+          <b>外觀確認</b>：請先確認上方「單據類型」是否正確（可下拉修正），並用上方工具列<b>旋轉／微調／裁切／復原</b>把影像整理好；
           完成後按「<b>✅ 確認並辨識</b>」才進行內容辨識與審核。
         </div>
         <div id="manualPreparation" class="callout hidden">
           <label><input id="directionConfirmed" type="checkbox">我已確認目前影像方向正確</label>
-          <label>頁面處理
-            <select id="documentMode" class="select select-sm">
-              <option value="single">一頁一張，直接提取</option>
-              <option value="auto_split">多張混貼，自動切分</option>
-              <option value="manual_split">多張混貼，人工框選</option>
-            </select>
-          </label>
-          <p class="hint">先完成旋轉與裁切，再確認方向。類型可選自動判斷。</p>
+          <p class="hint">一頁一張、一次處理一張。先完成旋轉、微調與裁切，再確認方向。類型可選自動判斷。</p>
         </div>
         <div id="fastTiming" class="hint hidden"></div>
         <div id="reviewBody" class="prep-hide">
