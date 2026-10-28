@@ -250,7 +250,7 @@ def _check_model_write(rec):
     if preparation.manual(data) and (not preparation.confirmed(data, config.UPLOAD_DIR / rec.image_path)
                                     or preparation.state(data).get("document_mode") != "single"
                                     or preparation.state(data).get("layout_pending")):
-        raise RecognitionProtected("請先確認目前影像的方向與單據張數")
+        raise RecognitionProtected("請先完成目前影像的外觀確認")
 
 
 def _invalidate_confirmation(rec, actor=None, before=None, *, invalidate_entries=True):
@@ -1210,8 +1210,10 @@ def confirm_appearance(rec_id: int, type_key: str = "", *, expected_updated_at=N
         data = json.loads(rec.current_json)
         import_jobs.check_review_turn(s, rec, (actor or {}).get("id"))
         if preparation.manual(data):
-            if expected_updated_at is None or direction_confirmed is not True:
-                raise RecognitionProtected("請確認目前版本的影像方向")
+            # Keep the legacy keyword compatible; appearance confirmation itself
+            # acknowledges the current pixels without a separate checkbox.
+            if expected_updated_at is None:
+                raise RecognitionProtected("請確認目前版本的影像外觀")
             origin = data.get("origin") or {}
             if origin.get("import_job_id") and actor:
                 import_jobs._owned(s, origin["import_job_id"], actor["id"])
@@ -1546,6 +1548,8 @@ def _check_delete(session, rec, targets, scope, *, is_admin=False, actor_id=None
         except import_jobs.JobConflict as exc:
             raise DeleteConflict(str(exc)) from exc
     else:
+        if scope == "upload" and rec.status == ReviewStatus.queued:
+            raise DeleteForbidden("掃描清單只能刪除目前選取的單據")
         for target in targets.values():
             job, _ = _delete_import_context(session, target)
             if job and import_jobs._sequential(job) and job.status not in ("cancelled", "completed"):
@@ -1568,7 +1572,7 @@ def _delete_summary(targets: dict, scope: str, rec) -> dict:
 
 
 def delete_previews(rec_id: int, scope: str = "", *, is_admin=False, actor_id=None, busy=False) -> Optional[dict]:
-    """預覽與執行共用刪除資格；逐頁匯入期間只提供目前頁刪除。"""
+    """預覽與執行共用資格；掃描清單僅刪單據，外觀確認僅刪目前頁。"""
     from app.services import import_jobs
     with get_session() as s:
         rec = s.get(VoucherRecord, rec_id)
@@ -1576,7 +1580,12 @@ def delete_previews(rec_id: int, scope: str = "", *, is_admin=False, actor_id=No
             return None
         job, page = _delete_import_context(s, rec)
         active = job and import_jobs._sequential(job) and job.status not in ("completed", "cancelled")
-        scopes = [scope] if scope else ["page"] if active else ["record", "upload"]
+        if scope:
+            scopes = [scope]
+        elif rec.status == ReviewStatus.queued:
+            scopes = ["record"]
+        else:
+            scopes = ["page"] if active else ["record", "upload"]
         previews, allowed = {}, {}
         for item in scopes:
             targets = _delete_targets(s, rec, item)

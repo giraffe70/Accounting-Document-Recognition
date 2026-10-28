@@ -167,7 +167,7 @@ class FastWorkflowContracts(unittest.TestCase):
         self.assertEqual(result["mode"], "automatic")
         self.assertEqual(result["status"], "completed")
 
-    def test_appearance_requires_version_and_direction_then_queues_single(self):
+    def test_appearance_requires_version_and_queues_without_direction_checkbox(self):
         source, job = self._job(name="confirm.png")
         with patch.object(import_jobs.pipeline, "page_count", return_value=1), \
              patch.object(import_jobs.pipeline, "render_page", return_value=source):
@@ -177,20 +177,21 @@ class FastWorkflowContracts(unittest.TestCase):
         child = review.get_voucher(child_id)
 
         with self.assertRaises(review.RecognitionProtected):
-            review.confirm_appearance(child_id, "invoice", direction_confirmed=True)
-        with self.assertRaises(review.RecognitionProtected):
-            review.confirm_appearance(child_id, "invoice", expected_updated_at=child.updated_at.isoformat())
+            review.confirm_appearance(child_id, "invoice")
 
         with patch.object(model_factory, "get_ocr", side_effect=AssertionError("OCR started")) as get_ocr, \
              patch.object(page_layout, "detect", side_effect=AssertionError("layout detection started")) as detect, \
              patch.object(pipeline, "prepare_image", side_effect=AssertionError("image preparation started")) as prepare_image:
             saved = review.confirm_appearance(
-                child_id, "invoice", expected_updated_at=child.updated_at.isoformat(), direction_confirmed=True,
+                child_id, "invoice", expected_updated_at=child.updated_at.isoformat(),
+                actor={"id": 1},
             )
             self.assertEqual(saved.status, ReviewStatus.queued)
             data = json.loads(saved.current_json)
             self.assertTrue(preparation.confirmed(data, self.uploads / saved.image_path))
             self.assertTrue(preparation.state(data)["type_confirmed"])
+            self.assertEqual(preparation.state(data)["confirmed_by"], 1)
+            self.assertTrue(preparation.state(data)["confirmed_at"])
             get_ocr.assert_not_called()
             detect.assert_not_called()
             prepare_image.assert_not_called()

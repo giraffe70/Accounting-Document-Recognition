@@ -551,6 +551,34 @@ class VoucherDeleteTests(unittest.TestCase):
         self.assertEqual(result["deleted_ids"], sorted([parent.id, child.id, sibling.id]))
         self.assertEqual(self.ids(), [other_parent.id, other_child.id])
 
+    def test_queued_delete_only_offers_current_record_and_rejects_upload(self):
+        from fastapi.responses import JSONResponse
+        namespace = {"review": review, "JSONResponse": JSONResponse, "_delete_busy": lambda: False,
+                     "auth": SimpleNamespace(get_user_by_token=lambda token: {
+                         "is_admin": token == "admin", "username": token})}
+        preview = _load_endpoint("api_delete_preview", dict(namespace))
+        delete = _load_endpoint("api_delete", dict(namespace))
+        request = lambda token: SimpleNamespace(cookies={"session": token})
+        upload = self.make_upload()
+        parent, (selected, sibling) = self.family(upload, status=ReviewStatus.queued)
+        other = self.record(None, status=ReviewStatus.queued)
+        before = self.ids()
+        for token in ("admin", "clerk"):
+            data = preview(request(token), selected.id)
+            self.assertEqual(list(data["previews"]), ["record"])
+            self.assertEqual(data["previews"]["record"]["ids"], [selected.id])
+            self.assertTrue(data["can_delete"]["record"])
+            explicit = preview(request(token), selected.id, "upload")
+            self.assertFalse(explicit["can_delete"]["upload"])
+            self.assertIn("目前選取", explicit["previews"]["upload"]["blocked_reason"])
+            self.assertEqual(delete(request(token), selected.id, "upload").status_code, 403)
+            self.assertEqual(self.ids(), before)
+        result = delete(request("clerk"), selected.id, "record")
+        self.assertEqual(result["deleted_ids"], [selected.id])
+        self.assertEqual(self.ids(), sorted([parent.id, sibling.id, other.id]))
+        self.assertTrue(self.exists("pages", f"{sibling.id}.png"))
+        self.assertTrue(self.exists(upload[1]))
+
     def test_deleting_a_source_page_takes_its_documents_with_it(self):
         upload = self.make_upload()
         parent, (first, second) = self.family(upload)

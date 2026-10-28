@@ -346,7 +346,7 @@ const document = {
   querySelector: () => (input.scope ? { value: input.scope } : checked),
   querySelectorAll: () => [],
 };
-let currentId = 12, currentVersion = input.currentVersion || 'opened-version', editBusy = false;
+let currentId = 12, currentVersion = input.currentVersion || 'opened-version', currentStage = input.currentStage || 'pending', editBusy = false;
 const currentUser = { is_admin: true };
 const esc = (s) => (s == null ? '' : String(s));
 const errText = (d, fallback) => (d && d.detail) || fallback;
@@ -373,7 +373,8 @@ async function fetch(url, options = {}) {
 }
 const context = { events, requests, document, $, esc, errText, alert, toast, clearReview, loadList, refreshStats, fetch, input,
   restoreImportJobs, get currentId() { return currentId; }, set currentId(v) { currentId = v; },
-  get currentVersion() { return currentVersion; }, set currentVersion(v) { currentVersion = v; }, editBusy, currentUser, console };
+  get currentVersion() { return currentVersion; }, set currentVersion(v) { currentVersion = v; },
+  get currentStage() { return currentStage; }, set currentStage(v) { currentStage = v; }, editBusy, currentUser, console };
 runtimeContext = context;
 vm.createContext(context);
 vm.runInContext(source.slice(start, end) + '\nglobalThis.api = { deleteChoices, openDelete, confirmDelete, closeDeleteModal };', context);
@@ -383,7 +384,11 @@ vm.runInContext(source.slice(start, end) + '\nglobalThis.api = { deleteChoices, 
   else if (input.action === 'cancelDuringPreview' || input.action === 'changeDuringPreview') {
     const pending = context.api.openDelete();
     if (input.action === 'cancelDuringPreview') context.api.closeDeleteModal();
-    else { context.currentId = input.nextId || 13; context.currentVersion = input.nextVersion || 'new-version'; }
+    else {
+      context.currentId = input.nextId || 13;
+      context.currentVersion = input.nextVersion || 'new-version';
+      context.currentStage = input.nextStage || currentStage;
+    }
     input.previewResolvers[0]();
     await pending;
   } else if (input.action === 'supersedePreview') {
@@ -402,6 +407,7 @@ vm.runInContext(source.slice(start, end) + '\nglobalThis.api = { deleteChoices, 
     if (input.action === 'confirmTwice') await Promise.all([context.api.confirmDelete(), context.api.confirmDelete()]);
   }
   out.events = events; out.requests = requests; out.choicesHtml = node('deleteChoices').innerHTML; out.currentId = currentId;
+  out.currentStage = currentStage;
   out.editBusy = editBusy; out.cancelDisabled = node('deleteCancel').disabled; out.confirmDisabled = node('deleteConfirm').disabled;
   out.modalOpen = !node('deleteModal').classList.contains('hidden');
   process.stdout.write(JSON.stringify(out));
@@ -602,7 +608,8 @@ class ConfirmationFrontendTests(unittest.TestCase):
     def test_appearance_confirmation_does_not_require_direction_checkbox(self):
         html = APP_HTML.read_text(encoding="utf-8")
         self.assertNotIn('id="directionConfirmed"', html)
-        self.assertIn("調整方向、微調或裁切後，按「確認外觀」即可加入掃描清單", html)
+        self.assertNotIn("我已確認目前影像方向正確", html)
+        self.assertNotIn('id="manualPreparation"', html)
 
         start = self.source.index("  async function confirmAppearance()")
         end = self.source.index('  $("btnReRecognize").addEventListener', start)
@@ -833,6 +840,37 @@ process.stdout.write(JSON.stringify(input.cases.map(([dx, dy]) => context.f(dx, 
         warning = self.run_delete("choices", data=admin)["choices"][1]["warning"]
         self.assertIn("日記帳與報表", warning)
 
+    def test_queued_delete_only_previews_and_deletes_current_record(self):
+        page = self.preview([12], sources=1)
+        page.update(page_no=4, blocked_reason="")
+        data = {"previews": {"record": self.preview([12]), "upload": self.preview([10, 11, 12]), "page": page},
+                "can_delete": {"record": True, "upload": True, "page": True}, "busy": False}
+        choices = self.run_delete("choices", currentStage="queued", data=data)["choices"]
+        self.assertEqual([c["scope"] for c in choices], ["record"])
+
+        failed = self.run_delete("confirm", currentStage="queued", data=data, deleteStatus=403,
+                                 deleteBody={"ok": False, "detail": "刪除受限"})
+        self.assertEqual(failed["requests"][0]["url"], "/api/vouchers/12/delete-preview?scope=record")
+        self.assertEqual(failed["requests"][-1]["url"], "/api/vouchers/12?scope=record")
+        self.assertFalse(any(e["type"] in {"clearReview", "loadList", "refreshStats", "toast", "restoreImportJobs"}
+                             for e in failed["events"]))
+
+        done = self.run_delete("confirm", currentStage="queued", data=data,
+                               deleteBody={"ok": True, "deleted_ids": [12]})
+        self.assertEqual(done["requests"][0]["url"], "/api/vouchers/12/delete-preview?scope=record")
+        self.assertEqual(done["requests"][-1]["url"], "/api/vouchers/12?scope=record")
+        self.assertIn("loadList", [e["type"] for e in done["events"]])
+
+    def test_queued_delete_choices_ignore_page_and_upload_previews(self):
+        page = self.preview([12], sources=1)
+        page.update(page_no=1, blocked_reason="")
+        data = {"previews": {"page": page, "upload": self.preview([11, 12]), "record": self.preview([12])},
+                "can_delete": {"page": True, "upload": True, "record": True}}
+        opened = self.run_delete("open", currentStage="queued", data=data)
+        self.assertIn('value="record" checked', opened["choicesHtml"])
+        self.assertNotIn('value="page"', opened["choicesHtml"])
+        self.assertNotIn('value="upload"', opened["choicesHtml"])
+
     def test_importing_page_is_the_only_choice_and_carries_page_metadata(self):
         page = self.preview([12], sources=1)
         page.update(page_no=3, blocked_reason="此頁已確認")
@@ -893,7 +931,7 @@ process.stdout.write(JSON.stringify(input.cases.map(([dx, dy]) => context.f(dx, 
         self.assertFalse(any(e["type"] == "alert" for e in cancelled["events"]))
         self.assertEqual(cancelled["choicesHtml"], "")
 
-        for change in ({"nextId": 13}, {"nextVersion": "updated-version"}):
+        for change in ({"nextId": 13}, {"nextVersion": "updated-version"}, {"nextStage": "queued"}):
             with self.subTest(change=change):
                 stale = self.run_delete("changeDuringPreview", data=data, deferPreview=True, **change)
                 self.assertFalse(stale["modalOpen"])
@@ -912,7 +950,7 @@ process.stdout.write(JSON.stringify(input.cases.map(([dx, dy]) => context.f(dx, 
         page = self.preview([12], sources=1)
         page.update(page_no=2, blocked_reason="")
         data = {"previews": {"page": page}, "can_delete": {"page": True}, "busy": False}
-        done = self.run_delete("confirm", data=data, scope="page", currentVersion="version /+中文",
+        done = self.run_delete("confirm", currentStage="prepared", data=data, scope="page", currentVersion="version /+中文",
                                afterOpenVersion="changed-after-open",
                                deleteBody={"ok": True, "deleted_ids": [12]})
         self.assertEqual(done["requests"][-1]["url"],

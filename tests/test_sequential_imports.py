@@ -537,7 +537,7 @@ class SequentialImportTests(unittest.TestCase):
             self.assertEqual(kept_image.read_bytes(), original_image)
             self.assertEqual(pdf.read_bytes(), original_pdf)
             restored = review.delete_previews(kept.id, actor_id=1)
-            self.assertEqual(list(restored["previews"]), ["record", "upload"])
+            self.assertEqual(list(restored["previews"]), ["record"])
 
     def test_page_delete_api_guards_agree_with_preview(self):
         from types import SimpleNamespace

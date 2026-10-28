@@ -712,12 +712,12 @@ def api_appearance_batch(request: Request, items: list[dict] = Body(..., embed=T
 
 
 @app.post("/api/vouchers/{rec_id}/confirm-appearance")
-def api_confirm_appearance(request: Request, rec_id: int, doc_type_key: str = Body("", embed=True), expected_updated_at: str = Body(None, embed=True), direction_confirmed: bool = Body(False, embed=True), document_mode: str = Body("single", embed=True)):
+def api_confirm_appearance(request: Request, rec_id: int, doc_type_key: str = Body("", embed=True), expected_updated_at: str = Body(None, embed=True), document_mode: str = Body("single", embed=True)):
     """外觀確認完成 → 加入掃描清單（prepared → queued）。可帶 doc_type_key 先修正類型。"""
     from app.services import import_jobs
     try:
         rec = review.confirm_appearance(rec_id, doc_type_key,expected_updated_at=expected_updated_at,
-            direction_confirmed=direction_confirmed,document_mode=document_mode,actor=auth.get_user_by_token(request.cookies.get("session")))
+            document_mode=document_mode,actor=auth.get_user_by_token(request.cookies.get("session")))
     except import_jobs.JobNotFound as exc:
         return JSONResponse({"detail":str(exc)},status_code=404)
     except import_jobs.JobConflict as exc:

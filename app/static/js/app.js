@@ -415,7 +415,7 @@
     return parts.join("、") + (extra.length ? `（${extra.join("，")}）` : "");
   }
   // 由後端預覽組出可選範圍；「整份上傳檔」只在確實比「此單據」多時才提供
-  function deleteChoices(data) {
+  function deleteChoices(data, stage = currentStage) {
     const previews = (data && data.previews) || {};
     const can = (data && data.can_delete) || {};
     const choices = [];
@@ -427,23 +427,26 @@
       choices.push({ scope, label, summary: deleteScopeText(preview), allowed, warning,
         blockedReason: preview.blocked_reason || "" });
     };
-    if (previews.page) {
+    if (stage === "queued") {
+      if (previews.record) add("record", "只刪除此單據", previews.record);
+    } else if (previews.page) {
       add("page", `刪除此頁（第 ${previews.page.page_no} 頁）`, previews.page);
     } else if (previews.record) add("record", "只刪除此單據", previews.record);
-    if (!previews.page && previews.upload && previews.record && previews.upload.ids.length > previews.record.ids.length) {
+    if (stage !== "queued" && !previews.page && previews.upload && previews.record && previews.upload.ids.length > previews.record.ids.length) {
       add("upload", "刪除整份上傳檔", previews.upload);
     }
     return choices;
   }
   let deleteTargetId = null;
   let deleteTargetVersion = null;
+  let deleteTargetStage = null;
   let deleteChoiceList = [];
   let deleteSubmitting = false;
   let deletePreviewGeneration = 0;
   function closeDeleteModal() {
     if (deleteSubmitting) return;
     deletePreviewGeneration++;
-    $("deleteModal").classList.add("hidden"); deleteTargetId = null; deleteTargetVersion = null; deleteChoiceList = [];
+    $("deleteModal").classList.add("hidden"); deleteTargetId = null; deleteTargetVersion = null; deleteTargetStage = null; deleteChoiceList = [];
   }
   function selectedDeleteChoice() {
     const radio = document.querySelector('input[name="deleteScope"]:checked');
@@ -455,21 +458,23 @@
   }
   async function openDelete() {
     if (!currentId || editBusy) return;
-    const id = currentId, version = currentVersion;
+    const id = currentId, version = currentVersion, stage = currentStage;
     const generation = ++deletePreviewGeneration;
     $("deleteLoading").classList.remove("hidden"); $("deleteBody").classList.add("hidden");
     $("deleteConfirm").disabled = true;
     $("deleteModal").classList.remove("hidden");
     try {
-      const resp = await fetch(`/api/vouchers/${id}/delete-preview`);
+      const scopeQuery = stage === "queued" ? "?scope=record" : "";
+      const resp = await fetch(`/api/vouchers/${id}/delete-preview${scopeQuery}`);
       const data = await resp.json();
       if (generation !== deletePreviewGeneration) return;
-      if (id !== currentId || version !== currentVersion) { closeDeleteModal(); return; }
+      if (id !== currentId || version !== currentVersion || stage !== currentStage) { closeDeleteModal(); return; }
       if (!resp.ok) throw new Error(errText(data, "無法取得刪除範圍"));
       if (data.busy) throw new Error("匯入或提取進行中，請稍後再刪除");
       deleteTargetId = id;
       deleteTargetVersion = version;
-      deleteChoiceList = deleteChoices(data);
+      deleteTargetStage = stage;
+      deleteChoiceList = deleteChoices(data, stage);
       $("deleteChoices").innerHTML = deleteChoiceList.map((c, i) => `
         <label class="del-opt"><input type="radio" name="deleteScope" value="${c.scope}" ${i === 0 ? "checked" : ""} ${c.allowed ? "" : "disabled"}>
           <span><b>${esc(c.label)}</b><br>${esc(c.summary)}${c.blockedReason ? `<br><span class="del-warn">${esc(c.blockedReason)}</span>` : ""}${c.warning ? `<br><span class="del-warn">${esc(c.warning)}</span>` : ""}</span></label>`).join("");
@@ -488,7 +493,8 @@
   async function confirmDelete() {
     const choice = selectedDeleteChoice();
     const id = deleteTargetId;
-    if (deleteSubmitting || !choice || !choice.allowed || id == null) return;
+    if (deleteSubmitting || !choice || !choice.allowed || id == null ||
+        (deleteTargetStage === "queued" && choice.scope !== "record")) return;
     deleteSubmitting = true;
     editBusy = true;
     $("deleteConfirm").disabled = true;
@@ -551,7 +557,6 @@
     const timings = v.recognition_diagnostics?.timings;
     $("fastTiming").classList.toggle("hidden", !timings);
     $("fastTiming").textContent = timings ? [["首次預覽",timings.first_preview_seconds],["人工確認等待",timings.human_wait_seconds],["本次辨識",timings.recognition_seconds],["OCR",timings.ocr_seconds],["補讀OCR",timings.supplement_ocr_seconds],["上傳至今",timings.overall_seconds]].filter(([,value]) => value != null).map(([label,value]) => `${label} ${Number(value).toFixed(1)} 秒`).join(" · ") : "";
-    $("manualPreparation").classList.toggle("hidden", !(manualMode && isPrepared));
     $("revForm").classList.toggle("prepared", isPreExtract);
     $("prepHint").classList.toggle("hidden", !isPreExtract && !autoSplitSource);
     $("btnConfirmRecognize").classList.toggle("hidden", !isPreExtract);
@@ -569,7 +574,7 @@
       stageAction = "confirm";
       $("btnConfirmRecognize").textContent = "✅ 確認外觀（加入掃描清單）";
       $("prepHint").innerHTML = "<b>② 外觀確認</b>：確認上方「單據類型」正確，並用工具列旋轉／微調／裁切整理這一張影像（改壞了可按「復原」）；完成後按「✅ 確認外觀」加入③掃描清單。";
-      if (manualMode) $("prepHint").innerHTML = "<b>② 外觀確認</b>：一頁一張，調整方向、微調或裁切後，按「確認外觀」即可加入③掃描清單。類型未指定時會自動判斷。";
+      if (manualMode) $("prepHint").innerHTML = "<b>② 外觀確認</b>：調整方向、微調或裁切後，按「確認外觀」即可加入③掃描清單。類型未指定時會自動判斷。";
     } else if (isQueued) {
       stageAction = "recognize";
       $("btnConfirmRecognize").textContent = "🔍 辨識此張";
