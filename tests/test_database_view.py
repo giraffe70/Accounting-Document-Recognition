@@ -40,6 +40,9 @@ class DatabaseViewTests(unittest.TestCase):
             CREATE TABLE item_account_mappings (id INTEGER PRIMARY KEY, company_id INTEGER, item_name_key TEXT,
                 account_code TEXT, account_name TEXT, created_at TEXT, updated_at TEXT);
             CREATE TABLE mapping_history (id INTEGER PRIMARY KEY, mapping_id INTEGER, version INTEGER, created_at TEXT);
+            CREATE TABLE import_files (id TEXT PRIMARY KEY);
+            CREATE TABLE import_jobs (id TEXT PRIMARY KEY);
+            CREATE TABLE import_pages (id TEXT PRIMARY KEY);
             CREATE TABLE empty_table (id INTEGER PRIMARY KEY);
         """)
         con.executemany("INSERT INTO voucher_records (id, company, current_json) VALUES (?, ?, ?)",
@@ -47,6 +50,7 @@ class DatabaseViewTests(unittest.TestCase):
         con.commit()
         con.close()
         self.original = self.db.read_bytes()
+        self.default_databases = database_view.databases
         mapping = {"app": ("憑證與帳號", self.db), "missing": ("尚未建立", root / "missing.db")}
         self.patch = patch.object(database_view, "databases", return_value=mapping)
         self.patch.start()
@@ -75,6 +79,9 @@ class DatabaseViewTests(unittest.TestCase):
                 self.login(identity)
             self.assertEqual(self.client.get("/api/database/tables").status_code, status)
             self.assertEqual(self.rows().status_code, status)
+
+    def test_default_database_browser_excludes_validation_database(self):
+        self.assertEqual(set(self.default_databases()), {"app"})
 
     def test_pagination_search_and_empty_tables(self):
         self.login()
@@ -126,6 +133,12 @@ class DatabaseViewTests(unittest.TestCase):
             self.assertEqual(self.rows(database="validation", table="runs").json()["total"], 0)
         self.assertEqual(self.rows(database="missing").status_code, 404)
         self.assertFalse((Path(self.tmp.name) / "missing.db").exists())
+
+    def test_import_tables_are_hidden_from_table_selector(self):
+        self.login()
+        names = {table["name"] for table in self.client.get("/api/database/tables").json()["tables"]}
+        self.assertTrue({"users", "voucher_records"}.issubset(names))
+        self.assertTrue({"import_files", "import_jobs", "import_pages"}.isdisjoint(names))
 
     def test_chinese_metadata_covers_current_schema(self):
         self.login()

@@ -1,6 +1,6 @@
 (() => {
   const $ = (id) => document.getElementById(id);
-  let page = 1, pages = 1, query = "", requestId = 0;
+  let page = 1, pages = 1, query = "", dateFrom = "", dateTo = "", requestId = 0;
   let selectedTables = [];
   let busy = false;
   let detailTrigger = null;
@@ -19,10 +19,44 @@
 
   function resetFilters() {
     query = ""; page = pages = 1;
+    dateFrom = dateTo = "";
     $("searchInput").value = "";
     $("dateFrom").value = "";
     $("dateTo").value = "";
+    $("dateFromPicker").value = "";
+    $("dateToPicker").value = "";
     $("statusSelect").value = "";
+  }
+
+  function parseDate(value) {
+    const match = value.trim().match(/^(\d{4})\s*(?:年|[/-])\s*(\d{1,2})\s*(?:月|[/-])\s*(\d{1,2})\s*(?:日)?$/);
+    if (!match) return null;
+    const [, year, month, day] = match.map(Number);
+    const parsed = new Date(Date.UTC(year, month - 1, day));
+    if (parsed.getUTCFullYear() !== year || parsed.getUTCMonth() !== month - 1
+        || parsed.getUTCDate() !== day) return null;
+    return { iso: `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`,
+      display: `${year}年${month}月${day}日` };
+  }
+
+  function openDatePicker(fieldId) {
+    const input = $(fieldId);
+    const picker = $(`${fieldId}Picker`);
+    const date = input.value ? parseDate(input.value) : null;
+    picker.value = date?.iso || "";
+    try {
+      picker.showPicker();
+    } catch {
+      picker.focus();
+      picker.click();
+    }
+  }
+
+  function syncDatePicker(fieldId) {
+    const picker = $(`${fieldId}Picker`);
+    if (!picker.value) return;
+    const date = parseDate(picker.value);
+    if (date) $(fieldId).value = date.display;
   }
 
   function populateTables(preferred) {
@@ -206,8 +240,8 @@
     try {
       const params = new URLSearchParams({ database: selected.database, table: selected.name,
         q: query, page: String(page), page_size: $("pageSize").value });
-      if (selected.date_label && $("dateFrom").value) params.set("date_from", $("dateFrom").value);
-      if (selected.date_label && $("dateTo").value) params.set("date_to", $("dateTo").value);
+      if (selected.date_label && dateFrom) params.set("date_from", dateFrom);
+      if (selected.date_label && dateTo) params.set("date_to", dateTo);
       if (selected.statuses?.length && $("statusSelect").value) params.set("status", $("statusSelect").value);
       const data = await api(`/api/database/rows?${params}`);
       if (id === requestId) render(data);
@@ -232,7 +266,7 @@
       databases.forEach(([id, label]) => {
         const option = document.createElement("option");
         option.value = id;
-        option.textContent = `${label}（${id === "app" ? "app.db" : "validation.db"}）`;
+        option.textContent = label;
         $("databaseSelect").append(option);
       });
       $("databaseSelect").value = databases.some(([id]) => id === previous?.database)
@@ -257,11 +291,21 @@
 
   $("searchForm").addEventListener("submit", (event) => {
     event.preventDefault(); if (busy) return;
-    if ($("dateFrom").value && $("dateTo").value && $("dateFrom").value > $("dateTo").value) {
+    const from = $("dateFrom").value ? parseDate($("dateFrom").value) : { iso: "", display: "" };
+    const to = $("dateTo").value ? parseDate($("dateTo").value) : { iso: "", display: "" };
+    if (!from || !to) {
+      $("dataMessage").textContent = "請輸入正確日期，例如：2026年10月28日";
+      $("dataMessage").classList.add("database-error");
+      return;
+    }
+    if (from.iso && to.iso && from.iso > to.iso) {
       $("dataMessage").textContent = "起日不能晚於迄日";
       $("dataMessage").classList.add("database-error");
       return;
     }
+    dateFrom = from.iso; dateTo = to.iso;
+    $("dateFrom").value = from.display;
+    $("dateTo").value = to.display;
     query = $("searchInput").value.trim(); page = 1; loadRows();
   });
   $("databaseSelect").addEventListener("change", () => {
@@ -272,6 +316,11 @@
   });
   $("pageSize").addEventListener("change", () => { page = 1; loadRows(); });
   $("clearSearch").addEventListener("click", () => { resetFilters(); loadRows(); });
+  ["dateFrom", "dateTo"].forEach((fieldId) => {
+    $(`${fieldId}PickerButton`).addEventListener("click", () => openDatePicker(fieldId));
+    $(fieldId).addEventListener("click", () => openDatePicker(fieldId));
+    $(`${fieldId}Picker`).addEventListener("change", () => syncDatePicker(fieldId));
+  });
   $("previousPage").addEventListener("click", () => { if (!busy && page > 1) { page--; loadRows(); } });
   $("nextPage").addEventListener("click", () => { if (!busy && page < pages) { page++; loadRows(); } });
   $("refresh").addEventListener("click", refreshTables);

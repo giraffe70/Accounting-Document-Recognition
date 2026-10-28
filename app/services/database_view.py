@@ -22,6 +22,11 @@ router = APIRouter(prefix="/api/database", tags=["database"],
                    dependencies=[Depends(require_admin)])
 MASKED = "（已遮蔽）"
 SENSITIVE = {"password_hash", "salt"}
+HIDDEN_TABLES = {
+    ("app", "import_files"),
+    ("app", "import_jobs"),
+    ("app", "import_pages"),
+}
 
 # The metadata is shared by the table selector, headers and query validation.
 TABLE_META = {
@@ -190,8 +195,7 @@ def date_expression(database, date_column, table=None):
 
 def databases():
     # Fixed paths only: callers cannot select an arbitrary filesystem path.
-    return {"app": ("憑證與帳號", config.DB_FILE),
-            "validation": ("資料集驗證", config.DATA_DIR / "validation" / "validation.db")}
+    return {"app": ("憑證與帳號", config.DB_FILE)}
 
 
 @contextmanager
@@ -231,6 +235,8 @@ def list_tables():
             continue
         with connect(key) as con:
             for name in tables(con):
+                if (key, name) in HIDDEN_TABLES:
+                    continue
                 count = con.execute(f"SELECT COUNT(*) FROM {quote(name)}").fetchone()[0]
                 result.append({"database": key, "database_label": label, "name": name,
                                "count": count, **table_info(key, name)})
