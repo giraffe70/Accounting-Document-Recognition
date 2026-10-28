@@ -1,4 +1,4 @@
-# 憑證辨識系統（PDF_SCAN_Recognition）
+# 憑證辨識系統
 
 將掃描 PDF／圖片轉為結構化憑證資料，提供原圖核對、欄位與明細編輯、會計分錄草稿、人工確認及報表輸出，供會計師、記帳士處理帳務。
 
@@ -21,7 +21,7 @@ ollama pull qwen2.5:7b
 .\start_webui.bat
 ```
 
-開啟 [WebUI](http://127.0.0.1:8090)。雲端金鑰可先留空；程式內建的地端欄位萃取與會計分類模型分別為 `qwen2.5vl:7b`、`qwen2.5:7b`。`bge-m3` 用於分類案例的 RAG 檢索，需要時另執行 `ollama pull bge-m3`。
+開啟 [WebUI](http://127.0.0.1:8090)。程式內建的地端欄位萃取與會計分類模型分別為 `qwen2.5vl:7b`、`qwen2.5:7b`。`bge-m3` 用於分類案例的 RAG 檢索，需要時另執行 `ollama pull bge-m3`。
 
 `start_webui.bat` 優先使用目前啟用的 conda 環境，否則使用 `%USERPROFILE%\Miniconda3\envs\pdfscan312\python.exe`，啟動位址固定為 `127.0.0.1:8090`。若要自訂位址或連接埠，可在啟用環境後直接執行：
 
@@ -70,29 +70,6 @@ python -B -X utf8 scripts/manage_users.py passwd admin
 - **辨識**：PaddleOCR 取得文字與座標，VLM／LLM 進行單據分類及欄位萃取，另提供會計分類與人工覆核。
 - **模型來源**：可在「模型設定」切換 Ollama 地端模型、內網 H200 vLLM 或雲端 Gemini／Claude／GPT；連線與金鑰設定見 [.env.example](.env.example)。H200 部署資訊見 [部署需求](docs/dev-notes/H200-VLM-佈署需求.md)。
 
-## 資料集驗證
-
-登入後開啟獨立的 [資料集驗證頁](http://127.0.0.1:8090/validation.html)。選擇整個資料夾、圖片／PDF 或 ZIP 建立資料集，加入一至多組模型，分別指定欄位萃取與分類模型及下列模式：
-
-- **VLM 直讀**：圖片直接交給 VLM，不使用 OCR。
-- **OCR＋VLM**（預設）：OCR 文字與圖片共同交給 VLM；OCR 不可用時明確標示降級路徑。
-- **OCR＋純文字 LLM**：只把 OCR 文字交給 LLM；OCR 失敗時標記失敗，不改走 VLM。
-
-驗證以圖片或 PDF 頁面排程；同一頁可拆成多張單據，也可能標記為待分割或部分失敗。結果可查看原頁、各單據、實際模型輸入圖、含框圖片、欄位／明細／分錄、OCR、原始模型回應及逐階段計時。
-
-### 執行與版本
-
-開始前，頁面會檢查 `/api/validation/runtime`。需符合 `ready=true`、`schema_ready=true`、`restart_required=false`；若提示版本或 schema 不符，先完整重新啟動 WebUI，再以 `Ctrl+F5` 重新載入頁面。更新程式後應建立新批次驗收，舊批次保留作為歷史紀錄。
-
-批次可取消後續跑、重跑失敗項目，或「終止批次」以停止尚未處理的項目；已完成結果保留，終止後不可續跑。服務重啟後，未完成批次標記為「已中斷」，服務就緒後可續跑。「清空畫面（不刪資料）」只隱藏目前瀏覽器的紀錄，按「顯示歷史紀錄」可恢復，執行中的批次會繼續運作。
-
-### 結果與統計
-
-預設「最新結果」對每個頁面、模型組合與重複輪次只採最新一次嘗試；「完整歷史」保留各次執行紀錄。JSON、CSV ZIP 與完整證據 ZIP 匯出沿用畫面所選檢視。CSV 的 `pages.csv` 每個頁面執行結果一列，依模型組合、重複輪次及保留的嘗試分開；`vouchers.csv` 再依頁內單據展開多列。頁面耗時以 `pages.csv` 為準，避免依單據數重複加總。
-
-完成率與耗時按頁面計算，單據數與品質提示則按各張單據呈現。品質狀態與完成率用來提示流程是否完成、是否需要覆核；欄位準確率需另以獨立人工覆核與標註評估。空白略過頁不計入完成率分母，待分割頁仍需處理；舊批次資料不足或混用版本時，最新完成率會顯示「無法可靠評估」。
-
-計時包含前處理、OCR／方向判定、單據分類、欄位萃取、證據輸出、持久化、辨識總時間、含存檔總時間及排隊時間。PDF 轉圖時間另列並平均分攤到各頁；OCR 初始化時間是實際 OCR 時間的子集。頁面總耗時不含排隊，計算時應避免重複加總。平均、P50、P95 使用成功項目，失敗／逾時另計，暖機結果另行保存。
 
 ### 預設與限制
 
@@ -114,24 +91,6 @@ python -B -X utf8 scripts/manage_users.py passwd admin
 
 資料表與欄位以中文顯示，原始欄名可由提示查看；支援關鍵字、適用的日期／狀態篩選及每頁 25、50、100 筆，長文字與 JSON 可在側邊面板檢視。憑證以憑證日期篩選，驗證日期依台灣時間計算。此功能為唯讀，密碼雜湊與 salt 由後端遮蔽且不納入搜尋，API 僅開放管理員。
 
-## 更新與備份
-
-更新前先停止服務並備份資料，再重新執行 `start_webui.bat`，讓啟動程序套用資料庫遷移；完成後重新登入並以 `Ctrl+F5` 載入前端。帳號新版遷移會將舊角色改為管理員／一般使用者權限並移除 `role` 欄位，完成後須使用新版程式。既有分錄需人工覆核並確認供入帳，才會納入正式帳務報表。部署細節見 [驗證指南](docs/dev-notes/agent-workflow.md) 與 [分錄流程](docs/dev-notes/entry-workflow.md)。
-
-目前內建備份會打包 `app.db`、`settings.json`、`accounts.json`、`companies.json` 與 `accounting_policies.json`。完整搬移或還原準備還需另行保存 `app/data/uploads/`、`app/data/validation/`、實際模型設定檔及 `.env`。私有掃描、資料集、gold、資料庫與金鑰均應留在版本控制之外。
-
-## 開發與離線驗證
-
-開發入口見 [AGENTS.md](AGENTS.md)。使用 `pdfscan312`、UTF-8；安裝開發依賴後，先跑最小相關驗證：
-
-```powershell
-conda activate pdfscan312
-python -m pip install -r requirements-dev.txt
-.\scripts\verify.bat -Scope check
-.\scripts\verify.bat -Scope contracts
-```
-
-另有 `database`、`validation`、`scoring` 範圍；核心或跨模組修改使用 `-Scope all`。驗證入口預設使用 `%USERPROFILE%\Miniconda3\envs\pdfscan312\python.exe`，其他安裝位置需加 `-Python <python.exe>`。離線測試使用合成資料與模擬模型，阻擋對外 TCP；通過契約測試表示程式契約符合預期，實際辨識準確率仍需另外評估。完整命令見 [Agent 工作與驗證指南](docs/dev-notes/agent-workflow.md)。
 
 ## 目錄與文件
 
@@ -143,4 +102,3 @@ python -m pip install -r requirements-dev.txt
 - [Agent 工作與驗證指南](docs/dev-notes/agent-workflow.md)：測試範圍、部署核對與保存結果評分。
 - `archive/phase0_poc_flask/`：已封存的 Flask／Gemini POC；歷史說明見 [POC 架構](docs/dev-notes/architecture-phase0.md)。
 - `ref/`：本機參考文件與合約資料，另行保存。
-
