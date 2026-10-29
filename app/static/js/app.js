@@ -73,7 +73,7 @@
     uploadSending = true; renderImportState();
     const fd = new FormData(); fd.append("files", files[0]);
     fd.append("company", $("uploadCompany").value);
-    fd.append("mode", $("uploadMode").value);
+    fd.append("mode", "manual_review");
     try {
       const response = await fetch("/api/import-jobs", { method: "POST", body: fd });
       const data = await response.json();
@@ -101,7 +101,7 @@
     fileInput.disabled = blocked;
     dropZone.setAttribute("aria-disabled", String(blocked));
     dropZone.style.opacity = blocked ? "0.6" : "1";
-    $("uploadCompany").disabled = blocked; $("uploadMode").disabled = blocked;
+    $("uploadCompany").disabled = blocked;
     $("btnScanImport").disabled = blocked;
     $("importState").classList.toggle("hidden", !blocked);
     const failed = job && ["failed", "partial_failed", "interrupted"].includes(job.status);
@@ -244,7 +244,7 @@
     if (uploadsBlocked()) { alert("請先完成目前檔案的外觀確認，或取消目前匯入"); return; }
     uploadSending = true; renderImportState();
     try {
-      const response = await fetch("/api/scan-source/import", { method: "POST", headers: json(), body: JSON.stringify({ filenames: names, company: $("uploadCompany").value, background: true, mode: $("uploadMode").value }) });
+      const response = await fetch("/api/scan-source/import", { method: "POST", headers: json(), body: JSON.stringify({ filenames: names, company: $("uploadCompany").value, background: true, mode: "manual_review" }) });
       const d = await response.json();
       if (!response.ok || !d.ok) throw new Error(errText(d,"匯入失敗"));
       trackImportJob(d);

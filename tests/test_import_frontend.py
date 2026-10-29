@@ -28,7 +28,7 @@ class ImportFrontendTests(unittest.TestCase):
         for marker in ('id="importState"', 'id="importHint"', 'id="btnImportReview"', 'id="btnImportRetry"', 'id="btnImportCancel"',
                        'id="appearancePosition"', 'id="appearanceRecovery"', 'id="btnAppearanceRetry"', 'id="btnAppearanceCancel"'):
             self.assertIn(marker, html)
-        for obsolete in ('id="importJobs"', 'id="appearanceBatch"', 'id="batchType"', 'id="dirInput"'):
+        for obsolete in ('id="importJobs"', 'id="appearanceBatch"', 'id="batchType"', 'id="dirInput"', 'id="uploadMode"'):
             self.assertNotIn(obsolete, html)
         self.assertNotIn("renderImportJobs", app_js)
         self.assertNotIn('href="/api/import-jobs/', html)
@@ -48,8 +48,17 @@ class ImportFrontendTests(unittest.TestCase):
         self.assertEqual(result["requestCount"], 1)
         self.assertEqual(result["formData"][0][0], "files")
         self.assertEqual(result["formData"][0][1]["name"], "a.pdf")
+        self.assertEqual(dict(result["formData"])["mode"], "manual_review")
         self.assertTrue(result["blockedAfterAccepted"])
         self.assertTrue(result["disabledAfterAccepted"])
+
+    def test_scan_source_import_requires_manual_appearance_review(self):
+        result = self.run_synthetic()["scan"]
+
+        self.assertEqual(result["filenames"], ["scan.pdf"])
+        self.assertEqual(result["company"], "3")
+        self.assertTrue(result["background"])
+        self.assertEqual(result["mode"], "manual_review")
 
     def test_polling_tracks_page_changes_but_respects_dirty_review_and_logout(self):
         result = self.run_synthetic()["poll"]

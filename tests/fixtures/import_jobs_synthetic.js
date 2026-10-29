@@ -20,10 +20,9 @@ function makeNode(id) {
     querySelectorAll() { return []; },
   };
 }
-const ids = ["dropZone","fileInput","progress","progressText","modal","importState","importHint","btnImportReview","btnImportRetry","btnImportCancel","uploadCompany","uploadMode","btnScanImport","appearanceRecovery","btnAppearanceRetry","btnAppearanceCancel","appearancePosition","btnScanList","scanFiles","scanDirHint","btnExtractAll","listBody","listEmpty","listTable","btnMerge","confirmationFilter","queueTitle"];
+const ids = ["dropZone","fileInput","progress","progressText","modal","importState","importHint","btnImportReview","btnImportRetry","btnImportCancel","uploadCompany","btnScanImport","appearanceRecovery","btnAppearanceRetry","btnAppearanceCancel","appearancePosition","btnScanList","scanFiles","scanDirHint","btnExtractAll","listBody","listEmpty","listTable","btnMerge","confirmationFilter","queueTitle"];
 ids.forEach(makeNode);
 nodes.uploadCompany.value = "3";
-nodes.uploadMode.value = "manual_review";
 nodes.confirmationFilter.value = "prepared";
 const document = {
   getElementById: (id) => nodes[id] || null,
@@ -37,7 +36,8 @@ const context = {
   currentUser: { id: 7 }, currentVoucher: {}, currentStage: "import", currentId: null,
   recognitionDirty: false, editBusy: false, importJobs, importJobTimers, importSeenPages,
   uploadSending: false, importRestorePending: false, importJobGeneration: 0,
-  $: (id) => nodes[id] || makeNode(id),
+  $: (id) => nodes[id] || null,
+  json: () => ({ "Content-Type": "application/json" }),
   alert: (message) => events.push(["alert", message]),
   toast: (message) => events.push(["toast", message]),
   refreshStats: () => events.push(["refreshStats"]),
@@ -137,6 +137,19 @@ async function recoveryScenario() {
   return { restoredId: api.recoveryImportJob()?.id, blocked: api.uploadsBlocked(), retryVisible: !nodes.btnImportRetry.classList.contains("hidden"),
     retryLabel: nodes.btnImportRetry.textContent, restorePending: api.restorePending() };
 }
+async function scanScenario() {
+  context.testImport.stopImportPolling();
+  await context.testImport.restoreImportJobs();
+  const scanStart = source.indexOf("  // ── ①匯入：伺服器端掃描來源目錄");
+  const scanEnd = source.indexOf("  function hideProgress()", scanStart);
+  if (scanStart < 0 || scanEnd < 0) throw new Error("production scan source handlers not found");
+  vm.runInContext(source.slice(scanStart, scanEnd), context);
+  nodes.scanFiles.querySelectorAll = () => [{ value: "scan.pdf" }];
+  responses.set("/api/scan-source/import", { body: { ok: true, job_id: "scan-1", status: "queued" } });
+  await nodes.btnScanImport.listeners.click();
+  const request = requests.find(r => r.url === "/api/scan-source/import" && r.method === "POST");
+  return JSON.parse(request.body);
+}
 async function listScenario() {
   const listStart = source.indexOf("  async function loadList()");
   const listEnd = source.indexOf("  // 合併多頁為一張", listStart);
@@ -188,9 +201,10 @@ async function listScenario() {
   await context.testImport.restoreImportJobs();
   const upload = await uploadScenario();
   const poll = await pollScenario();
+  const scan = await scanScenario();
   const recovery = await recoveryScenario();
   const list = await listScenario();
-  process.stdout.write(JSON.stringify({ upload, poll, recovery, list, source: {
+  process.stdout.write(JSON.stringify({ upload, poll, scan, recovery, list, source: {
     hasLegacyJobRenderer: source.includes("renderImportJobs"),
     hasBatchAppearanceControls: ["appearanceBatch", "batchType", "dirInput"].some(s => source.includes(s)),
   } }));
