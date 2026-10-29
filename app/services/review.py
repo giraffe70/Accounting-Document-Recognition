@@ -319,11 +319,6 @@ def _save_recognition(rec_id, voucher, *, expected_updated_at=None, actor=None):
                 elif path in previous:
                     data[path] = previous[path]
             data.setdefault("field_evidence", {})[path] = records
-        if rec.manual_entry:
-            protected_items = True
-            for key in ("fields", "items", "entries", "note", "doc_type_key", "doc_type"):
-                if key in previous:
-                    data[key] = previous[key]
         data["origin"] = previous.get("origin", {})
         data["source_file"] = rec.source_file
         if protected_items:
@@ -332,7 +327,7 @@ def _save_recognition(rec_id, voucher, *, expected_updated_at=None, actor=None):
         data = pipeline.canonicalize_voucher(data)
         protected_entries = any(r.get("source") == "manual" and r.get("selected")
             for path, rows in evidence.items() if path == "entries" or path.startswith("entries[")
-            for r in rows) or rec.manual_entry
+            for r in rows)
         data["entries"] = sources.normalize_entries(data.get("entries") or [],
             previous=previous.get("entries") if protected_entries else None,
             origin="observed" if pipeline.doc_types.get(voucher.doc_type_key).get("has_entries") else "manual",
@@ -490,8 +485,6 @@ def save_current(rec_id, payload, actor):
         value = payload.get(key, {})
         if not isinstance(value, dict) or any(not isinstance(v, dict) for v in value.values()):
             raise ValueError("科目選擇格式不合法")
-    if "manual_entry" in payload and not isinstance(payload["manual_entry"], bool):
-        raise ValueError("人工輸入標記格式不合法")
     if "correction_note" in payload and not isinstance(payload["correction_note"], str):
         raise ValueError("備註格式不合法")
     with get_session() as session:
@@ -526,9 +519,8 @@ def save_current(rec_id, payload, actor):
             rec.company = registered.short or registered.name
         elif "company_id" in payload:
             rec.company = ""
-        for key in ("correction_note", "manual_entry"):
-            if key in payload:
-                setattr(rec, key, payload[key])
+        if "correction_note" in payload:
+            rec.correction_note = payload["correction_note"]
         data = json.loads(rec.current_json)
         mapping.audit_items(session, data, previous, actor)
         skipped = mapping.publish(session, rec, data, actor, payload.get("mapping_choices"), nonblocking=True) if action != "temporary" else []
@@ -612,9 +604,9 @@ def set_company(rec_id: int, company: str, *, expected_updated_at=None, actor=No
 
 
 def set_notes(rec_id: int, **notes) -> Optional[VoucherRecord]:
-    """只更新備註欄與人工輸入標記，不動狀態與 current_json。
+    """只更新備註欄，不動狀態與 current_json。
     備註會成為下次辨識的人工修正提示，故必須能單獨儲存。"""
-    allowed = {"correction_note", "manual_entry"}
+    allowed = {"correction_note"}
     with get_session() as s:
         rec = s.get(VoucherRecord, rec_id)
         if not rec:
@@ -1016,10 +1008,10 @@ def re_recognize(rec_id: int, *, actor=None) -> Optional[VoucherRecord]:
             return converted
         current = json.loads(rec.current_json)
         manual = any(r.get("source") == "manual" and r.get("selected") for records in current.get("field_evidence", {}).values() for r in records)
-        if manual or rec.manual_entry or type_key:
+        if manual or type_key:
             confirmed = {p[7:]: current.get("fields", {}).get(p[7:]) for p, records in current.get("field_evidence", {}).items()
                          if p.startswith("fields.") and any(r.get("source") == "manual" and r.get("selected") for r in records)}
-            protected_type = rec.manual_entry or any(r.get("source") == "manual" and r.get("selected") for r in current.get("field_evidence", {}).get("doc_type_key", []))
+            protected_type = any(r.get("source") == "manual" and r.get("selected") for r in current.get("field_evidence", {}).get("doc_type_key", []))
             protected_paths = [p for p,records in current.get("field_evidence", {}).items() if any(r.get("source") == "manual" and r.get("selected") for r in records)]
             v = pipeline.extract_for_type(str(config.UPLOAD_DIR / rec.image_path), current.get("doc_type_key", "other") if manual else type_key or current.get("doc_type_key", "other"), hint=hint, company=rec.company, confirmed_fields=confirmed, confirmed_type=protected_type, confirmed_paths=protected_paths)
         else:
@@ -1032,7 +1024,7 @@ def _route_unconfirmed_page(rec):
     from app.core import page_layout, invocation_trace
     current = json.loads(rec.current_json)
     manual = any(r.get("source") == "manual" and r.get("selected") for records in current.get("field_evidence", {}).values() for r in records)
-    if rec.source_parent_id or rec.manual_entry or manual or rec.status == ReviewStatus.confirmed:
+    if rec.source_parent_id or manual or rec.status == ReviewStatus.confirmed:
         return None, None
     source = config.UPLOAD_DIR / rec.image_path
     layout = page_layout.detect(str(source))
@@ -1293,14 +1285,13 @@ def feedback_log():
     out = []
     for rec in list_vouchers():
         changed = rec.ai_json != rec.current_json
-        if not rec.correction_note and not changed and not rec.manual_entry:
+        if not rec.correction_note and not changed:
             continue
         cur = json.loads(rec.current_json)
         out.append({
             "id": rec.id, "source_file": rec.source_file,
             "doc_type": cur.get("doc_type", ""), "doc_type_key": cur.get("doc_type_key", ""),
             "voucher_id": cur.get("voucher_id", ""), "status": rec.status, "changed": changed,
-            "manual_entry": bool(rec.manual_entry),
             "correction_note": rec.correction_note,
         })
     return out

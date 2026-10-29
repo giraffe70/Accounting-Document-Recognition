@@ -198,7 +198,6 @@ function node(id) {
 }
 const $ = node;
 let currentId = null, currentVoucher = {}, currentIsImport = false, editBusy = false, inferBusy = 0, cropping = false, stageAction = '';
-let currentManualEntry = false;
 const currentUser = { is_admin: !!input.is_admin };
 const companyRecords = input.companies || [{ id: 3, name: '甲公司', short: '甲公司', tax_id: '12345678' }];
 const fileInput = { value: 'selected-file' }, progressText = { textContent: '' }, progress = { classList: { remove() {} } }, barFill = { style: {} };
@@ -246,7 +245,6 @@ async function fetch(url, options = {}) {
 const context = { console, events, requests, input, nodes, $, currentUser, fileInput, progressText, progress, barFill,
   get currentId() { return currentId; }, set currentId(v) { currentId = v; },
   get currentVoucher() { return currentVoucher; }, set currentVoucher(v) { currentVoucher = v; },
-  get currentManualEntry() { return currentManualEntry; }, set currentManualEntry(v) { currentManualEntry = v; },
   get currentIsImport() { return currentIsImport; }, set currentIsImport(v) { currentIsImport = v; },
   editBusy, inferBusy, cropping, stageAction, currentVersion: '', reviewedItems: { stale: true },
   updateRecognitionState, applyRecognitionState,
@@ -263,7 +261,6 @@ vm.runInContext(reviewCode + '\nglobalThis.api = { openReview, clearReview, appl
   if (input.action === 'open') {
     await context.api.openReview(input.recordId);
     out.currentId = currentId;
-    out.manualEntry = currentManualEntry;
     out.currentVersion = context.currentVersion;
     out.reviewedItems = context.reviewedItems;
     out.absentNodes = [...removed].every((id) => !nodes[id]);
@@ -276,7 +273,6 @@ vm.runInContext(reviewCode + '\nglobalThis.api = { openReview, clearReview, appl
     await context.api.openReview(input.recordId);
     if (input.clearBetween) {
       context.api.clearReview();
-      out.manualEntryAfterClear = currentManualEntry;
       await context.api.openReview(input.nextRecordId);
     }
     await context.api.runRecognize();
@@ -502,8 +498,8 @@ class ConfirmationFrontendTests(unittest.TestCase):
         return json.loads(completed.stdout.decode("utf-8"))
 
     @staticmethod
-    def review_record(manual_entry=False):
-        return {"id": 12, "status": "pending", "manual_entry": manual_entry, "company_id": 3,
+    def review_record():
+        return {"id": 12, "status": "pending", "company_id": 3,
                 "updated_at": "version-12", "current": {"fields": {}, "items": [], "entries": []}}
 
     @staticmethod
@@ -579,9 +575,8 @@ class ConfirmationFrontendTests(unittest.TestCase):
         self.assertEqual(first_payload["reviewed_items"], retry_payload["reviewed_items"])
 
     def test_review_opens_and_admin_visibility_works_without_removed_elements(self):
-        opened = self.run_review(action="open", recordId=12, records={"12": self.review_record(True)})
+        opened = self.run_review(action="open", recordId=12, records={"12": self.review_record()})
         self.assertEqual(opened["currentId"], 12)
-        self.assertTrue(opened["manualEntry"])
         self.assertEqual(opened["currentVersion"], "version-12")
         self.assertEqual(opened["reviewedItems"], {})
         chart_loads = [e for e in opened["events"] if e["type"] == "loadItemAccountChart"]
@@ -674,21 +669,16 @@ process.stdout.write(JSON.stringify(input.cases.map(([dx, dy]) => context.f(dx, 
             {"handler": "review", "id": 47},
         ])
 
-    def test_re_recognition_manual_entry_prompt_cancel_and_accept(self):
-        records = {"12": self.review_record(True)}
-        cancelled = self.run_review(action="recognize", recordId=12, records=records, acceptConfirm=False)
-        self.assertEqual([e["type"] for e in cancelled["events"]],
-                         ["loadItemAccountChart", "recognitionState", "loadList", "confirm"])
-        self.assertEqual([r["method"] for r in cancelled["requests"]], ["GET"])
-
-        accepted = self.run_review(action="recognize", recordId=12, records=records, acceptConfirm=True)
-        self.assertIn("confirm", [e["type"] for e in accepted["events"]])
-        self.assertIn("persist", [e["type"] for e in accepted["events"]])
-        self.assertEqual([r["url"].rsplit("/", 1)[-1] for r in accepted["requests"]], ["12", "set-type", "recognize", "12"])
-        self.assertFalse(any("/notes" in r["url"] for r in accepted["requests"]))
+    def test_re_recognition_ignores_legacy_manual_entry_flag_and_saves_edits(self):
+        records = {"12": {**self.review_record(), "manual_entry": True}}
+        result = self.run_review(action="recognize", recordId=12, records=records)
+        self.assertNotIn("confirm", [e["type"] for e in result["events"]])
+        self.assertIn("persist", [e["type"] for e in result["events"]])
+        self.assertEqual([r["url"].rsplit("/", 1)[-1] for r in result["requests"]], ["12", "set-type", "recognize", "12"])
+        self.assertFalse(any("/notes" in r["url"] for r in result["requests"]))
 
     def test_re_recognition_skips_prompt_for_unmarked_record_and_stops_after_save_failure(self):
-        records = {"12": self.review_record(False)}
+        records = {"12": self.review_record()}
         ordinary = self.run_review(action="recognize", recordId=12, records=records)
         self.assertNotIn("confirm", [e["type"] for e in ordinary["events"]])
         self.assertEqual([r["url"].rsplit("/", 1)[-1] for r in ordinary["requests"]], ["12", "set-type", "recognize", "12"])
@@ -698,13 +688,6 @@ process.stdout.write(JSON.stringify(input.cases.map(([dx, dy]) => context.f(dx, 
         self.assertIn("persist", [e["type"] for e in failed["events"]])
         self.assertFalse(any(r["url"].endswith("/set-type") or r["url"].endswith("/recognize") for r in failed["requests"]))
         self.assertTrue(any(e["type"] == "alert" and "辨識失敗" in e["message"] for e in failed["events"]))
-
-    def test_clearing_review_resets_manual_entry_before_loading_next_record(self):
-        records = {"12": self.review_record(True), "13": self.review_record(False)}
-        result = self.run_review(action="recognize", recordId=12, records=records, clearBetween=True, nextRecordId=13)
-        self.assertFalse(result["manualEntryAfterClear"])
-        self.assertNotIn("confirm", [e["type"] for e in result["events"]])
-        self.assertEqual([r["url"].rsplit("/", 1)[-1] for r in result["requests"]], ["12", "13", "set-type", "recognize", "13"])
 
     def test_confirmation_tabs_and_filter_options_are_present(self):
         parser = WorkflowMarkupParser()

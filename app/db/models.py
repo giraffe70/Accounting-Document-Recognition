@@ -71,10 +71,6 @@ class VoucherRecord(SQLModel, table=True):
     confirmed_by_name: str = Field(default="", sa_column_kwargs={"server_default": ""})
     recognition_confirmed_version: int = Field(default=0, sa_column_kwargs={"server_default": "0"})
 
-    # 手寫／字跡潦草等 AI 讀不可靠、欄位由人工鍵入者，由審核者勾記。
-    # 用途：① 清單一眼看出哪些不是機器讀的 ② 重新辨識前擋下覆蓋 ③ 統計自動化涵蓋率
-    manual_entry: bool = False
-
     ocr_provider: str = ""
     structure_model: str = ""
     image_path: str = ""              # 主頁掃描影像相對路徑（相對 uploads/）

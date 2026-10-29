@@ -561,10 +561,10 @@ class ItemAccountMigrationTests(unittest.TestCase):
                     self.assertIn("recognition_history", columns)
                     self.assertNotIn("clerk_note", columns)
                     self.assertNotIn("accountant_approved_at", columns)
+                    self.assertNotIn("manual_entry", columns)
                     migrated = connection.exec_driver_sql(
-                        "SELECT company_id, manual_entry FROM voucher_records WHERE id=1").one()
+                        "SELECT company_id FROM voucher_records WHERE id=1").one()
                     self.assertIsNone(migrated[0])
-                    self.assertEqual(migrated[1], 0)
             finally:
                 engine.dispose()
 

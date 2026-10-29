@@ -8,7 +8,7 @@
     users: new Set(["password_hash", "salt"]),
     companies: new Set(["id", "account_chart_key"]),
     item_account_mappings: new Set(["id", "created_by", "updated_by", "version"]),
-    voucher_records: new Set(["source_file", "attachments", "recognition_history", "company_id", "confirmed_by"]),
+    voucher_records: new Set(["source_file", "attachments", "recognition_history", "company_id", "confirmed_by", "manual_entry"]),
   };
   const statusLabels = Object.fromEntries([
     ["prepared", "待外觀確認"], ["queued", "待提取"], ["pending", "待確認"],
@@ -120,7 +120,7 @@
     if (typeof value === "string" && /^(datetime|timestamp)\b/i.test(column.type || "")) {
       return value.replace(/^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})\.\d+(?=$|[zZ]$|[+-]\d{2}:?\d{2}$)/, "$1");
     }
-    if ((column.name === "manual_entry" || column.name === "warmup" || column.name === "cancel_requested" || column.name === "is_admin")
+    if ((column.name === "warmup" || column.name === "cancel_requested" || column.name === "is_admin")
       && (value === 0 || value === 1)) return value ? "是" : "否";
     return String(value);
   }

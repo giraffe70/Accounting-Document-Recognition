@@ -72,16 +72,13 @@ _LEGACY_COLUMNS = (
 
 
 def _migrate():
-    """輕量遷移：對既有 DB 補上新欄位（SQLite create_all 不會自動加欄位）。
-
-    型別要跟著欄位走：布林欄位若建成 VARCHAR，SQLite 會把 0 存成字串 '0'，
-    而 Python 的 bool('0') 是 True——整個資料表會全部讀成「真」。
-    """
+    """遷移既有 DB 欄位；SQLite create_all 不會自動更新既有資料表。"""
+    from app.db.manual_entry_retirement import retire_manual_entry
+    retire_manual_entry(_engine)
     # col -> (SQL 型別, 預設值)
     added = {
         "image_path": ("VARCHAR", "''"),
         "attachments": ("VARCHAR", "'[]'"),
-        "manual_entry": ("INTEGER", "0"),
         "record_role": ("VARCHAR", "'voucher'"),
         "source_parent_id": ("INTEGER", "NULL"),
         "recognition_history": ("VARCHAR", "'[]'"),
@@ -100,11 +97,6 @@ def _migrate():
         cols = {r[1]: (r[2] or "").upper() for r in info}
         for col, (sqltype, default) in added.items():
             if col not in cols:
-                conn.exec_driver_sql(
-                    f"ALTER TABLE voucher_records ADD COLUMN {col} {sqltype} DEFAULT {default}")
-            elif col == "manual_entry" and cols[col] != "INTEGER":
-                # 修正早期版本把布林欄位建成 VARCHAR 的資料（全部會讀成 True）
-                conn.exec_driver_sql(f"ALTER TABLE voucher_records DROP COLUMN {col}")
                 conn.exec_driver_sql(
                     f"ALTER TABLE voucher_records ADD COLUMN {col} {sqltype} DEFAULT {default}")
         # 在 ORM 讀取前轉換舊 enum 字串。只在新增欄位時合併備註，

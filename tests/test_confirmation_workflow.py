@@ -115,6 +115,7 @@ class ConfirmationServiceTests(unittest.TestCase):
         self.assertEqual(noted.confirmed_at, confirmed_at)
         self.assertEqual(noted.correction_note, "核對品名")
         self.assertFalse(hasattr(noted, "dev_note"))
+        self.assertFalse(hasattr(noted, "manual_entry"))
 
         changed = review.set_company(record.id, "Another Co")
         self.assertEqual(changed.status, ReviewStatus.pending)
@@ -129,7 +130,6 @@ class ConfirmationServiceTests(unittest.TestCase):
             {"source": "manual", "value": 125, "selected": True},
         ]}
         record.current_json = json.dumps(current, ensure_ascii=False)
-        record.manual_entry = False
         with Session(self.engine, expire_on_commit=False) as session:
             session.add(record)
             session.commit()
@@ -149,6 +149,7 @@ class ConfirmationServiceTests(unittest.TestCase):
         self.assertEqual([item["id"] for item in items], [record.id])
         self.assertEqual(items[0]["correction_note"], "核對品名")
         self.assertNotIn("dev_note", items[0])
+        self.assertNotIn("manual_entry", items[0])
 
     def test_alignment_pairs_queries_confirmed_records_only(self):
         confirmed = self.save(status=ReviewStatus.confirmed)
@@ -229,9 +230,9 @@ class ReviewMigrationTests(unittest.TestCase):
                 conn.exec_driver_sql("ALTER TABLE voucher_records ADD COLUMN dev_note VARCHAR DEFAULT ''")
                 conn.exec_driver_sql("""INSERT INTO voucher_records
                     (id,source_file,record_role,recognition_history,company,period,status,confidence,
-                     ai_json,current_json,correction_note,manual_entry,ocr_provider,structure_model,
+                     ai_json,current_json,correction_note,ocr_provider,structure_model,
                      image_path,attachments,created_at,updated_at,dev_note,confirmed_by_name)
-                    VALUES (1,'','voucher','[]','','','pending','','{}','{}','',0,'','','','[]',
+                    VALUES (1,'','voucher','[]','','','pending','','{}','{}','','','','','[]',
                             '2026-10-01 00:00:00','2026-10-01 00:00:00','x','')""")
             with patch.object(db_session, "_engine", engine):
                 db_session._migrate()
@@ -359,10 +360,10 @@ class ConfirmationApiContractTests(unittest.TestCase):
             "review": review_stub, "JSONResponse": Mock(), "Body": Body,
             "_rec_to_dict": lambda value: {"id": value.id},
         })
-        endpoint(7, correction_note="人工修正", manual_entry=None)
+        endpoint(7, correction_note="人工修正")
         review_stub.set_notes.assert_called_once_with(7, correction_note="人工修正")
         self.assertEqual(list(inspect.signature(endpoint).parameters),
-                         ["rec_id", "correction_note", "manual_entry"])
+                         ["rec_id", "correction_note"])
 
         source = (ROOT / "app" / "main.py").read_text(encoding="utf-8")
         routes = {

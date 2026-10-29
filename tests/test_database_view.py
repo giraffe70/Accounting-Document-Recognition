@@ -165,7 +165,7 @@ class DatabaseViewTests(unittest.TestCase):
         for table in tables:
             columns = self.rows(table=table["name"]).json()["columns"]
             self.assertTrue(all(c["label"] for c in columns))
-        self.assertEqual(sum(len(meta["columns"]) for meta in database_view.TABLE_META.values()), 125)
+        self.assertEqual(sum(len(meta["columns"]) for meta in database_view.TABLE_META.values()), 124)
         users_response = self.rows(table="users").json()
         user_columns = {column["name"]: column["label"] for column in users_response["columns"]}
         self.assertEqual(user_columns["is_admin"], "管理員權限")

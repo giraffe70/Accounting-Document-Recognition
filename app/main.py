@@ -468,7 +468,6 @@ def _rec_to_dict(rec: VoucherRecord, full: bool = False) -> dict:
         "confirmed_at": rec.confirmed_at.isoformat() if rec.confirmed_at else "",
         "confirmed_by_name": getattr(rec, "confirmed_by_name", ""),
         "recognition_report_ready": rec.status == ReviewStatus.confirmed and getattr(rec, "recognition_confirmed_version", 0) == recognition_details.VERSION,
-        "manual_entry": bool(rec.manual_entry),
         # 人工是否動過欄位：重新辨識會覆蓋 current_json，前端據此先問過使用者
         "edited": item_account_mapping.strip_accounting(json.loads(rec.ai_json)) !=
                   item_account_mapping.strip_accounting(json.loads(rec.current_json)),
@@ -615,14 +614,11 @@ def api_set_company(request: Request, rec_id: int, company: str = Body("", embed
 
 
 @app.post("/api/vouchers/{rec_id}/notes")
-def api_notes(rec_id: int, correction_note: str = Body(None, embed=True),
-              manual_entry: bool = Body(None, embed=True)):
-    """保存修正備註及人工輸入標記，不轉狀態。"""
+def api_notes(rec_id: int, correction_note: str = Body(None, embed=True)):
+    """保存修正備註，不轉狀態。"""
     patch = {}
     if correction_note is not None:
         patch["correction_note"] = correction_note
-    if manual_entry is not None:
-        patch["manual_entry"] = manual_entry
     rec = review.set_notes(rec_id, **patch)
     return _rec_to_dict(rec) if rec else JSONResponse({"detail": "查無此紀錄"}, status_code=404)
 
@@ -834,7 +830,7 @@ def api_merge(primary_id: int = Body(..., embed=True), ids: list = Body(..., emb
 
 @app.get("/api/feedback")
 def api_feedback():
-    """修正回饋清單（有修正備註、人工輸入或經修正的紀錄；管理員專屬）。"""
+    """修正回饋清單（有修正備註或經修正的紀錄；管理員專屬）。"""
     return {"items": review.feedback_log()}
 
 

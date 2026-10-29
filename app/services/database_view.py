@@ -35,6 +35,7 @@ HIDDEN_COLUMNS = {
         "image_path",
         "record_role",
         "source_parent_id",
+        "manual_entry",
     },
 }
 
@@ -62,7 +63,6 @@ TABLE_META = {
             "correction_note": "修正備註", "confirmed_at": "確認完成時間",
             "confirmed_by": "辨識確認者編號", "confirmed_by_name": "辨識確認者名稱",
             "recognition_confirmed_version": "辨識報告確認版本",
-            "manual_entry": "人工輸入",
             "ocr_provider": "OCR 來源", "structure_model": "欄位萃取模型",
             "image_path": "掃描影像路徑", "attachments": "附頁清單",
             "record_role": "紀錄角色", "source_parent_id": "來源憑證編號",

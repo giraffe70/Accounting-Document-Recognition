@@ -12,7 +12,6 @@
   let currentVoucher = {};   // 目前載入的 current（保留 entries 等未編輯欄位）
   let currentVersion = "", companyRecords = [], accountChart = [], reviewedItems = {};
   let recognitionReady = false, recognitionDirty = false;
-  let currentManualEntry = false;   // 保留既有人工修正紀錄的重新辨識提醒
   let editBusy = false;
   let currentUser = null;
   let currentIsImport = false;
@@ -369,12 +368,11 @@
       // 以欄位契約的正式標籤為準；current_json.doc_type 是模型回傳的字串，可能簡略或走樣
       const spec = DOC_TYPES[r.doc_type_key];
       const type = esc((spec && spec.label) || r.doc_type) || "自動判斷類型";
-      const manual = r.manual_entry ? ` <span class="att-badge" title="欄位已人工修正確認">✍ 人工修正</span>` : "";
       const sourceTag = r.source_parent_id != null
         ? ` <span class="att-badge" title="此單據拆分自原始掃描頁">來自${r.origin?.page_no != null ? ` p${esc(r.origin.page_no)}` : ` #${esc(r.source_parent_id)}`}</span>` : "";
       return `
       <tr data-id="${r.id}" class="${r.id === currentId ? "sel" : ""}" title="${esc(r.source_file || "")}">
-        <td>${chk}${currentStage === "prepared" && r.has_image ? `<img src="/api/vouchers/${r.id}/image?expected_updated_at=${encodeURIComponent(r.updated_at)}" alt="單據縮圖" loading="lazy" style="width:72px;height:88px;object-fit:contain;vertical-align:middle">` : ""}${esc(r.voucher_id) || "—"}${att}${sourceTag}<div class="row-sub">${type}${manual}</div></td>
+        <td>${chk}${currentStage === "prepared" && r.has_image ? `<img src="/api/vouchers/${r.id}/image?expected_updated_at=${encodeURIComponent(r.updated_at)}" alt="單據縮圖" loading="lazy" style="width:72px;height:88px;object-fit:contain;vertical-align:middle">` : ""}${esc(r.voucher_id) || "—"}${att}${sourceTag}<div class="row-sub">${type}</div></td>
         <td>${esc(r.company) || "—"}</td>
         <td>${esc(r.date) || "—"}</td>
         <td>${nf(r.total_amount)}</td>
@@ -538,7 +536,6 @@
     currentVoucher = v;
     currentVersion = rec.updated_at;
     reviewedItems = {};
-    currentManualEntry = !!rec.manual_entry;
     currentIsImport = !!rec.is_import;
     const autoSplitSource = v.origin?.layout?.auto_split === true;
     const sourcePage = rec.record_role === "source_page" || autoSplitSource;
@@ -668,7 +665,6 @@
 
   function applyRecordStatus(record) {
     if (record.id !== currentId) return;
-    if ("manual_entry" in record) currentManualEntry = !!record.manual_entry;
     if (record.updated_at) currentVersion = record.updated_at;
     if (record.current?.origin) currentVoucher.origin = record.current.origin;
     if ("image_restore_available" in record) updateRestoreButton(record.image_restore_available);
@@ -704,9 +700,6 @@
   // 外觀確認 / 重新辨識：以「目前選定的類型」在準備好的影像上做內容辨識
   async function runRecognize() {
     if (!currentId || editBusy || inferBusy) return;
-    if (currentManualEntry) {
-      if (!confirm("這張已有「人工修正」標記。\n重新辨識會保留人工選定的欄位並新增模型結果，成功後須重新確認。\n\n確定要重新辨識嗎？")) return;
-    }
     const id = currentId, tk = $("revTypeSel").value;
     try {
       if (!$("revForm").classList.contains("prepared")) await persistCurrentEdits();
@@ -1544,7 +1537,6 @@
   });
   function clearReview() {
     $("revForm").classList.add("hidden"); $("revEmpty").classList.remove("hidden"); currentId = null;
-    currentManualEntry = false;
     recognitionReady = false; recognitionDirty = false; updateRecognitionState();
   }
   // 外觀確認 → 加入掃描清單（prepared → queued）
