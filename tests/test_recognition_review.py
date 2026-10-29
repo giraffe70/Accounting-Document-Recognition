@@ -16,7 +16,7 @@ from sqlmodel import Session, SQLModel, create_engine
 from app.core import pipeline
 from app.db.models import Company, UserAccount, ReviewStatus, VoucherRecord
 from app.models.schemas import Voucher
-from app.services import review, entry_workflow, item_account_mapping, recognition_details
+from app.services import review, recognition_sources, item_account_mapping, recognition_details
 
 
 def endpoint(name, namespace):
@@ -67,7 +67,17 @@ class RecognitionReviewTests(unittest.TestCase):
         with patch.object(review, "recognition_account_warnings", return_value=[]):
             return route(SimpleNamespace(cookies={"session": "synthetic"}), rec.id, version or rec.updated_at.isoformat())
 
-    def test_confirm_records_actor_without_marking_entries_ready(self):
+    def test_detail_save_preserves_original_entries_instead_of_creating_posting_drafts(self):
+        rec = self.record()
+        original = json.loads(rec.current_json)["entries"]
+        saved = self.save(rec, mutate=lambda data: data.update(entries=[{
+            "description": "舊瀏覽器送來的分錄草稿", "amount": 999,
+            "credit_account": "9999", "entry_origin": "generated",
+        }]))
+        self.assertEqual(json.loads(saved.current_json)["entries"], original)
+        self.assertFalse(hasattr(saved, "entries_status"))
+
+    def test_confirm_records_actor_and_preserves_original_source_entries(self):
         rec = self.record()
         original = json.loads(rec.current_json)["entries"]
         data = json.loads(rec.current_json)
@@ -78,7 +88,7 @@ class RecognitionReviewTests(unittest.TestCase):
         self.assertEqual(confirmed.confirmed_by, self.user_id)
         self.assertEqual(confirmed.confirmed_by_name, "辨識核對者")
         self.assertEqual(confirmed.recognition_confirmed_version, 1)
-        self.assertEqual(confirmed.entries_status, "draft")
+        self.assertFalse(hasattr(confirmed, "entries_status"))
         self.assertEqual(json.loads(confirmed.current_json)["entries"], original)
         result = self.report(confirmed)
         self.assertEqual(result.status_code, 200)

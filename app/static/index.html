@@ -251,12 +251,11 @@
   <div id="modal" class="modal hidden">
     <div class="modal-box">
       <h3>模型設定（地端）</h3>
-      <p class="hint">OCR 使用地端 PaddleOCR；結構化與科目分類使用 Ollama 模型。</p>
+      <p class="hint">OCR 使用地端 PaddleOCR；結構化使用 Ollama 模型。</p>
       <div class="form-group"><label>OCR（辨識文字）</label><select id="sel-ocr" class="select"></select>
         <div id="ocrStatus" class="hint"></div>
       </div>
       <div class="form-group"><label>結構化 VLM（讀圖萃取欄位）</label><select id="sel-structure" class="select"></select></div>
-      <div class="form-group"><label>科目分類 LLM</label><select id="sel-classify" class="select"></select></div>
       <div class="modal-actions">
         <button id="saveSettings" class="btn primary">儲存</button>
         <button id="closeModal" class="btn">取消</button>
@@ -264,16 +263,15 @@
     </div>
   </div>
 
-  <!-- 引擎狀態列（固定於底部）：三階段目前用哪個模型、是否執行中、地端佔用 -->
+  <!-- 引擎狀態列（固定於底部）：辨識階段目前用哪個模型、是否執行中、地端佔用 -->
   <div id="engineBar" class="engine-bar">
     <span class="eng-title">引擎</span>
     <span class="eng" id="eng-ocr"></span>
     <span class="eng" id="eng-structure"></span>
-    <span class="eng" id="eng-classify"></span>
     <span class="spacer"></span>
     <span class="eng-hint" id="engHint"></span>
   </div>
 
-  <script src="/js/app.js?v=20261027-remove-accounts"></script>
+  <script src="/js/app.js?v=20261029-retire-entry-management"></script>
 </body>
 </html>

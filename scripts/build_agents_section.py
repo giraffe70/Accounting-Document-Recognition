@@ -1,22 +1,15 @@
-"""Build the manual's recognition templates and document contracts section."""
+"""Build the standalone developer appendix for OCR/structure contracts."""
 import html
 import pathlib
-import re
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from app.core import doc_types as dt
-from app.core.prompts import (
-    ACCOUNTING_TEMPLATE,
-    EXTRACT_TEMPLATE,
-    ROUTE_TEMPLATE,
-    build_extract_prompt,
-    build_route_prompt,
-)
+from app.core.prompts import EXTRACT_TEMPLATE, ROUTE_TEMPLATE, build_extract_prompt, build_route_prompt
 
-HTML = ROOT / "docs/manual/index.html"
+OUTPUT = ROOT / "artifacts/recognition-contracts.html"
 KIND = {"text": "字串", "number": "數字", "date": "日期"}
 
 
@@ -47,7 +40,7 @@ TASK = {
     "utility": "辨識公用事業帳單欄位。",
     "purchase_order": "辨識訂購或採購文件欄位。",
     "statement": "辨識對帳單與帳款明細欄位。",
-    "journal_voucher": "辨識傳票欄位與分錄列。",
+    "journal_voucher": "辨識紙面傳票欄位、借貸明細、合計與來源證據。",
     "bill_detail": "辨識帳單明細附頁欄位。",
     "social_insurance": "辨識社會保險繳費文件欄位。",
     "other": "辨識未歸類文件的通用欄位。",
@@ -124,21 +117,13 @@ SECTION = f"""
   <!-- ░░░ AGENTS ░░░ -->
   <section class="doc" id="agents">
     <h2><span class="ic">🤖</span>辨識模板與資料契約</h2>
-    <p class="lead">辨識流程共用三個核心模板：路由分類、欄位萃取、會計分類。18 種文件各自提供欄位契約與 <code>type_hints</code>，不再維護每種文件的一整份獨立提示詞。</p>
+    <p class="lead">辨識流程使用路由（單據分類）與欄位萃取兩個模板。主設定只包含 OCR 與 structure；AI 會計分錄建議、草稿、確認、日記帳與會計傳票格式已退役。紙面傳票的借貸明細、合計及來源證據仍會辨識並保留。</p>
 
     <h3>辨識流程</h3>
-    <div class="diagram">
-      <div class="mermaid">
-flowchart LR
-  IMG["頁面影像與 OCR"] --> ROUTE["路由模板"] --> TYPE["文件類型與契約"]
-  TYPE --> EXTRACT["萃取模板"] --> READ["共用補讀與欄位檢查"] --> REVIEW["待確認資料"]
-  REVIEW --> ACCOUNT["會計模板"] --> CANDIDATE["候選分錄"]
-      </div>
-      <div class="diagram-cap">路由與萃取共用提示詞模板，再以文件類型契約和提示補充差異；會計模板產生供審核的候選分錄。</div>
-    </div>
+    <p>頁面影像與 OCR → 路由模板判定單據類型 → 欄位萃取及檢查 → 人工覆核與辨識確認。</p>
     <p>欄位契約失敗時，系統會保留原始訊息，在初次請求後再做 <strong>1 次契約重試</strong>；重試將靜態 system 指示併入第一個 system 訊息（保留原任務前綴），錯誤另作 user JSON，原 user 證據不變；每一輪傳輸最多重試 <strong>3 次</strong>。影像補讀與輸出修正由共用流程處理。</p>
     <p>條碼或 QR 解碼值若與影像辨識欄位衝突，保留衝突警告供後續檢視，不靜默覆蓋其中一方。</p>
-    <p>固定任務規則由 system 訊息承載；OCR、備註、政策、案例及其它輸入資料以 user JSON 資料區傳入，不因此取得指令權威。選取證據只表示本次送交內容，不等於人工確認。</p>
+    <p>固定辨識任務規則由 system 訊息承載；OCR 與其他來源資料作為辨識輸入，不因此取得指令權威。選取證據只表示提供來源資訊，不等於人工確認。</p>
 
     <h3>18 種文件資料契約</h3>
     <p>欄位名稱、標籤與型別直接取自 <code>DOC_TYPES</code>；類型提示取自 <code>type_hints</code>。展開列可檢視各類型完整欄位。</p>
@@ -151,9 +136,11 @@ flowchart LR
       收據契約包含 <code>withholding_tax</code>；貨物明細支援 <code>hs_code</code> 與 <code>origin_country</code>。細節以契約列出的欄位和萃取模板為準。
     </div>
     <p>舊收據稅額尚未確認語意時，來源記錄為 <code>semantic_role=unconfirmed_tax</code>；canonical 再次儲存不會把它當作共同營業稅。人工確認並移入 <code>withholding_tax</code> 後，未確認狀態解除。</p>
-    <p>金額契約列明用途、幣別與政策鍵；VAT 借方或貸方金額都只能引用 VAT 用途且 Decimal 數值相同的來源（5.0 與 5 相同、5.001 與 5 不同）。舊分錄只有一條來源路徑時可相容地沿用為主來源，兩條以上必須明示 <code>amount_source</code>，不按值匹配猜來源；多項合計只引用程式推導值，<code>evidence_paths</code> 僅作佐證。報關行通知的 <code>customs_duty</code>、<code>broker_fee</code>、<code>edi_fee</code>、<code>tax</code> 各自帶有來源語意。通用報單估價預設排除於入帳；出口報單保留多商品 items 及既有首項欄位；勞健保明細列包含 <code>fee_code</code>。</p>
+    <p>金額欄位契約會標示用途、幣別與來源語意；通用報單估價欄位仍按原文件資料辨識，出口報單保留多商品 items 及既有首項欄位，勞健保明細列包含 <code>fee_code</code>。</p>
 
-    <h3>三個共用核心模板</h3>
+    <p>單據類型分類仍由路由模板執行；獨立驗證工具的 <code>classify_model</code> 也保留作單據分類。它不是會計科目分類。</p>
+
+    <h3>兩個辨識模板</h3>
     <h4>① 路由模板（<code>ROUTE_TEMPLATE</code>）</h4>
     <p>由類型清單建立分類提示。Router 只將水電及電信等公用事業文件歸入 <code>utility</code>；<code>rotate</code> 只接受 0、90、180、270，<code>other</code> 必須提供原因。以下展示建構器產生的預設版本。</p>
     <div class="codeblock"><span class="lang">prompt</span><pre>{esc(build_route_prompt())}</pre></div>
@@ -164,26 +151,46 @@ flowchart LR
     <div class="codeblock"><span class="lang">prompt</span><pre>{esc(build_extract_prompt("invoice"))}</pre></div>
     <details><summary>EXTRACT_TEMPLATE 原文</summary><div class="codeblock"><span class="lang">template</span><pre>{esc(EXTRACT_TEMPLATE)}</pre></div></details>
 
-    <h4>③ 會計模板（<code>ACCOUNTING_TEMPLATE</code>）</h4>
-    <p>只對已確認為進口的文件套用進口規則；出口類型不套用。預設角色映射為：進口稅費→預付費用、海關營業稅→進項稅額、銀行手續費→其他費用。未付款進口／商品使用應付帳款，一般未付款費用使用應付費用；已付款須有付款方式，才能選銀行存款或現金。科目角色由當次公司的科目表解析，不固定寫入科目代碼。進口預設 <code>include_goods_values=false</code>、<code>posting_currency=TWD</code>；外幣發票與明細完整保留，但不將外幣貨款與臺幣稅費混合加總。</p>
-    <p>付款方式或收支方向不明時，提出候選分錄並明示假設；不能據此強制貸記銀行。會計輸出標記為 <code>proposed</code>、<code>candidate</code> 或 <code>skipped</code>。缺金額或科目屬候選；原始單面傳票再次分類會以 <code>status=skipped</code>、<code>reason=original_entries</code> 保留既有分錄，不生成另一側。其 <code>original_checks</code> 記錄 <code>complete</code>、<code>single_sided</code>、<code>observed_totals</code> 與 <code>printed_totals_match</code>；<code>balance_check</code> 僅表示借貸實際相等，單面完整不代表平衡。候選結果供人員檢視確認，但不代表憑證已確認。</p>
-    <p>辨識欄位可保留 <code>field_evidence</code> 與 <code>validation_warnings</code>；會計模型只接收已選取的現行證據，完整歷史仍保存。人工修改後會重算日期、金額、統編等目前警告，並保留原始來源與衝突診斷。分類結果記錄於 <code>classification_meta</code>，分錄證據路徑記錄於 <code>JournalEntry.evidence_paths</code>。日記帳列保留 null 金額與證據路徑，忽略舊 <code>bill_detail</code> 分錄列；前端與報表列印附上 escaped 來源、驗證及政策紀錄。舊瀏覽器重複儲存不覆蓋服務端 audit 與 stale 標記。</p>
-    <p><code>JournalEntry.amount</code> 與 <code>amount_source</code> 可缺省為 null，<code>LineItem.fee_code</code> 可缺省為 null，<code>Voucher.payment_state</code> 預設為空物件。分類 API 回應追加 <code>payment_state</code> 供前端收取；日記帳列提供 <code>amount_source</code> 與付款狀態。CSV 追加 <code>amount_source</code>、<code>fee_code</code> 與 <code>payment_state_json</code> 欄位，列印輸出保留這些契約資料。對帳單幣別未知時保留未知，不預設 TWD；其 money metadata 使用文件幣別，現行對帳單會計政策及發票勾稽範圍不變。各類型明細欄位以深拷貝隔離，避免 metadata 跨類型污染。</p>
-    <div class="codeblock"><span class="lang">prompt</span><pre>{esc(ACCOUNTING_TEMPLATE)}</pre></div>
+    <p>辨識報告列印保留。原始 <code>journal_voucher</code> 紙面借貸 <code>entries</code>、合計及 evidence 仍是辨識資料；明細科目與品名科目記憶規則仍可使用。摘要彙總表 API 保留，其他日記帳／會計傳票格式端點已退役並回傳 404。</p>
     <p class="muted">模板原文：<code>app/core/prompts.py</code>；類型契約：<code>app/core/doc_types.py</code>。</p>
   </section>
 """
 
-source = HTML.read_text(encoding="utf-8")
-anchor = "<!-- ░░░ THIRD-PARTY ░░░ -->"
-assert source.count(anchor) == 1, "third-party anchor must occur exactly once"
-pattern = re.compile(r'  <section class="doc" id="agents">.*?  </section>\s*', re.S)
-if len(pattern.findall(source)) == 1:
-    source = pattern.sub(SECTION.lstrip("\n") + "\n\n", source)
-else:
-    assert len(pattern.findall(source)) == 0, "expected at most one existing #agents section"
-    source = source.replace(anchor, SECTION.lstrip("\n") + "\n" + anchor)
-
-assert source.count('id="agents"') == 1
-HTML.write_text(source, encoding="utf-8")
-print("rebuilt #agents section from prompts.py and DOC_TYPES")
+DOCUMENT = f'''<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>開發用辨識契約附錄</title>
+  <style>
+    :root {{ color-scheme: light; }}
+    body {{ max-width: 1240px; margin: 0 auto; padding: 28px; color: #202124; font: 16px/1.7 "Microsoft JhengHei", sans-serif; }}
+    h1, h2, h3, h4 {{ line-height: 1.4; color: #111; }}
+    h1 {{ font-size: 30px; }}
+    h2 {{ font-size: 24px; }}
+    h3 {{ margin-top: 28px; font-size: 20px; }}
+    h4 {{ margin-top: 22px; font-size: 17px; }}
+    p {{ margin: 0 0 14px; }}
+    table {{ width: 100%; border-collapse: collapse; margin: 18px 0 26px; font-size: 14px; }}
+    th, td {{ border: 1px solid #d9d9d9; padding: 10px 12px; text-align: left; vertical-align: top; }}
+    th {{ background: #e6edf2; color: #111; }}
+    code {{ overflow-wrap: anywhere; }}
+    details {{ margin: 6px 0; }}
+    summary {{ cursor: pointer; font-weight: 600; }}
+    .codeblock {{ overflow-x: auto; margin: 12px 0 18px; padding: 14px; background: #f5f6f7; }}
+    pre {{ margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: 13px/1.55 Consolas, monospace; }}
+    .callout {{ margin: 18px 0; }}
+    .muted {{ color: #555; }}
+    @media (max-width: 760px) {{ body {{ padding: 16px; }} table {{ font-size: 12px; }} th, td {{ padding: 7px; }} }}
+    @media print {{ @page {{ margin: 15mm; }} body {{ max-width: none; padding: 0; }} table {{ font-size: 9pt; }} tr {{ break-inside: avoid; }} }}
+  </style>
+</head>
+<body>
+  <h1>開發用辨識契約附錄</h1>
+{SECTION.strip()}
+</body>
+</html>
+'''
+OUTPUT.parent.mkdir(parents=True, exist_ok=True)
+OUTPUT.write_text(DOCUMENT, encoding="utf-8")
+print(f"wrote standalone recognition contracts appendix: {OUTPUT.relative_to(ROOT)}")

@@ -18,8 +18,8 @@ from app.core import activity, doc_types, model_factory, pipeline, settings_stor
 from app.db.models import ReviewStatus, VoucherRecord
 from app.db.session import init_db
 from app.models.schemas import ConfigUpdate, Voucher
-from app.services import (accounts, auth, backup, classify, database_view, importdecl, journal,
-                          reports, review, sysconfig, taxid, companies, item_account_mapping, entry_workflow, import_jobs)
+from app.services import (accounts, auth, backup, database_view, importdecl,
+                          reports, review, sysconfig, taxid, companies, item_account_mapping, recognition_sources, import_jobs)
 from app.services import user_management
 
 _LOG_FMT = "[%(asctime)s] %(levelname)s %(name)s: %(message)s"
@@ -55,8 +55,8 @@ async def mapping_conflict_handler(request, exc):
                          "latest": exc.latest}, status_code=409)
 
 
-@app.exception_handler(entry_workflow.EntryConflict)
-async def entry_conflict_handler(request, exc):
+@app.exception_handler(recognition_sources.ReviewConflict)
+async def review_conflict_handler(request, exc):
     return JSONResponse({"ok": False, "detail": str(exc), "latest": exc.latest}, status_code=409)
 
 
@@ -164,7 +164,7 @@ def api_models(local_only: bool = False):
 
 @app.get("/api/engine-status")
 def api_engine_status():
-    """狀態列：三階段（OCR／VLM／LLM）目前用哪個引擎、是否執行中、地端模型佔用。
+    """狀態列：辨識階段（OCR／結構化）目前用哪個引擎、是否執行中、地端模型佔用。
 
     地端模型單張數十秒，使用者需要知道現在卡在哪一段；Ollama 部分沿用
     research_log_agent 的 /api/ps 代理（VRAM、GPU/CPU 佔比、卸載倒數）。
@@ -469,9 +469,6 @@ def _rec_to_dict(rec: VoucherRecord, full: bool = False) -> dict:
         "confirmed_by_name": getattr(rec, "confirmed_by_name", ""),
         "recognition_report_ready": rec.status == ReviewStatus.confirmed and getattr(rec, "recognition_confirmed_version", 0) == recognition_details.VERSION,
         "manual_entry": bool(rec.manual_entry),
-        "entries_status": getattr(rec, "entries_status", "none"),
-        "entries_confirmed_at": rec.entries_confirmed_at.isoformat() + "Z" if getattr(rec, "entries_confirmed_at", None) else "",
-        "entries_confirmed_by_name": getattr(rec, "entries_confirmed_by_name", ""),
         # 人工是否動過欄位：重新辨識會覆蓋 current_json，前端據此先問過使用者
         "edited": item_account_mapping.strip_accounting(json.loads(rec.ai_json)) !=
                   item_account_mapping.strip_accounting(json.loads(rec.current_json)),
@@ -486,8 +483,6 @@ def _rec_to_dict(rec: VoucherRecord, full: bool = False) -> dict:
         d["current"] = json.loads(rec.current_json)
         recognition_details.ensure(d["current"], rec.id)
         d["detail_account_warnings"] = review.recognition_account_warnings(rec, d["current"])
-        d["entries_checks"] = entry_workflow.checks(d["current"])
-        d["entries_proposal"] = json.loads(getattr(rec, "entries_proposal_json", "{}") or "{}")
         d["is_import"] = importdecl.is_import(d["current"])
         # 進口報單鎖定：賣方為國外供應商/海關，統編免核
         d["taxcheck"] = None if d["is_import"] else taxid.check_voucher(d["current"])
@@ -576,7 +571,7 @@ def api_update(request: Request, rec_id: int, voucher: dict = Body(...)):
         rec = review.update_current(rec_id, voucher, expected_updated_at=expected,
             _actor=auth.get_user_by_token(request.cookies.get("session")), _require_account_version=True)
     except ValueError as exc:
-        if isinstance(exc, (review.RecognitionProtected, item_account_mapping.MappingConflict, entry_workflow.EntryConflict)):
+        if isinstance(exc, (review.RecognitionProtected, item_account_mapping.MappingConflict, recognition_sources.ReviewConflict)):
             raise
         return JSONResponse({"detail": str(exc)}, status_code=422)
     if not rec:
@@ -593,7 +588,7 @@ def api_save_current(request: Request, rec_id: int, payload: dict = Body(...)):
     try:
         rec, skipped = review.save_current(rec_id, payload, actor)
     except ValueError as exc:
-        if isinstance(exc, (item_account_mapping.MappingConflict, review.RecognitionProtected, entry_workflow.EntryConflict)):
+        if isinstance(exc, (item_account_mapping.MappingConflict, review.RecognitionProtected, recognition_sources.ReviewConflict)):
             raise
         return JSONResponse({"detail": str(exc)}, status_code=422)
     except (IntegrityError, OperationalError) as exc:
@@ -667,7 +662,7 @@ def api_split(request: Request, rec_id: int, box: list = Body(..., embed=True), 
     """一頁多張憑證：裁一塊建立為新憑證紀錄，並把該區從原圖塗白。"""
     try:
         rec = review.split_voucher(rec_id, box, expected_updated_at=expected_updated_at, actor=auth.get_user_by_token(request.cookies.get("session")))
-    except (review.RecognitionProtected, entry_workflow.EntryConflict):
+    except (review.RecognitionProtected, recognition_sources.ReviewConflict):
         raise
     except Exception as exc:  # noqa: BLE001
         logger.exception("分割辨識失敗")
@@ -686,7 +681,7 @@ def api_split(request: Request, rec_id: int, box: list = Body(..., embed=True), 
 def api_re_recognize(request: Request, rec_id: int):
     try:
         rec = review.re_recognize(rec_id, actor=auth.get_user_by_token(request.cookies.get("session")))
-    except entry_workflow.EntryConflict:
+    except recognition_sources.ReviewConflict:
         raise
     except review.RecognitionProtected as exc:
         return JSONResponse({"ok": False, "detail": str(exc)}, status_code=409)
@@ -733,7 +728,7 @@ def api_recognize(request: Request, rec_id: int):
     """依確認的類型在準備好的影像上做內容辨識（queued/prepared → pending 待確認）。"""
     try:
         rec = review.recognize_record(rec_id, actor=auth.get_user_by_token(request.cookies.get("session")))
-    except entry_workflow.EntryConflict:
+    except recognition_sources.ReviewConflict:
         raise
     except review.RecognitionProtected as exc:
         return JSONResponse({"ok": False, "detail": str(exc)}, status_code=409)
@@ -837,55 +832,6 @@ def api_merge(primary_id: int = Body(..., embed=True), ids: list = Body(..., emb
         if rec else JSONResponse({"detail": "找不到主頁紀錄"}, status_code=404)
 
 
-@app.post("/api/vouchers/{rec_id}/classify")
-def api_classify(request: Request, rec_id: int, expected_updated_at: str = Body(..., embed=True)):
-    """Generate an optional proposal without replacing the adopted draft."""
-    rec = review.get_voucher(rec_id)
-    if not rec:
-        return JSONResponse({"detail": "查無此紀錄"}, status_code=404)
-    actor = auth.get_user_by_token(request.cookies.get("session"))
-    if not actor:
-        return JSONResponse({"detail": "未登入"}, status_code=401)
-    try:
-        review._check_model_write(rec)
-        data = json.loads(rec.current_json)
-        if rec.status not in (ReviewStatus.pending, ReviewStatus.confirmed) or doc_types.get(data.get("doc_type_key", "")).get("has_entries") or doc_types.is_supporting(data.get("doc_type_key", "")):
-            return JSONResponse({"detail": "此類型不產生 AI 分錄建議，請核對原圖分錄"}, status_code=409)
-        if rec.updated_at.isoformat() != expected_updated_at:
-            raise entry_workflow.EntryConflict("單據已被修改，請重新載入", latest={
-                "updated_at": rec.updated_at.isoformat(), "company_id": rec.company_id, "current": data})
-        fingerprint = entry_workflow.source_fingerprint(rec)
-        voucher = Voucher.model_validate(json.loads(rec.current_json))
-        voucher = classify.classify(voucher, company=rec.company)
-        saved = review.save_entry_proposal(rec_id, voucher, actor, fingerprint,
-            expected_updated_at=expected_updated_at)
-        if saved is None:
-            return JSONResponse({"detail": "查無此紀錄"}, status_code=404)
-        return {"ok": True, **_rec_to_dict(saved, full=True)}
-    except entry_workflow.EntryConflict:
-        raise
-    except review.RecognitionProtected as exc:
-        return JSONResponse({"ok": False, "detail": str(exc)}, status_code=409)
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("科目分類失敗")
-        return JSONResponse({"ok": False, "detail": f"分類失敗：{exc}"}, status_code=500)
-
-
-@app.post("/api/vouchers/{rec_id}/entries/{action}")
-def api_manage_entries(request: Request, rec_id: int, action: str, payload: dict = Body(...)):
-    actor = auth.get_user_by_token(request.cookies.get("session"))
-    if not actor:
-        return JSONResponse({"detail": "未登入"}, status_code=401)
-    try:
-        rec = review.manage_entries(rec_id, action, payload.get("expected_updated_at"), actor,
-            proposal_id=payload.get("proposal_id"), replace_existing=payload.get("replace_existing") is True)
-    except (review.RecognitionProtected, entry_workflow.EntryConflict):
-        raise
-    except ValueError as exc:
-        return JSONResponse({"detail": str(exc)}, status_code=422)
-    return _rec_to_dict(rec, full=True) if rec else JSONResponse({"detail": "查無此紀錄"}, status_code=404)
-
-
 @app.get("/api/feedback")
 def api_feedback():
     """修正回饋清單（有修正備註、人工輸入或經修正的紀錄；管理員專屬）。"""
@@ -898,18 +844,7 @@ def api_alignment():
     return {"pairs": review.alignment_pairs()}
 
 
-# ── 單月日記帳彙整 ──────────────────────────────────────────────
-@app.get("/api/journal/periods")
-def api_journal_periods(company: str = ""):
-    return {"periods": journal.periods(company=company)}
-
-
-@app.get("/api/journal")
-def api_journal(period: str, company: str = ""):
-    return journal.build_journal(period, company=company)
-
-
-# ── 報表（客製模板兩套）──────────────────────────────────────────
+# ── 憑證明細彙總表──────────────────────────────────────────
 @app.get("/api/report/templates")
 def api_report_templates():
     return {"templates": reports.TEMPLATES}
@@ -917,6 +852,8 @@ def api_report_templates():
 
 @app.get("/api/report")
 def api_report(template: str, period: str, company: str = ""):
+    if template != "summary":
+        return JSONResponse({"detail": "找不到報表模板"}, status_code=404)
     return HTMLResponse(reports.render(template, period, company))
 
 

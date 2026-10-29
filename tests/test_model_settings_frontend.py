@@ -68,7 +68,7 @@ vm.runInContext(source.slice(start, end) + '\nglobalThis.api = { openSettings, f
     if (action === 'save') await $('saveSettings').handlers.click();
     else $('closeModal').handlers.click();
   }
-  const selects = Object.fromEntries(['sel-ocr', 'sel-structure', 'sel-classify'].map((id) => [id, {
+  const selects = Object.fromEntries(['sel-ocr', 'sel-structure'].map((id) => [id, {
     value: $(id).value, html: $(id).innerHTML, options: $(id).options || [],
   }]));
   process.stdout.write(JSON.stringify({ requests, events, selects, modalOpen: !modal.classList.contains('hidden') }));
@@ -116,11 +116,13 @@ class ModelSettingsFrontendTests(unittest.TestCase):
         )
 
         self.assertEqual([request["url"] for request in result["requests"]], ["/api/models?local_only=true", "/api/config"])
-        self.assertEqual([select["value"] for select in result["selects"].values()], ["paddle/pp-ocrv5", "ollama/local-vlm", "ollama/local-llm"])
+        self.assertEqual([select["value"] for select in result["selects"].values()], ["paddle/pp-ocrv5", "ollama/local-vlm"])
         self.assertNotIn("google/", "".join(select["html"] for select in result["selects"].values()))
         self.assertNotIn("h200/", "".join(select["html"] for select in result["selects"].values()))
         self.assertTrue(result["modalOpen"])
         self.assertFalse(any(request["method"] == "POST" for request in result["requests"]))
+        self.assertNotIn("sel-classify", self.source)
+        self.assertNotIn("eng-classify", self.source)
 
     def test_old_cloud_config_is_blank_and_cannot_be_silently_saved(self):
         result = self.run_settings(
@@ -129,14 +131,14 @@ class ModelSettingsFrontendTests(unittest.TestCase):
             config={"ocr": "google/cloud-ocr", "structure": "h200/remote-vlm", "classify": "openai/cloud-llm"},
         )
 
-        self.assertEqual([result["selects"][name]["value"] for name in ("sel-ocr", "sel-structure", "sel-classify")], ["", "", ""])
+        self.assertEqual([result["selects"][name]["value"] for name in ("sel-ocr", "sel-structure")], ["", ""])
         for select in result["selects"].values():
             self.assertIn("請選擇地端模型", select["html"])
             self.assertTrue(select["options"][0]["disabled"])
             self.assertTrue(select["options"][0]["selected"])
         self.assertFalse(any(request["method"] == "POST" for request in result["requests"]))
         self.assertTrue(result["modalOpen"])
-        self.assertEqual([event["message"] for event in result["events"]], ["請先選擇各階段的地端模型"])
+        self.assertEqual([event["message"] for event in result["events"]], ["請先選擇 OCR 與結構化的地端模型"])
 
     def test_empty_local_lists_show_empty_placeholder_and_block_save(self):
         models = {"ocr": ["google/cloud-ocr"], "structure": ["h200/remote-vlm"], "classify": ["openai/cloud-llm"]}
@@ -149,15 +151,15 @@ class ModelSettingsFrontendTests(unittest.TestCase):
         self.assertTrue(result["modalOpen"])
 
     def test_valid_local_selections_save_and_success_closes_modal(self):
-        selected = {"sel-ocr": "paddle/pp-ocrv5", "sel-structure": "ollama/local-vlm", "sel-classify": "ollama/local-llm"}
+        selected = {"sel-ocr": "paddle/pp-ocrv5", "sel-structure": "ollama/local-vlm"}
         result = self.run_settings(
-            action="save", models=self.mixed_models(), config={"ocr": selected["sel-ocr"], "structure": selected["sel-structure"], "classify": selected["sel-classify"]},
+            action="save", models=self.mixed_models(), config={"ocr": selected["sel-ocr"], "structure": selected["sel-structure"], "classify": "ollama/local-llm"},
         )
 
         post = result["requests"][-1]
         self.assertEqual(post["url"], "/api/config")
         self.assertEqual(post["method"], "POST")
-        self.assertEqual(post["body"], {"ocr": selected["sel-ocr"], "structure": selected["sel-structure"], "classify": selected["sel-classify"]})
+        self.assertEqual(post["body"], {"ocr": selected["sel-ocr"], "structure": selected["sel-structure"]})
         self.assertFalse(result["modalOpen"])
 
     def test_cancel_and_failed_saves_leave_expected_modal_state(self):

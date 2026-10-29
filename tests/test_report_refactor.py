@@ -1,4 +1,4 @@
-"""Offline presentation regressions for report audit appendices."""
+"""Offline presentation regressions for the summary report audit appendix."""
 from __future__ import annotations
 
 import json
@@ -30,7 +30,7 @@ class ReportAuditTests(unittest.TestCase):
             "note": self.hostile,
             "field_evidence": {"fields.total_amount": [{"source": "ocr", "text": self.hostile}]},
             "validation_warnings": ["warning " + self.hostile],
-            "classification_meta": {"status": "candidate", "warnings": ["policy " + self.hostile]},
+            "classification_meta": {"original_checks": {"single_sided": True}},
             "items": [{"description": "coffee", "amount": 105,
                        "hs_code": "0901.21", "origin_country": self.hostile}],
             "entries": [{"amount": 105, "debit_account": "6000", "debit_account_name": self.hostile,
@@ -40,29 +40,25 @@ class ReportAuditTests(unittest.TestCase):
                          "credit_account": "1000", "credit_account_name": "Cash"}],
         }
 
-    def test_both_report_templates_render_audit_metadata_and_escape_source_data(self):
+    def test_summary_renders_audit_metadata_and_escapes_source_data(self):
         item = record(self.current)
         with patch.object(reports.review, "list_vouchers", return_value=[item]):
             summary = reports._summary("2026-06", "Example")
-            voucher = reports._journal_voucher("2026-06", "Example")
-
-        for html in (summary, voucher):
-            with self.subTest(template="summary" if html is summary else "journal_voucher"):
-                self.assertIn("來源、驗證與政策紀錄", html)
-                self.assertIn("field_evidence", html)
-                self.assertIn("validation_warnings", html)
-                self.assertIn("classification_meta", html)
-                self.assertIn("item_extra_fields", html)
-                self.assertIn("hs_code", html)
-                self.assertIn("origin_country", html)
-                self.assertIn("entry_evidence_paths", html)
-                self.assertIn("evidence_paths", html)
-                self.assertIn("&lt;/pre&gt;&lt;script&gt;", html)
-                self.assertNotIn("</pre><script>", html)
-                self.assertNotIn(self.hostile, html)
-
+        html = summary
+        self.assertIn("來源與驗證紀錄", html)
+        self.assertIn("field_evidence", html)
+        self.assertIn("validation_warnings", html)
+        self.assertIn("classification_meta", html)
+        self.assertIn("original_checks", html)
+        self.assertIn("item_extra_fields", html)
+        self.assertIn("hs_code", html)
+        self.assertIn("origin_country", html)
+        self.assertIn("entry_evidence_paths", html)
+        self.assertIn("evidence_paths", html)
+        self.assertIn("&lt;/pre&gt;&lt;script&gt;", html)
+        self.assertNotIn("</pre><script>", html)
+        self.assertNotIn(self.hostile, html)
         self.assertIn("<tr class='audit-row'>", summary)
-        self.assertIn("<section class='audit'>", voucher)
 
     def test_old_records_without_audit_data_get_no_empty_appendix(self):
         old_record = record({
@@ -73,11 +69,7 @@ class ReportAuditTests(unittest.TestCase):
         })
         with patch.object(reports.review, "list_vouchers", return_value=[old_record]):
             summary = reports._summary("2024-01", "")
-            voucher = reports._journal_voucher("2024-01", "")
-
-        for html in (summary, voucher):
-            self.assertNotIn("來源、驗證與政策紀錄", html)
-            self.assertNotIn("class='audit'", html)
+        self.assertNotIn("來源與驗證紀錄", summary)
         self.assertNotIn("class='audit-row'", summary)
 
 

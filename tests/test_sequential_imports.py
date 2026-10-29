@@ -13,7 +13,7 @@ from sqlmodel import SQLModel, Session, create_engine, select
 from app.core import model_factory, pipeline, preparation
 from app.db.models import ImportFile, ImportJob, ImportPage, ReviewStatus, UserAccount, VoucherRecord
 from app.models.schemas import Voucher
-from app.services import entry_workflow, import_jobs, review
+from app.services import recognition_sources, import_jobs, review
 
 
 class SequentialImportTests(unittest.TestCase):
@@ -354,7 +354,7 @@ class SequentialImportTests(unittest.TestCase):
         first_page, second_page = self._rows(ImportPage)
         first_child_id = json.loads(first_page.voucher_ids_json)[0]
         first_child = review.get_voucher(first_child_id)
-        with self.assertRaises(entry_workflow.EntryConflict):
+        with self.assertRaises(recognition_sources.ReviewConflict):
             review.confirm_appearance(
                 first_child_id, expected_updated_at="2000-01-01T00:00:00",
                 direction_confirmed=True,

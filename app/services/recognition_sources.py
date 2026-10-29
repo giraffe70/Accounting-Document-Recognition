@@ -1,24 +1,18 @@
-"""Editable accounting drafts, source identity, and independent posting approval."""
+"""Original voucher row identity, observed totals and recognition comparisons."""
 from copy import deepcopy
 from decimal import Decimal, InvalidOperation
-import hashlib
-import json
 import math
 import re
 from uuid import UUID, uuid4
 
-from sqlmodel import select
-from app.db.models import ReviewStatus, VoucherRecord, utc_now
 from app.core import doc_types
-from app import config
 from app.core.normalization import norm_amount
-from app.services.item_account_mapping import ACCOUNT_FIELDS, strip_accounting
-from app.services import auth
+from app.services.item_account_mapping import strip_accounting
 
 ENTRY_META = {"entry_id", "entry_origin", "source_entry_index"}
 
 
-class EntryConflict(ValueError):
+class ReviewConflict(ValueError):
     def __init__(self, detail, latest=None):
         super().__init__(detail)
         self.latest = latest
@@ -119,85 +113,12 @@ def recompute(data):
     return summary
 
 
-def source_payload(data, *, accounting=False):
-    result = deepcopy(data if accounting else strip_accounting(data))
+def source_payload(data):
+    result = strip_accounting(data)
     for key in ("entries", "debit_total", "credit_total", "balance_check", "classification_meta",
                 "field_evidence", "validation_warnings", "quality", "recognition_diagnostics", "boxes", "box_issues"):
         result.pop(key, None)
-    if accounting:
-        result["items"] = [{k: v for k, v in row.items() if k not in ACCOUNT_FIELDS or k in ("account_code", "account_name", "account_needs_review")}
-                           for row in result.get("items", [])]
     return result
-
-
-def source_fingerprint(rec, data=None):
-    data = data if data is not None else json.loads(rec.current_json)
-    source = {"company": getattr(rec, "company_id", None) or getattr(rec, "company", ""),
-              "document": source_payload(data), "image_path": getattr(rec, "image_path", "")}
-    if source["image_path"]:
-        path = (config.UPLOAD_DIR / source["image_path"]).resolve()
-        if path.is_relative_to(config.UPLOAD_DIR.resolve()) and path.is_file():
-            digest = hashlib.sha256()
-            with path.open("rb") as image_file:
-                for chunk in iter(lambda: image_file.read(1024 * 1024), b""):
-                    digest.update(chunk)
-            source["image_sha256"] = digest.hexdigest()
-    return hashlib.sha256(json.dumps(source, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")).hexdigest()
-
-
-def user_identity(session, actor):
-    if not actor:
-        return None, "系統"
-    user = auth.resolve_user(session, actor)
-    if not user:
-        raise ValueError("無法識別登入人員")
-    return user.id, user.name or user.username
-
-
-def event(rec, action, before, after, actor=None, reason=""):
-    history = json.loads(getattr(rec, "entries_history", "[]") or "[]")
-    history.append({"action": action, "at": utc_now().isoformat() + "Z", "actor_id": actor[0] if actor else None,
-                    "actor_name": actor[1] if actor else "系統", "reason": reason,
-                    "before": deepcopy(before), "after": deepcopy(after)})
-    rec.entries_history = json.dumps(history, ensure_ascii=False)
-
-
-def invalidate(rec, reason, actor=None, before=None, *, stale_proposal=True):
-    rows = json.loads(rec.current_json).get("entries") or []
-    old_status = getattr(rec, "entries_status", "none")
-    rec.entries_status = "draft" if rows else "none"
-    rec.entries_confirmed_at = rec.entries_confirmed_by = None
-    rec.entries_confirmed_by_name = ""
-    proposal = json.loads(getattr(rec, "entries_proposal_json", "{}") or "{}")
-    if stale_proposal and proposal and proposal.get("status") == "pending":
-        previous = deepcopy(proposal)
-        proposal.update(status="stale", reason=reason)
-        rec.entries_proposal_json = json.dumps(proposal, ensure_ascii=False)
-        event(rec, "proposal_invalidated", previous, proposal, actor, reason)
-    if old_status == "ready":
-        event(rec, "confirmation_revoked", before if before is not None else rows, rows, actor, reason)
-
-
-def is_ready(rec):
-    data = json.loads(rec.current_json)
-    return (getattr(rec, "status", None) == ReviewStatus.confirmed and getattr(rec, "entries_status", "none") == "ready"
-            and bool(getattr(rec, "company_id", None)) and not doc_types.is_supporting(data.get("doc_type_key", ""))
-            and checks(data)["balance_check"])
-
-
-def ensure_ownership(session, rec_id, rows, previous):
-    old_ids = {r.get("entry_id") for r in previous}
-    for row in rows:
-        if row["entry_id"] in old_ids:
-            continue
-        for raw in session.exec(select(VoucherRecord.current_json).where(
-                VoucherRecord.id != rec_id, VoucherRecord.current_json.contains(row["entry_id"]))).all():
-            try:
-                foreign = json.loads(raw).get("entries") or []
-            except (ValueError, AttributeError):
-                continue
-            if any(isinstance(r, dict) and r.get("entry_id") == row["entry_id"] for r in foreign):
-                raise ValueError("分錄 ID 屬於其他單據")
 
 
 def alignment_payload(data):

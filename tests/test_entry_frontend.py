@@ -47,9 +47,12 @@ class EntryFrontendWorkflowTests(unittest.TestCase):
             with self.subTest(marker=marker):
                 self.assertNotIn(marker, self.html)
         self.assertIn('id="btnConfirm"', self.html)
+        self.assertNotIn('id="sel-classify"', self.html)
+        self.assertNotIn('id="eng-classify"', self.html)
         start = self.js.index('  function collectForm()')
         end = self.js.index('  async function persistCurrentEdits(', start)
         self.assertRegex(self.js[start:end], r"entries\s*:\s*currentVoucher\.entries\s*\|\|\s*\[\]")
+        self.assertNotIn("entryText", self.js)
 
 
 if __name__ == "__main__":

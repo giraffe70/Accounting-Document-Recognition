@@ -27,7 +27,13 @@ OCR 計時與快取驗收範圍：快取以每頁結果獨立保存，不跨模�
 
 前端離線檢查可執行 `node --check app/static/js/validation.js` 與 `python -m unittest tests.test_frontend_form`；驗證 API／匯出契約使用 `scripts\verify.bat -Scope validation`。這些檢查不啟動真實模型，也不替代獨立人工證據核對。
 
-辨識確認畫面使用 `items` 明細與「儲存草稿／確認／列印」三個操作；原傳票的 `entries` 僅在尚未建立 `details_version=1` 時轉成明細，既有分錄與入帳確認 API 保留。明細刪空後不重新補回，人工修正與原稿科目來源在重新辨識後保留。科目記憶需明確勾選，規則衝突只保存本張並提示，不阻擋确认。新版報告使用需登入的 `/api/vouchers/{id}/recognition-report?expected_updated_at=...`，只有辨識已確認且版本一致才可列印；舊已確認資料需重新確認一次。部署後重新啟動服務以補齊確認人欄位，再重新載入前端。離線驗收涵蓋 `test_recognition_details.py`、`test_recognition_review.py`、`test_recognition_report.py` 及既有確認／明細測試。Windows sandbox 若卡在 asyncio 的 `_fallback_socketpair`，於允許內部本機通訊的執行環境使用原驗證入口；維持對外 TCP 封鎖，不改成呼叫真實模型。
+辨識畫面中的 items 明細、科目記憶規則及辨識報告列印仍保留。紙面傳票的 `entries`、合計與 evidence 仍是辨識資料。AI 分錄建議、分錄草稿／確認、日記帳及會計傳票格式已退役；不要再依賴舊手冊中分錄狀態與入帳確認的說明。
+
+## 會計分錄功能退役部署
+
+部署時先停止服務，確認 SQLite 寫入連線已關閉並備份實際資料庫；以交易重建資料表，只移除 `entries_status`、`entries_confirmed_at`、`entries_confirmed_by`、`entries_confirmed_by_name`、`proposal_json`、`entries_history` 六欄。驗證資料筆數與外鍵後重啟服務，再以 `Ctrl+F5` 強制更新前端。遷移需可重複執行，辨識確認狀態保持原值，既有 JSON 不清洗。
+
+獨立驗證批次 `hash_version` 升至 4。舊 trace 保留唯讀檢視，不可續跑；獨立驗證工具的 `classify_model` 仍代表單據分類模型，主設定僅保留 OCR 與 structure。
 
 Ollama 輸出上限使用 `ChatOllama` 模型副本的 `num_predict`，由套件轉為 SDK 的 `options.num_predict`；不可使用 `bind(num_predict=...)`，它會把參數傳到 `Client.chat()` 頂層並造成 `TypeError`。`tests/test_retry_contracts.py` 與 `tests/test_recognition_optimization.py` 以實際安裝的 `ChatOllama`、保留 SDK 方法簽名的網路替身驗證參數、Schema 降級與設定保留，避免只有寬鬆模擬模型通過卻在正式套件失敗。
 

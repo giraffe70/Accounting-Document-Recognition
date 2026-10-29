@@ -42,6 +42,17 @@ def resolve_user(session, actor):
     return session.exec(select(UserAccount).where(UserAccount.username == actor.get("username", ""))).first()
 
 
+
+def user_identity(session, actor):
+    """Resolve the current account name for recognition and item audit records."""
+    if not actor:
+        return None, "系統"
+    user = resolve_user(session, actor)
+    if not user:
+        raise ValueError("無法識別登入人員")
+    return user.id, user.name or user.username
+
+
 def _validate_account_fields(username: str, name: str):
     if not isinstance(username, str) or not 1 <= len(username.strip()) <= 64:
         raise AccountError("帳號須為 1 至 64 字元")

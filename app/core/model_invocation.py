@@ -302,13 +302,13 @@ def source_versions() -> dict:
     from app import config
     root = Path(__file__).resolve().parents[1]
     names = {p.relative_to(root).as_posix() for p in (root / "core").glob("*.py")}
-    names.update({"models/schemas.py", "services/accounting_policy.py", "services/classify.py",
+    names.update({"models/schemas.py", "services/recognition_sources.py", "services/recognition_details.py", "db/entry_retirement.py",
                   "services/importdecl.py", "services/accounts.py", "services/taxid.py", "services/review.py", "services/companies.py",
                   "db/models.py", "db/session.py", "config.py", "validation.py", "main.py", "import_api.py", "services/import_jobs.py", "static/js/validation.js", "static/validation.html", "static/css/validation.css"})
     sources = {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in sorted(names)}
     runtime = {name: hashlib.sha256((config.DATA_DIR / name).read_bytes()).hexdigest()
                if (config.DATA_DIR / name).exists() else None
-               for name in ("accounting_policies.json", "accounts.json", "companies.json", "entry_examples.json")}
+               for name in ("accounts.json", "companies.json")}
     from importlib.metadata import version, PackageNotFoundError
     dependencies = {}
     for package in ("langchain-ollama", "ollama", "langchain-openai", "openai", "pydantic", "Pillow", "numpy", "opencv-python", "paddleocr", "paddlepaddle", "paddlepaddle-gpu", "tokenizers"):
@@ -334,13 +334,12 @@ def source_versions() -> dict:
                       tokenizer_profile_version=request_budget.PROFILE_VERSION,
                       supported_ollama_contexts=config.SUPPORTED_OLLAMA_CONTEXTS,
                       budget_safety=request_budget.SAFETY, budget_edges=request_budget.EDGES, evidence_version=1)
-    return {"hash_version": 3, "source_sha256": sources, "runtime_sha256": runtime, "dependencies": dependencies,
+    return {"hash_version": 4, "source_sha256": sources, "runtime_sha256": runtime, "dependencies": dependencies,
             "recognition_contract": {"version": 3, "coordinates": "normalized_1000", "model_coordinates":"explicit_calibrated_profile", "router_stages":["page","regions_if_multiple"], "max_regions": 16, "split_iou_max": .1, "supplement_tasks": 1, "supplement_max_edge": 2400, "output_limits": OUTPUT_LIMITS, "repair_char_limit": REPAIR_CHAR_LIMIT},
             "prompt_version_sha256": digest(prompt_sources), "code_version_sha256": digest(sources),
-            "policy_version_sha256": digest({"source": sources["services/accounting_policy.py"], "runtime": runtime}),
             "execution_version_sha256": digest({"sources": sources, "runtime": runtime, "dependencies": dependencies, "parameters":parameters}),
             "model_runtime": parameters}
 
 
 def same_execution_version(saved: dict) -> bool:
-    return saved.get("hash_version") == 3 and saved.get("execution_version_sha256") == source_versions()["execution_version_sha256"]
+    return saved.get("hash_version") == 4 and saved.get("execution_version_sha256") == source_versions()["execution_version_sha256"]

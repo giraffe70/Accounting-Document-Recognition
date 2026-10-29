@@ -82,8 +82,9 @@ class PreparedVoucherFlowTests(unittest.TestCase):
                     review.update_current(records[1].id, manual_edit)
                 current_record = review.get_voucher(records[1].id)
                 current = json.loads(current_record.current_json)
-                self.assertTrue(current["field_evidence"]["entries"][-1]["source"] == "manual")
-                self.assertTrue(current["field_evidence"]["entries"][-1]["selected"])
+                self.assertEqual(current["entries"], [])
+                self.assertEqual(current["field_evidence"]["items"][-1]["source"], "manual")
+                self.assertTrue(current["field_evidence"]["items"][-1]["selected"])
 
                 model_result = voucher(amount=900)
                 with patch("app.core.pipeline.canonicalize_voucher", side_effect=lambda value: value), \
@@ -95,7 +96,7 @@ class PreparedVoucherFlowTests(unittest.TestCase):
                 self.assertEqual(json.loads(updated.ai_json), original_ai)
                 self.assertEqual(new_current["fields"]["total_amount"], 200)
                 self.assertEqual(new_current["items"][0]["amount"], 200)
-                self.assertEqual(new_current["entries"][0]["amount"], 200)
+                self.assertEqual(new_current["entries"], [])
                 self.assertEqual(len(history), 1)
                 self.assertEqual(history[0]["model_result"]["fields"]["total_amount"], 900)
             engine.dispose()

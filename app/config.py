@@ -67,11 +67,10 @@ MAX_FILE_SIZE = 5 * 1024 * 1024  # 合約規定 5MB
 ALLOWED_SUFFIXES = {".pdf", ".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"}
 
 # ── 各階段預設模型（地端優先）──
-# 階段：ocr（辨識文字）/ structure（VLM 結構化）/ classify（文字 LLM 科目分類）
+# 階段：ocr（辨識文字）/ structure（VLM 結構化）
 DEFAULT_SETTINGS = {
     "ocr": "paddle/pp-ocrv5",
     "structure": "ollama/qwen2.5vl:7b",
-    "classify": "ollama/qwen2.5:7b",
 }
 
 # ── 雲端模型清單（有設對應金鑰才會出現在選單）──

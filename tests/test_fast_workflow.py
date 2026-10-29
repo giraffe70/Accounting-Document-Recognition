@@ -334,7 +334,7 @@ class FastWorkflowContracts(unittest.TestCase):
     def test_restore_is_version_checked_and_refused_for_source_pages(self):
         rec_id, _path = self._patterned("restore-guard.png")
         self.assertTrue(review.rotate_image(rec_id, expected_updated_at=self._version(rec_id)))
-        with self.assertRaises(review.entry_flow.EntryConflict):
+        with self.assertRaises(review.sources.ReviewConflict):
             review.restore_image(rec_id, expected_updated_at="2000-01-01T00:00:00")
         with Session(self.engine) as session:
             stored = session.get(VoucherRecord, rec_id)

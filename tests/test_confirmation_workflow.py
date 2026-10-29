@@ -15,7 +15,7 @@ from sqlmodel import Session, SQLModel, create_engine
 
 from app.db.models import Company, ReviewStatus, VoucherRecord
 from app.models.schemas import Voucher
-from app.services import journal, review
+from app.services import review
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -98,41 +98,6 @@ class ConfirmationServiceTests(unittest.TestCase):
             status=[ReviewStatus.pending, ReviewStatus.confirmed])},
             {ReviewStatus.pending, ReviewStatus.confirmed})
 
-    def test_journal_only_includes_confirmed_and_content_change_returns_to_pending(self):
-        prepared = self.save(status=ReviewStatus.prepared)
-        pending = self.save()
-        balanced_entries = [
-            {"description": "費用", "amount": 100, "debit_account": "6000", "debit_account_name": "費用"},
-            {"description": "現金", "amount": 100, "credit_account": "1000", "credit_account_name": "現金"},
-        ]
-        confirmed = review.save_voucher(_voucher(entries=balanced_entries), company="Synthetic Co",
-                                        status=ReviewStatus.confirmed)
-        confirmed = review.manage_entries(confirmed.id, "confirm", confirmed.updated_at.isoformat(), None)
-        self.assertEqual(confirmed.entries_status, "ready")
-        for record in (prepared, pending, confirmed):
-            record.period = "2026-10"
-        with Session(self.engine, expire_on_commit=False) as session:
-            session.add(prepared)
-            session.add(pending)
-            session.add(confirmed)
-            session.commit()
-
-        built = journal.build_journal("2026-10")
-        self.assertEqual(len(built["rows"]), 2)
-        self.assertEqual(built["rows"][0]["voucher_id"], "R-1")
-        self.assertEqual(built["count"], 1)
-        self.assertEqual(journal.periods(), ["2026-10"])
-
-        current = review.get_voucher(confirmed.id)
-        with patch("app.core.pipeline.canonicalize_voucher", side_effect=lambda value: value):
-            unchanged = review.update_current(confirmed.id, {}, mark_manual=True)
-        self.assertEqual(unchanged.status, ReviewStatus.confirmed)
-        self.assertEqual(unchanged.confirmed_at, current.confirmed_at)
-
-        with patch("app.core.pipeline.canonicalize_voucher", side_effect=lambda value: value):
-            changed = review.update_current(confirmed.id, {"fields": {"total_amount": 200}})
-        self.assertEqual(changed.status, ReviewStatus.pending)
-        self.assertIsNone(changed.confirmed_at)
 
     def test_noop_company_and_notes_preserve_confirmation_but_real_company_change_resets(self):
         record = review.save_voucher(_voucher(), company="Synthetic Co", status=ReviewStatus.confirmed)
@@ -265,10 +230,9 @@ class ReviewMigrationTests(unittest.TestCase):
                 conn.exec_driver_sql("""INSERT INTO voucher_records
                     (id,source_file,record_role,recognition_history,company,period,status,confidence,
                      ai_json,current_json,correction_note,manual_entry,ocr_provider,structure_model,
-                     image_path,attachments,created_at,updated_at,dev_note,confirmed_by_name,entries_status,
-                     entries_confirmed_by_name,entries_proposal_json,entries_history)
+                     image_path,attachments,created_at,updated_at,dev_note,confirmed_by_name)
                     VALUES (1,'','voucher','[]','','','pending','','{}','{}','',0,'','','','[]',
-                            '2026-10-01 00:00:00','2026-10-01 00:00:00','x','','none','','{}','[]')""")
+                            '2026-10-01 00:00:00','2026-10-01 00:00:00','x','')""")
             with patch.object(db_session, "_engine", engine):
                 db_session._migrate()
                 db_session._migrate()

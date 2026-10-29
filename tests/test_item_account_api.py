@@ -16,7 +16,7 @@ from sqlmodel import Session, SQLModel, select, create_engine
 
 from app.db.models import Company, ItemAccountMapping, MappingHistory, ReviewStatus, UserAccount, VoucherRecord
 from app.models.schemas import Voucher
-from app.services import accounts, auth, companies, entry_workflow, item_account_mapping as mapping, review
+from app.services import accounts, auth, companies, recognition_sources, item_account_mapping as mapping, review
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -73,7 +73,7 @@ class ItemAccountApiTests(unittest.TestCase):
             "Body": Body, "Request": Request, "JSONResponse": JSONResponse,
             "VoucherRecord": VoucherRecord, "ReviewStatus": ReviewStatus,
             "review": review, "companies": companies,
-            "item_account_mapping": mapping, "entry_workflow": entry_workflow,
+            "item_account_mapping": mapping, "recognition_sources": recognition_sources,
             "accounts": accounts, "auth": auth,
             "taxid": taxid, "importdecl": importdecl, "config": config, "json": json,
         }
@@ -248,7 +248,7 @@ class ItemAccountApiTests(unittest.TestCase):
         stale = dict(voucher, expected_updated_at="2000-01-01T00:00:00")
         before_stale_write = review.get_voucher(rec.id)
         with patch.object(auth, "get_user_by_token", return_value=self.actor):
-            with self.assertRaises(entry_workflow.EntryConflict) as conflict:
+            with self.assertRaises(recognition_sources.ReviewConflict) as conflict:
                 self.api["api_update"](self.request, rec.id, stale)
         latest = review.get_voucher(rec.id)
         self.assertEqual(conflict.exception.latest["updated_at"], before_stale_write.updated_at.isoformat())
@@ -273,7 +273,7 @@ class ItemAccountApiTests(unittest.TestCase):
         partial_result = self.call_save(partial.id, self.payload(partial, action="confirm", items=[row]))
         self.assertIsInstance(partial_result, dict)
         self.assertEqual(partial_result["status"], ReviewStatus.confirmed)
-        self.assertEqual(partial_result["entries_status"], "none")
+        self.assertNotIn("entries_status", partial_result)
         with Session(self.engine) as session:
             self.assertEqual(session.exec(select(ItemAccountMapping)).all(), [])
 

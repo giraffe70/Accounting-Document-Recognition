@@ -49,13 +49,12 @@ TABLE_META = {
         },
     },
     ("app", "voucher_records"): {
-        "label": "憑證紀錄", "description": "上傳憑證的辨識內容、人工修正，以及辨識與分錄確認狀態。",
+        "label": "憑證紀錄", "description": "上傳憑證的辨識內容、人工修正，以及辨識確認狀態。",
         "date_label": "憑證日期", "date_column": "current_json.date",
         "statuses": {
             "prepared": "待外觀確認", "queued": "待提取",
             "pending": "辨識待確認", "confirmed": "辨識已確認",
         },
-        "utc_columns": ("entries_confirmed_at",),
         "columns": {
             "id": "憑證編號", "source_file": "來源檔名", "company": "歸屬公司",
             "period": "所屬期別", "status": "審核狀態", "confidence": "辨識信心度",
@@ -63,10 +62,6 @@ TABLE_META = {
             "correction_note": "修正備註", "confirmed_at": "確認完成時間",
             "confirmed_by": "辨識確認者編號", "confirmed_by_name": "辨識確認者名稱",
             "recognition_confirmed_version": "辨識報告確認版本",
-            "entries_status": "分錄狀態", "entries_confirmed_at": "分錄確認時間",
-            "entries_confirmed_by": "分錄確認者編號",
-            "entries_confirmed_by_name": "分錄確認者名稱",
-            "entries_proposal_json": "分錄候選內容", "entries_history": "分錄異動歷程",
             "manual_entry": "人工輸入",
             "ocr_provider": "OCR 來源", "structure_model": "欄位萃取模型",
             "image_path": "掃描影像路徑", "attachments": "附頁清單",

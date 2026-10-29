@@ -27,7 +27,8 @@ def _load():
     merged = dict(config.DEFAULT_SETTINGS)
     if config.SETTINGS_FILE.exists():
         try:
-            merged.update(json.loads(config.SETTINGS_FILE.read_text(encoding="utf-8")))
+            merged.update({key: value for key, value in json.loads(
+                config.SETTINGS_FILE.read_text(encoding="utf-8")).items() if key in config.DEFAULT_SETTINGS})
         except (json.JSONDecodeError, OSError):
             pass
     return merged
@@ -44,7 +45,7 @@ def get_settings() -> dict:
 
 def update_settings(new: dict) -> dict:
     global _settings
-    cur = get_settings()
+    cur = {key: value for key, value in get_settings().items() if key in config.DEFAULT_SETTINGS}
     # 只接受已知階段
     cur.update({k: v for k, v in new.items() if k in config.DEFAULT_SETTINGS})
     config.SETTINGS_FILE.write_text(

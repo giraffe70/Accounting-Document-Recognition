@@ -9,18 +9,12 @@ from contextlib import nullcontext
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 from app import config, validation
 from app.core import barcode, doc_types, model_invocation, pipeline, prompts
-from app.db.models import ReviewStatus
 from app.models.schemas import Voucher
-from app.services import accounting_policy, classify, importdecl, journal, review
-
-CHART = [{"code": code, "name": name} for code, name in (
-    ("1210", "預付費用"), ("1290", "進項稅額"), ("6230", "其他費用"),
-    ("1110", "銀行存款"), ("2130", "應付帳款"), ("2200", "應付費用"),
-    ("6200", "文具用品"), ("4100", "銷貨收入"))]
+from app.services import review
 
 
 def proposal(amount, path, *, debit="", credit=""):
@@ -87,10 +81,6 @@ class RefactorFlowTests(unittest.TestCase):
         saved = pipeline.canonicalize_voucher(old)
         self.assertIsNone(saved["tax_amount"])
         self.assertTrue(any("舊收據稅額" in w for w in saved["validation_warnings"]))
-        v = Voucher.model_validate(pipeline.canonicalize_voucher(saved))
-        context = classify._accounting_context(v, accounting_policy.load_policy("A", v.model_dump(), CHART))
-        self.assertNotIn("fields.tax_amount", context["amount_sources"])
-        self.assertNotIn("tax_amount", context["amount_sources"])
         rec = SimpleNamespace(current_json=json.dumps(saved), period="", updated_at=None)
         session = SimpleNamespace(get=lambda *_: rec, add=lambda *_: None, commit=lambda: None, refresh=lambda *_: None)
         with patch("app.services.review.get_session", return_value=nullcontext(session)):
@@ -174,13 +164,8 @@ class RefactorFlowTests(unittest.TestCase):
         preserved = pipeline.canonicalize_voucher(v.model_dump())
         self.assertEqual(preserved["entries"][0]["amount"], 100)
         self.assertEqual(preserved["debit_total"], 100)
-        with patch("app.core.model_factory.get_chat_model") as factory:
-            classified = classify.classify(v)
-        factory.assert_not_called()
-        self.assertEqual(classified.entries[0].amount, 100)
-        self.assertEqual(classified.classification_meta["reason"], "original_entries")
-        self.assertTrue(classified.classification_meta["original_checks"]["single_sided"])
-        self.assertFalse(classified.balance_check)
+        self.assertTrue(preserved["classification_meta"]["original_checks"]["single_sided"])
+        self.assertFalse(preserved["balance_check"])
 
     def test_box_coordinate_units_are_explicit_and_invalid_boxes_do_not_drop_content(self):
         from PIL import Image
@@ -198,98 +183,10 @@ class RefactorFlowTests(unittest.TestCase):
             self.assertEqual(result["boxes"], {})
             self.assertEqual(len(result["box_issues"]), 1)
 
-    def test_import_routing_does_not_use_notes_or_export_substrings(self):
-        self.assertTrue(importdecl.is_import({"doc_type_key": "customs_tax"}))
-        self.assertFalse(importdecl.is_import({"doc_type_key": "export_declaration", "note": "進口／出口報單"}))
-        self.assertFalse(importdecl.is_import({"doc_type": "出口報單", "note": "進口"}))
-        self.assertFalse(importdecl.is_import({"doc_type_key": "declaration", "note": "進口"}))
-        self.assertTrue(importdecl.is_import({"doc_type_key": "declaration", "fields": {"direction": "進口"}}))
-
-    def test_policy_company_mapping_and_invalid_settings_fall_back_with_warning(self):
-        Path(self.temp.name, "accounting_policies.json").write_text(json.dumps({"_default": {"version": "client-v1", "roles": {"fees": {"code": "AF"}}}}), encoding="utf-8")
-        policy = accounting_policy.load_policy("A", {"doc_type_key": "import_declaration"}, [{"code": "AF", "name": "手續費"}])
-        self.assertEqual(policy["account_roles"]["fees"], {"code": "AF", "name": "手續費"})
-        self.assertEqual(policy["account_roles"]["input_tax"]["code"], "")
-        Path(self.temp.name, "accounting_policies.json").write_text('{"A":{"roles":[]}}', encoding="utf-8")
-        policy = accounting_policy.load_policy("A", {"doc_type_key": "import_declaration"}, CHART)
-        self.assertEqual(policy["policy_version"], "default-v1")
-        self.assertTrue(policy["warnings"])
-
-    def _classify(self, voucher, response, company=""):
-        chat = SimpleNamespace(invoke=Mock(return_value=SimpleNamespace(content=json.dumps(response))))
-        with patch("app.services.accounts.load_accounts", return_value=CHART), patch("app.services.accounts.companies_with_chart", return_value=[company]), \
-             patch("app.core.model_factory.get_chat_model", return_value=chat), patch("app.core.settings_store.get_settings", return_value={"classify": "fake/model"}):
-            result = classify.classify(voucher, company=company)
-        return result, chat
-
-    def test_import_full_context_and_program_derived_balanced_amount(self):
-        raw = prompts.extraction_example("import_declaration")
-        raw["fields"].update(duty=200028, business_tax=60008, total_tax=260036, invoice_amount=999,
-                             payment_status="已付款", payment_method="銀行轉帳", currency="USD", declaration_no="SYNTHETIC")
-        raw["items"] = [{"description": "貨品", "quantity": 2, "unit_price": 10, "amount": 20, "hs_code": "1234", "origin_country": "TW"}]
-        v = pipeline._build_voucher(raw, "import_declaration")
-        response = {"entries": [proposal(200028, "fields.duty", debit="1210"), proposal(60008, "fields.business_tax", debit="1290"),
-                                proposal(260036, "derived.import_payment", credit="1110")]}
-        result, chat = self._classify(v, response)
-        self.assertTrue(result.balance_check)
-        self.assertEqual(result.credit_total, 260036)
-        self.assertEqual(result.classification_meta["status"], "proposed")
-        messages = chat.invoke.call_args.args[0]
-        self.assertEqual(messages[1]["role"], "user")
-        request = "\n".join(part.get("text", "") for part in messages[1]["content"] if part.get("type") == "text")
-        self.assertIn('"hs_code":"1234"', request)
-        self.assertIn('"invoice_amount":999', request)
-        ctx = classify._accounting_context(v, accounting_policy.load_policy("", v.model_dump(), CHART))
-        self.assertNotIn("fields.invoice_amount", ctx["amount_sources"])
-        self.assertNotIn("total_amount", ctx["amount_sources"])
-        self.assertNotIn("items[0].amount", ctx["amount_sources"])
-        self.assertEqual(ctx["derived_amounts"]["derived.import_payment"]["source_paths"], ["fields.duty", "fields.business_tax"])
-
-    def test_insufficient_evidence_candidates_never_create_money_or_unknown_codes(self):
-        v = Voucher(doc_type_key="receipt", fields={"total_amount": 100}, total_amount=100)
-        response = {"entries": [proposal(100, "fields.total_amount", debit="BAD"), proposal(400, "not-a-path", credit="1110")]}
-        result, _ = self._classify(v, response)
-        self.assertEqual(result.classification_meta["status"], "candidate")
-        self.assertEqual(result.entries[0].debit_account, "")
-        self.assertIsNone(result.entries[1].amount)
-        self.assertTrue(result.classification_meta["assumptions"])
-        self.assertFalse(result.balance_check)
-
-    def test_supporting_page_skips_model_and_income_credit_is_not_replaced_by_bank(self):
-        with patch("app.core.model_factory.get_chat_model") as factory:
-            v = classify.classify(Voucher(doc_type_key="bill_detail"))
-        factory.assert_not_called(); self.assertEqual(v.classification_meta["status"], "skipped")
-        v = Voucher(doc_type_key="invoice", fields={"total_amount": 100, "payment_status": "已付款", "payment_method": "銀行轉帳"}, total_amount=100)
-        result, _ = self._classify(v, {"entries": [proposal(100, "fields.total_amount", debit="1110"), proposal(100, "fields.total_amount", credit="4100")]})
-        self.assertEqual(result.entries[1].credit_account, "4100")
-
-    def test_company_examples_exclude_other_company_and_policy_or_amount_mismatch(self):
-        v = Voucher(doc_type_key="receipt", fields={"total_amount": 100, "payment_status": "未付款", "payment_method": None}, total_amount=100)
-        policy = accounting_policy.load_policy("A", v.model_dump(), CHART)
-        good = v.model_dump()
-        good.update(entries=[proposal(100, "fields.total_amount", debit="6200"), proposal(100, "fields.total_amount", credit="2200")],
-                    classification_meta={"status": "proposed", "policy_sha256": policy["policy_sha256"]})
-        good["entries"][0]["debit_account_name"] = "文具用品"
-        good["entries"][1]["credit_account_name"] = "應付費用"
-        bad = deepcopy(good); bad["entries"][0]["amount"] = bad["entries"][1]["amount"] = 999
-        records = [SimpleNamespace(company=company, company_id=1, status=ReviewStatus.confirmed,
-                                   entries_status=entry_status, current_json=json.dumps(item))
-                   for company, item, entry_status in (("B", good, "ready"), ("A", bad, "ready"),
-                                                       ("A", good, "ready"), ("A", good, "draft"))]
-        with patch("app.services.review.list_vouchers", return_value=records) as search, patch("app.services.classify._embed", return_value=[1.0]):
-            examples = classify._retrieve_examples(v, company="A", chart=CHART, policy=policy)
-        self.assertEqual(len(examples), 1)
-        self.assertEqual(search.call_args.kwargs["company"], "A")
-        seed_ready = {"company": "A", "status": "confirmed", "entries_status": "ready", "voucher": good}
-        seed_draft = {**seed_ready, "entries_status": "draft"}
-        Path(self.temp.name, "entry_examples.json").write_text(
-            json.dumps([seed_draft, seed_ready], ensure_ascii=False), encoding="utf-8")
-        self.assertEqual(len(classify._seed_examples("A", v, CHART, policy)), 1)
-
     def test_manual_save_and_model_roundtrip_keep_extra_fields_items_and_metadata(self):
         original = Voucher(doc_type_key="import_declaration", fields={"direction": "進口", "total_tax": 100},
                            items=[{"description": "貨品", "amount": 0, "hs_code": "1234", "origin_country": "TW", "legacy_tag": "keep"}],
-                           classification_meta={"status": "proposed", "policy_version": "v1"}, unknown_saved_attribute="retain").model_dump()
+                           unknown_saved_attribute="retain").model_dump()
         rec = SimpleNamespace(current_json=json.dumps(original), period="202606", updated_at=None)
         session = SimpleNamespace(get=lambda *_: rec, add=lambda *_: None, commit=lambda: None, refresh=lambda *_: None)
         updated = deepcopy(original); updated["fields"]["total_tax"] = 200
@@ -301,14 +198,11 @@ class RefactorFlowTests(unittest.TestCase):
         self.assertEqual(stored["items"][0]["hs_code"], "1234")
         self.assertEqual(stored["total_amount"], 200)
         self.assertEqual(stored["field_evidence"]["fields.total_tax"][-1]["source"], "manual")
-        self.assertTrue(stored["classification_meta"]["stale"])
         # A repeated save of a stale browser snapshot cannot erase server audit/status.
         with patch("app.services.review.get_session", return_value=nullcontext(session)):
             review.update_current(1, {**original, "fields": {**original["fields"], "total_tax": 200}})
         repeated = json.loads(rec.current_json)
         self.assertEqual(repeated["field_evidence"]["fields.total_tax"][-1]["value"], 200)
-        self.assertTrue(repeated["classification_meta"]["stale"])
-        self.assertEqual(repeated["classification_meta"]["status"], "candidate")
 
     def test_edit_refreshes_current_checks_but_keeps_acquisition_diagnostics_and_raw_values(self):
         raw = prompts.extraction_example("receipt")
@@ -339,7 +233,7 @@ class RefactorFlowTests(unittest.TestCase):
     def test_csv_appends_new_attributes_without_removing_old_columns(self):
         v = Voucher(items=[{"description": "貨品", "amount": 0, "hs_code": "1234", "origin_country": "TW"}],
                     entries=[proposal(0, "fields.total_amount", debit="1210")], field_evidence={"fields.total_amount": [{"source": "manual", "value": 0}]},
-                    validation_warnings=["核對"], classification_meta={"status": "candidate"}).model_dump()
+                    validation_warnings=["核對"]).model_dump()
         result = dict(id="synthetic", relative_path="synthetic.png", page_no=1, combo_name="test", mode="ocr_llm", actual_path="ocr_llm",
                       repeat_no=1, attempt=1, status="succeeded", timings={}, error="", voucher=v)
         files = validation._csv_files({"results": [result]})
@@ -347,31 +241,22 @@ class RefactorFlowTests(unittest.TestCase):
         read = lambda name: list(csv.DictReader(io.StringIO(files[name].lstrip("\ufeff"))))
         self.assertEqual(read("items.csv")[0]["hs_code"], "1234")
         self.assertEqual(json.loads(read("entries.csv")[0]["evidence_paths_json"]), ["fields.total_amount"])
-        self.assertEqual(json.loads(read("vouchers.csv")[0]["classification_meta_json"])["status"], "candidate")
 
-    def test_journal_excludes_incomplete_entry_drafts_and_supporting_pages(self):
-        v = Voucher(doc_type_key="receipt", date="2026-06-04", entries=[proposal(None, "fields.total_amount", debit="6200")],
-                    field_evidence={"fields.total_amount": [{"source": "manual", "value": None}]},
-                    validation_warnings=["金額缺漏"], classification_meta={"status": "candidate"})
-        records = [SimpleNamespace(status=ReviewStatus.confirmed, entries_status="draft", company_id=1,
-                                   current_json=v.model_dump_json()),
-                   SimpleNamespace(status=ReviewStatus.confirmed, entries_status="ready", company_id=1,
-                                   current_json=Voucher(doc_type_key="bill_detail", entries=[proposal(999, "fields.total_amount", debit="6200")]).model_dump_json())]
-        with patch("app.services.review.list_vouchers", return_value=records):
-            result = journal.build_journal("2026-06")
-        self.assertEqual(result["rows"], [])
-        self.assertEqual(result["excluded_count"], 1)
-        self.assertFalse(result["balance_check"])
-
-    def test_source_hash_v2_is_stable_sensitive_to_runtime_and_rejects_legacy_resume(self):
+    def test_source_hash_v4_tracks_recognition_sources_and_runtime_files(self):
         versions = model_invocation.source_versions()
         self.assertEqual(versions, model_invocation.source_versions())
         self.assertTrue(model_invocation.same_execution_version(versions))
         self.assertFalse(model_invocation.same_execution_version({"code_version_sha256": versions["code_version_sha256"]}))
-        Path(self.temp.name, "accounting_policies.json").write_text('{"_default":{"version":"new"}}', encoding="utf-8")
+        self.assertEqual(versions["hash_version"], 4)
+        self.assertEqual(set(versions["runtime_sha256"]), {"accounts.json", "companies.json"})
+        self.assertNotIn("policy_version_sha256", versions)
+        self.assertFalse(model_invocation.same_execution_version({**versions, "hash_version": 3}))
+        Path(self.temp.name, "accounts.json").write_text('{"accounts":[]}', encoding="utf-8")
         self.assertFalse(model_invocation.same_execution_version(versions))
         self.assertIn("core/normalization.py", versions["source_sha256"])
-        self.assertIn("services/classify.py", versions["source_sha256"])
+        self.assertNotIn("services/classify.py", versions["source_sha256"])
+        self.assertNotIn("services/accounting_policy.py", versions["source_sha256"])
+        self.assertNotIn("policy_version_sha256", versions)
 
     def test_parser_does_not_invent_truncated_strings_or_arithmetic_results(self):
         for response in ('{"fields":{"date":"115/06', '{"total": 1+2=3}'):

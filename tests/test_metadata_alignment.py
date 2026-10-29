@@ -74,12 +74,13 @@ class MetadataCsvTests(unittest.TestCase):
 
 
 class MetadataReportTests(unittest.TestCase):
-    def test_summary_and_journal_voucher_show_primary_and_supporting_sources(self):
+    def test_summary_shows_primary_sources_payment_and_original_checks(self):
         voucher = {
             "date": "2026-10-01", "voucher_id": "INV-1", "doc_type": "發票",
             "seller": {"name": "Seller"}, "buyer": {"name": "Buyer"},
             "subtotal": 10, "tax_amount": 0, "total_amount": 10,
             "payment_state": {"raw": "已扣款", "normalized": "paid"},
+            "classification_meta": {"original_checks": {"single_sided": True}},
             "items": [{"description": "service", "amount": 10, "fee_code": "B12"}],
             "entries": [{"description": "service expense", "amount": 10,
                          "debit_account": "6000", "debit_account_name": "費用",
@@ -94,16 +95,14 @@ class MetadataReportTests(unittest.TestCase):
                                  entries_status="ready", company_id=1)
         with patch.object(reports.review, "list_vouchers", return_value=[record]) as listed:
             summary = reports._summary("2026-10", "Example")
-            journal_voucher = reports._journal_voucher("2026-10", "Example")
-        self.assertEqual(listed.call_args.kwargs["status"], "confirmed")
-
-        for html in (summary, journal_voucher):
-            self.assertIn("來源、驗證與政策紀錄", html)
-            self.assertIn("amount_source", html)
-            self.assertIn("fields.total_amount", html)
-            self.assertIn("items.1.amount", html)
-            self.assertIn("payment_state", html)
-            self.assertIn("fee_code", html)
+        self.assertEqual(listed.call_args.kwargs, {"company": "Example", "period": "2026-10"})
+        self.assertIn("classification_meta", summary)
+        self.assertIn("original_checks", summary)
+        self.assertIn("amount_source", summary)
+        self.assertIn("fields.total_amount", summary)
+        self.assertIn("items.1.amount", summary)
+        self.assertIn("payment_state", summary)
+        self.assertIn("fee_code", summary)
 
 
 if __name__ == "__main__":

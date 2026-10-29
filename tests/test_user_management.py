@@ -18,7 +18,7 @@ from sqlmodel import Session, SQLModel, create_engine, select
 from app.db import session as db_session
 from app.db.models import Company, ImportJob, ItemAccountMapping, MappingHistory, UserAccount, VoucherRecord
 from app.services import auth, user_management
-from app.services import entry_workflow, item_account_mapping
+from app.services import item_account_mapping
 
 
 def isolated_app():
@@ -166,9 +166,9 @@ class UserManagementTests(unittest.TestCase):
         self.assertIsNotNone(auth.authenticate("renamed-user", "Synthetic-123"))
         self.assertEqual(auth.get_user_by_token(token)["username"], "renamed-user")
         with Session(self.engine) as session:
-            self.assertEqual(entry_workflow.user_identity(session, actor_snapshot), (user["id"], "更新名稱"))
+            self.assertEqual(auth.user_identity(session, actor_snapshot), (user["id"], "更新名稱"))
             with self.assertRaisesRegex(ValueError, "無法識別登入人員"):
-                entry_workflow.user_identity(session, {"id": 99999, "username": "renamed-user"})
+                auth.user_identity(session, {"id": 99999, "username": "renamed-user"})
             data = {"items": [{"item_id": "item-a", "account_code": "123", "account_name": "合成"}]}
             item_account_mapping.audit_items(session, data, {"items": []}, actor_snapshot)
             self.assertEqual(data["items"][0]["account_updated_by"], user["id"])
@@ -325,8 +325,7 @@ class UserManagementTests(unittest.TestCase):
             company = Company(name="合成公司", account_chart_key="synthetic")
             session.add(company)
             session.flush()
-            voucher = VoucherRecord(confirmed_by=user["id"], confirmed_by_name="原確認人",
-                entries_confirmed_by=user["id"], entries_confirmed_by_name="原確認人")
+            voucher = VoucherRecord(confirmed_by=user["id"], confirmed_by_name="原確認人")
             session.add(voucher)
             session.flush()
             mapping = ItemAccountMapping(company_id=company.id, item_name_key="合成品名", created_by=user["id"],
@@ -339,7 +338,7 @@ class UserManagementTests(unittest.TestCase):
         auth.disable_user(user["id"], actor_id=self.admin["id"])
         with Session(self.engine) as session:
             voucher = session.exec(select(VoucherRecord)).one()
-            self.assertEqual((voucher.confirmed_by, voucher.entries_confirmed_by), (user["id"], user["id"]))
+            self.assertEqual(voucher.confirmed_by, user["id"])
             self.assertEqual(voucher.confirmed_by_name, "原確認人")
             mapping = session.exec(select(ItemAccountMapping)).one()
             self.assertEqual((mapping.created_by, mapping.updated_by), (user["id"], user["id"]))

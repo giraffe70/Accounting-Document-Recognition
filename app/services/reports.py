@@ -1,21 +1,14 @@
-"""產製報表：客製 Web 模板兩套（可列印／另存 PDF 的獨立 HTML 頁）。
-
-模板 A：憑證明細彙總表（期別內所有憑證的關鍵欄位 + 合計）
-模板 B：會計傳票格式（辨識已確認且分錄可供入帳，傳統傳票版面）
-"""
+"""憑證明細彙總表：期別內憑證關鍵欄位與合計，可列印／另存 PDF。"""
 import json
 from html import escape
 
-from app.db.models import ReviewStatus
-from app.core import doc_types
-from app.services import review, entry_workflow
+from app.services import review
 
 _STATUS = {"prepared": "待外觀確認", "queued": "待提取",
            "pending": "辨識待確認", "confirmed": "辨識已確認"}
 
 TEMPLATES = [
     {"id": "summary", "name": "憑證明細彙總表"},
-    {"id": "journal_voucher", "name": "會計傳票格式"},
 ]
 
 _CSS = """
@@ -24,8 +17,6 @@ h1{font-size:20px;margin-bottom:2px;} .meta{color:#636c76;font-size:12px;margin-
 table{width:100%;border-collapse:collapse;font-size:12.5px;margin:8px 0;}
 th,td{border:1px solid #999;padding:5px 8px;text-align:left;} th{background:#eee;}
 .num{text-align:right;font-variant-numeric:tabular-nums;} tfoot td{font-weight:700;background:#f3f3f3;}
-.voucher{border:1px solid #999;border-radius:6px;padding:12px;margin:12px 0;page-break-inside:avoid;}
-.voucher h3{font-size:14px;margin-bottom:6px;}
 .audit{border-top:1px solid #d0d7de;margin-top:10px;padding-top:4px;font-size:11px;}
 .audit pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f6f8fa;padding:8px;}
 .toolbar{margin-bottom:16px;} .toolbar button{padding:8px 16px;font-size:14px;cursor:pointer;}
@@ -70,7 +61,7 @@ def _audit(c: dict) -> str:
     if not audit:
         return ""
     rendered = _esc(json.dumps(audit, ensure_ascii=False, sort_keys=True))
-    return ("<section class='audit'><h4>來源、驗證與政策紀錄</h4>"
+    return ("<section class='audit'><h4>來源與驗證紀錄</h4>"
             f"<pre>{rendered}</pre></section>")
 
 
@@ -82,8 +73,8 @@ def _page(title: str, body: str) -> str:
 
 
 def render(template: str, period: str, company: str = "") -> str:
-    if template == "journal_voucher":
-        return _journal_voucher(period, company)
+    if template != "summary":
+        raise ValueError("找不到報表模板")
     return _summary(period, company)
 
 
@@ -111,33 +102,3 @@ def _summary(period: str, company: str) -> str:
             f"</tbody><tfoot><tr><td colspan='5'>合計</td><td class='num'>{_num(st)}</td>"
             f"<td class='num'>{_num(tx)}</td><td class='num'>{_num(tot)}</td><td></td></tr></tfoot></table>")
     return _page(f"憑證明細彙總表 {period}", body)
-
-
-def _journal_voucher(period: str, company: str) -> str:
-    recs = review.list_vouchers(status=ReviewStatus.confirmed,
-                                company=company, period=period)
-    recs = [r for r in recs if not doc_types.is_supporting(json.loads(r.current_json).get("doc_type_key", ""))]
-    blocks = []
-    excluded_count = sum(not entry_workflow.is_ready(r) for r in recs)
-    recs = [r for r in recs if entry_workflow.is_ready(r)]
-    for r in recs:
-        c = json.loads(r.current_json)
-        erows = []
-        for e in c.get("entries", []):
-            amt = e.get("amount")
-            has_d = bool(e.get("debit_account") or e.get("debit_account_name"))
-            has_c = bool(e.get("credit_account") or e.get("credit_account_name"))
-            erows.append(
-                f"<tr><td>{_esc(e.get('debit_account',''))} {_esc(e.get('debit_account_name',''))}</td>"
-                f"<td class='num'>{_num(amt) if has_d else ''}</td>"
-                f"<td>{_esc(e.get('credit_account',''))} {_esc(e.get('credit_account_name',''))}</td>"
-                f"<td class='num'>{_num(amt) if has_c else ''}</td></tr>")
-        blocks.append(
-            f"<div class='voucher'><h3>{_esc(c.get('date',''))}　傳票 {_esc(c.get('voucher_id',''))}　{_esc(c.get('note',''))}</h3>"
-            "<table><thead><tr><th>借方科目</th><th>借方金額</th><th>貸方科目</th><th>貸方金額</th></tr></thead>"
-            f"<tbody>{''.join(erows) or '<tr><td colspan=4>（無分錄）</td></tr>'}</tbody></table>"
-            f"{_audit(c)}</div>")
-    body = (f"<h1>會計傳票</h1><div class='meta'>期別 {_esc(period)}"
-            f"{'　公司 ' + _esc(company) if company else ''}　共 {len(recs)} 張可供入帳；另有 {excluded_count} 張尚未確認分錄，未納入</div>"
-            + "".join(blocks or ["<p>此期別無可供入帳分錄。</p>"]))
-    return _page(f"會計傳票 {period}", body)

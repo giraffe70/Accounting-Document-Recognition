@@ -422,7 +422,7 @@
     const add = (scope, label, preview) => {
       const allowed = can[scope] === true;
       const warning = !preview.confirmed_count ? ""
-        : allowed ? "含已確認的憑證：刪除後日記帳與報表將不再包含它們。"
+        : allowed ? "含已確認的憑證：刪除後憑證與明細彙總將不再包含它們。"
           : "含已確認的憑證，只有管理員可以刪除。";
       choices.push({ scope, label, summary: deleteScopeText(preview), allowed, warning,
         blockedReason: preview.blocked_reason || "" });
@@ -1164,8 +1164,6 @@
     const itemText = (items) => (items || []).map((row) => [row.description, row.account_code, row.account_name,
       row.quantity == null ? "" : `數量 ${row.quantity}`, row.amount == null ? "" : `金額 ${row.amount}`].filter(Boolean).join("／")).join("\n");
     add("明細", itemText(remote.items), itemText(local.items));
-    const entryText = (entries) => (entries || []).map((row) => `${row.description || ""}／${row.debit_account ? "借" : "貸"} ${row.debit_account || row.credit_account || ""} ${row.debit_account_name || row.credit_account_name || ""}／${row.amount ?? ""}`).join("\n");
-    add("分錄", entryText(remote.entries), entryText(local.entries));
     $("voucherVersionRows").innerHTML = rows.join("") || '<tr><td colspan="3">最新版本已有其他保存紀錄，請確認是否以目前輸入儲存。</td></tr>';
     const dialog = $("voucherVersionDialog");
     return new Promise((resolve) => {
@@ -1618,7 +1616,6 @@
       ? `<span class="ocr-bad">⚠️ ${os.detail || "地端 OCR 不可用"}</span>`
       : `<span class="ocr-ok">✅ ${os.detail || "地端 OCR 可用"}</span>`;
     fillSelect("sel-structure", models.structure, cfg.structure);
-    fillSelect("sel-classify", models.classify, cfg.classify);
     modal.classList.remove("hidden");
   }
   function fillSelect(id, options, selected) {
@@ -1630,9 +1627,9 @@
     $(id).innerHTML = placeholder + localModels.map((m) => `<option value="${esc(m)}" ${m === selected ? "selected" : ""}>${esc(label(m))}</option>`).join("");
   }
   async function saveSettings() {
-    const settings = { ocr: $("sel-ocr").value, structure: $("sel-structure").value, classify: $("sel-classify").value };
-    if (!settings.ocr.startsWith("paddle/") || !settings.structure.startsWith("ollama/") || !settings.classify.startsWith("ollama/")) {
-      alert("請先選擇各階段的地端模型"); return;
+    const settings = { ocr: $("sel-ocr").value, structure: $("sel-structure").value };
+    if (!settings.ocr.startsWith("paddle/") || !settings.structure.startsWith("ollama/")) {
+      alert("請先選擇 OCR 與結構化的地端模型"); return;
     }
     try {
       const response = await fetch("/api/config", { method: "POST", headers: json(), body: JSON.stringify(settings) });

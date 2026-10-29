@@ -1,4 +1,4 @@
-"""三個辨識階段（OCR／VLM 結構化／LLM 分類）的即時使用狀態。
+"""辨識階段（OCR／結構化）的即時使用狀態。
 
 地端模型單張要跑數十秒，畫面上若只有一句「辨識中…」，使用者無從得知
 卡在哪一段、還要多久。各階段進出時登記於此，供 /api/engine-status 輪詢，
@@ -7,8 +7,8 @@
 import threading
 import time
 
-STAGES = ("ocr", "structure", "classify")
-STAGE_LABEL = {"ocr": "OCR 文字", "structure": "VLM 結構化", "classify": "LLM 科目分類"}
+STAGES = ("ocr", "structure")
+STAGE_LABEL = {"ocr": "OCR 文字", "structure": "VLM 結構化"}
 
 _lock = threading.Lock()
 _running: dict[str, dict] = {}   # stage -> {"note": str, "started": float}

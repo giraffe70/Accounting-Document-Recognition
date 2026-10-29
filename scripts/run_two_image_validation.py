@@ -82,7 +82,6 @@ def extract_scored_fields(voucher):
 
 def main():
     from app.core import pipeline, settings_store
-    from app.services import classify
 
     OUT.mkdir(parents=True, exist_ok=True)
     settings = settings_store.get_settings()
@@ -104,8 +103,7 @@ def main():
         try:
             doc_type_key = pipeline.prepare_image(str(working))
             voucher = pipeline.extract_for_type(str(working), doc_type_key)
-            classified = classify.classify(voucher)
-            observed = extract_scored_fields(classified)
+            observed = extract_scored_fields(voucher)
             comparisons = {
                 key: {
                     "expected": value,
@@ -119,7 +117,7 @@ def main():
                 "working_image": str(working.relative_to(ROOT)),
                 "started_at_utc": started,
                 "doc_type_key": doc_type_key,
-                "recognized": classified.model_dump(mode="json"),
+                "recognized": voucher.model_dump(mode="json"),
                 "scored_fields": observed,
                 "ground_truth": expected,
                 "comparisons": comparisons,

@@ -844,7 +844,7 @@ process.stdout.write(JSON.stringify(input.cases.map(([dx, dy]) => context.f(dx, 
 
         admin = {"previews": {"record": record, "upload": upload}, "can_delete": {"record": True, "upload": True}}
         warning = self.run_delete("choices", data=admin)["choices"][1]["warning"]
-        self.assertIn("日記帳與報表", warning)
+        self.assertIn("憑證與明細彙總", warning)
 
     def test_queued_delete_only_previews_and_deletes_current_record(self):
         page = self.preview([12], sources=1)

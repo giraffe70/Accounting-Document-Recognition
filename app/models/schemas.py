@@ -107,8 +107,8 @@ class LineItem(_StrCoerceModel):
 class JournalEntry(_StrCoerceModel):
     """會計分錄（借貸）。
 
-    系統自動分類產生的分錄，與從客戶傳票（記帳憑證）辨識回來的分錄共用此模型
-    ——兩者是同一種東西，差別只在誰產生的。dept／offset_code 僅傳票有。
+    保存客戶傳票（記帳憑證）上實際印出的借貸內容與來源。
+    舊資料仍可讀取；不表示可供入帳，亦不生成未印出的另一側。
     """
     description: str = ""
     amount: Optional[float] = None
@@ -146,7 +146,7 @@ class Voucher(_StrCoerceModel):
     currency: str = "TWD"
     note: str = ""                   # 備註 → 摘要
 
-    # 會計處理
+    # 原始傳票辨識內容（兼容既有 JSON）
     entries: list[JournalEntry] = Field(default_factory=list)
     debit_total: Optional[float] = None
     credit_total: Optional[float] = None
@@ -184,4 +184,3 @@ class ConfigUpdate(BaseModel):
     """前端設定 modal 回傳：各階段的 provider/model 字串。"""
     ocr: Optional[str] = None
     structure: Optional[str] = None
-    classify: Optional[str] = None

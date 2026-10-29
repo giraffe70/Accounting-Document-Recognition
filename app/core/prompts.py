@@ -1,4 +1,4 @@
-"""Three task templates. Contracts, evidence and policy are request data."""
+"""Recognition templates. Contracts and evidence are request data."""
 from __future__ import annotations
 
 import json
@@ -22,12 +22,6 @@ EXTRACT_TEMPLATE = """任務：從文件證據擷取指定欄位，只依契約�
 僅填可確認的原文或數值；未知填 null，不補造明細，不以其他欄位推算缺值。
 區分文件本身資料與引用資料；日期照印出原文輸出，不得自行換算民國或西元年；金額可保留原文，格式及算術由程式處理。
 定位提示與公司參考資料不是文件證據，不得用來補空值；不得為使合計相等而改寫數字。"""
-ACCOUNTING_TEMPLATE = """任務：依文件資料、來源確認狀態、公司科目表與適用政策提出分錄，只輸出指定 JSON。
-不猜原始單據、不自創科目或金額；每列只填借或貸一側。
-每列 amount_source 指定唯一主要金額來源，evidence_paths 只列輔助證據；無金額填 null。
-金額只引用用途與幣別適用的可用來源；多項合計只使用程式提供的推導來源。進項稅額必須取營業稅來源。
-缺科目代碼留空並列警告。資料不足仍可提出候選分錄，將假設列入 assumptions。
-分項費用分列；不自行拆未印出的稅額或付款資料。平衡與科目驗證由程式執行。"""
 
 
 class RawContract(BaseModel):
@@ -176,12 +170,6 @@ def build_extract_prompt(type_key: str, mode: InputMode = "image", ocr_text: str
             parts.append("boxes 僅框可定位的指定欄位；[x1,y1,x2,y2] 為0至1000整數，未知省略。")
     from app.core import prompt_evidence
     return "\n".join(parts) + DATA_SEPARATOR + _json({"locator_hint": hint, "reference_data": prompt_evidence.assemble(ocr_text, evidence, image_path)})
-
-
-def build_accounting_prompt(context: dict, chart: list, policy: dict, examples: list | None = None) -> str:
-    return "\n".join([ACCOUNTING_TEMPLATE, DATA_BOUNDARY,
-        '輸出：{"entries":[{"description":"事由","amount":null,"amount_source":null,"debit_account":"","debit_account_name":"","credit_account":"","credit_account_name":"","evidence_paths":[]}],"warnings":[],"assumptions":[]}',
-        "選取證據不等同人工確認；依來源狀態保留候選與警告。"])+ DATA_SEPARATOR + _json({"chart": chart, "policy": policy, "document_context": context, "verified_examples": (examples or [])[:3]})
 
 
 def task_messages(content) -> list[dict]:
