@@ -30,7 +30,17 @@
 .database-detail-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding-bottom: 16px; border-bottom: 1px solid var(--border); }
 .database-detail-header h2 { margin: 0; font-size: 18px; }
 .database-detail-header .hint { margin: 4px 0 0; }
-.database-detail-content { flex: 1; min-height: 0; margin-top: 16px; padding: 14px; overflow: auto; border-radius: 7px; background: #f6f8fa; color: var(--text); font: 13px/1.55 Consolas, "Cascadia Code", monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.database-detail-content { flex: 1; min-height: 0; margin-top: 16px; padding: 14px; overflow: auto; border-radius: 7px; background: #f6f8fa; color: var(--text); font-size: 14px; overflow-wrap: anywhere; }
+.database-detail-raw { margin: 0; font: 13px/1.55 Consolas, "Cascadia Code", monospace; white-space: pre-wrap; }
+.database-voucher-section + .database-voucher-section { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--border); }
+.database-voucher-section h3 { margin: 0 0 10px; font-size: 15px; }
+.database-voucher-fields { margin: 0; }
+.database-voucher-fields > div { display: grid; grid-template-columns: minmax(0, 6em) minmax(0, 1fr); gap: 12px; padding: 5px 0; }
+.database-voucher-fields dt { color: var(--muted); }
+.database-voucher-fields dd { min-width: 0; margin: 0; white-space: pre-wrap; }
+.database-voucher-items { margin: 0; padding-left: 24px; }
+.database-voucher-items > li { padding-left: 4px; }
+.database-voucher-items > li + li { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
 body.database-drawer-open { overflow: hidden; }
 @media (max-width: 650px) {
   .database-layout { padding: 0 10px; margin: 12px auto; }

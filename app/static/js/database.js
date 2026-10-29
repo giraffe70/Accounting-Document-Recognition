@@ -132,6 +132,131 @@
     } catch { return { text, label: "欄位內容" }; }
   }
 
+  function isVoucherDetail(column, table = selectedTable()) {
+    return table?.database === "app" && table.name === "voucher_records"
+      && ["ai_json", "current_json"].includes(column.name);
+  }
+
+  function isObject(value) {
+    return value !== null && typeof value === "object" && !Array.isArray(value);
+  }
+
+  function detailText(value) {
+    if (typeof value === "number" && Number.isFinite(value)) return String(value);
+    return typeof value === "string" && value.trim() ? value : "";
+  }
+
+  function detailFields(rows) {
+    const list = document.createElement("dl");
+    list.className = "database-voucher-fields";
+    rows.forEach(([label, value]) => {
+      const text = detailText(value);
+      if (!text) return;
+      const field = document.createElement("div");
+      const name = document.createElement("dt");
+      const content = document.createElement("dd");
+      name.textContent = label;
+      content.textContent = text;
+      field.append(name, content);
+      list.append(field);
+    });
+    return list;
+  }
+
+  function appendDetailSection(container, title, lists, numbered = false) {
+    const populated = lists.filter((list) => list.childElementCount);
+    if (!populated.length) return;
+    const section = document.createElement("section");
+    section.className = "database-voucher-section";
+    const heading = document.createElement("h3");
+    heading.textContent = title;
+    section.append(heading);
+    if (numbered) {
+      const list = document.createElement("ol");
+      list.className = "database-voucher-items";
+      populated.forEach((fields) => {
+        const item = document.createElement("li");
+        item.append(fields);
+        list.append(item);
+      });
+      section.append(list);
+    } else { section.append(...populated); }
+    container.append(section);
+  }
+
+  function entryDetailFields(entry) {
+    const rows = [["摘要", entry.description]];
+    let hasSide = false;
+    for (const [side, label] of [["debit", "借方"], ["credit", "貸方"]]) {
+      const account = [entry[`${side}_account`], entry[`${side}_account_name`]]
+        .map(detailText).filter(Boolean).join(" ");
+      const directed = entry.source_direction === side;
+      const amount = Object.hasOwn(entry, side) ? entry[side]
+        : account || directed ? entry.amount : undefined;
+      if (account || directed || detailText(amount)) {
+        hasSide = true;
+        const sourceAccount = directed ? [entry.account_code, entry.account_name]
+          .map(detailText).filter(Boolean).join(" ") : "";
+        rows.push([`${label}科目`, account || sourceAccount], [`${label}金額`, amount]);
+      }
+    }
+    if (!hasSide) {
+      rows.push(["科目", [entry.account_code || entry.raw_account_code,
+        entry.account_name || entry.raw_account_name].map(detailText).filter(Boolean).join(" ")],
+      ["金額", entry.amount]);
+    }
+    return detailFields(rows);
+  }
+
+  function renderVoucherDetail(value, container) {
+    if (value == null || (typeof value === "string" && !value.trim())) {
+      container.textContent = "尚無憑證內容";
+      return;
+    }
+    let voucher;
+    try { voucher = JSON.parse(value); }
+    catch {
+      container.textContent = "憑證內容格式有誤，無法顯示";
+      return;
+    }
+    if (voucher === null) { container.textContent = "尚無憑證內容"; return; }
+    if (!isObject(voucher)) {
+      container.textContent = "憑證內容格式有誤，無法顯示";
+      return;
+    }
+    const fields = isObject(voucher.fields) ? voucher.fields : {};
+    // An explicitly cleared common field must not fall back to an older value.
+    const field = (key) => Object.hasOwn(voucher, key) ? voucher[key] : fields[key];
+    const party = (side, key) => Object.hasOwn(voucher, side)
+      ? (isObject(voucher[side]) ? voucher[side][key] : undefined) : fields[`${side}_${key}`];
+    const basic = detailFields([
+      ["單據類型", field("doc_type")], ["憑證號碼", field("voucher_id")], ["日期", field("date")],
+      ["買方名稱", party("buyer", "name")], ["買方統編", party("buyer", "tax_id")],
+      ["賣方名稱", party("seller", "name")], ["賣方統編", party("seller", "tax_id")],
+    ]);
+    const journal = voucher.doc_type_key === "journal_voucher";
+    const rows = journal
+      ? [["借方合計", field("debit_total")], ["貸方合計", field("credit_total")]]
+      : [["未稅小計", field("subtotal")], ["稅額", field("tax_amount")], ["總金額", field("total_amount")]];
+    const details = journal
+      ? (Array.isArray(voucher.entries) ? voucher.entries : [])
+        .filter((entry) => isObject(entry) && entry.entry_origin !== "generated").map(entryDetailFields)
+      : (Array.isArray(voucher.items) ? voucher.items : []).filter(isObject).map((item) => detailFields([
+        ["品名／摘要", item.description], ["數量", item.quantity],
+        ["單價", item.unit_price], ["金額", item.amount],
+      ]));
+    const note = field("note");
+    const currency = detailText(field("currency"));
+    const hasContent = basic.childElementCount || rows.some(([, amount]) => detailText(amount))
+      || detailText(note) || details.some((list) => list.childElementCount);
+    if (currency && (hasContent || currency !== "TWD")) rows.push(["幣別", currency]);
+    rows.push(["備註", note]);
+    appendDetailSection(container, "基本資料", [basic]);
+    appendDetailSection(container, "金額與備註", [detailFields(rows)]);
+    appendDetailSection(container, journal ? "原稿傳票明細" : "品項明細", details, true);
+    if (!container.childElementCount) container.textContent = "尚無憑證內容";
+  }
+
   function isDetailValue(value) {
     if (value === null) return false;
     const text = String(value);
@@ -149,11 +274,22 @@
   }
 
   function openDetail(column, value, row, trigger) {
-    const detail = formatDetail(value);
     detailTrigger = trigger;
     $("detailTitle").textContent = column.label;
-    $("detailMeta").textContent = `${column.name} · ${detail.label}${row.id != null ? ` · 紀錄 ${row.id}` : ""}`;
-    $("detailContent").textContent = detail.text;
+    const container = $("detailContent");
+    container.replaceChildren();
+    if (isVoucherDetail(column)) {
+      $("detailMeta").textContent = `憑證重點${row.id != null ? ` · 紀錄 ${row.id}` : ""}`;
+      renderVoucherDetail(value, container);
+    } else {
+      const detail = formatDetail(value);
+      $("detailMeta").textContent = `${column.name} · ${detail.label}${row.id != null ? ` · 紀錄 ${row.id}` : ""}`;
+      const text = document.createElement("pre");
+      text.className = "database-detail-raw";
+      text.textContent = detail.text;
+      container.append(text);
+    }
+    container.scrollTop = 0;
     $("detailBackdrop").classList.remove("hidden");
     $("detailBackdrop").setAttribute("aria-hidden", "false");
     $("detailDrawer").classList.add("open");
@@ -216,7 +352,7 @@
         const value = row[column.name];
         const text = displayValue(column, value, table);
         if (value === null) td.classList.add("database-null");
-        if (isDetailValue(value)) {
+        if (isVoucherDetail(column, table) || isDetailValue(value)) {
           td.classList.add("database-detail-cell");
           const button = document.createElement("button");
           button.type = "button";
@@ -234,7 +370,7 @@
     $("pageInfo").textContent = `第 ${page} / ${pages} 頁`;
     const start = data.total ? (page - 1) * data.page_size + 1 : 0;
     $("dataMessage").textContent = data.total
-      ? `共 ${data.total} 筆，顯示第 ${start}–${start + data.rows.length - 1} 筆。JSON 與長內容可在右側面板查看。`
+      ? `共 ${data.total} 筆，顯示第 ${start}–${start + data.rows.length - 1} 筆。憑證重點與詳細內容可在右側面板查看。`
       : query ? "沒有符合關鍵字的資料。" : "此資料表目前沒有資料。";
     $("tableWrap").scrollTo(0, 0);
   }
