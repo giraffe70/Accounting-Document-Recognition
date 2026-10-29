@@ -51,7 +51,7 @@ TABLE_META = {
     },
     ("app", "voucher_records"): {
         "label": "憑證紀錄", "description": "上傳憑證的辨識內容、人工修正，以及辨識確認狀態。",
-        "date_label": "憑證日期", "date_column": "current_json.date",
+        "date_label": "建立日期", "date_column": "created_at",
         "statuses": {
             "prepared": "待外觀確認", "queued": "待提取",
             "pending": "辨識待確認", "confirmed": "辨識已確認",
@@ -243,15 +243,26 @@ def list_tables():
                 if (key, name) in HIDDEN_TABLES:
                     continue
                 count = con.execute(f"SELECT COUNT(*) FROM {quote(name)}").fetchone()[0]
-                result.append({"database": key, "database_label": label, "name": name,
-                               "count": count, **table_info(key, name)})
+                info = {"database": key, "database_label": label, "name": name,
+                        "count": count, **table_info(key, name)}
+                if (key, name) == ("app", "voucher_records"):
+                    names = {row[0] for row in con.execute(
+                        'SELECT DISTINCT "company" FROM "voucher_records" '
+                        'WHERE "company" IS NOT NULL AND "company" != \'\'')}
+                    if "companies" in tables(con):
+                        names.update(row[0] for row in con.execute(
+                            'SELECT COALESCE(NULLIF("short", \'\'), "name") FROM "companies"')
+                                     if row[0])
+                    info["companies"] = sorted(names)
+                result.append(info)
     return {"tables": result}
 
 
 @router.get("/rows")
 def list_rows(database: str, table: str, q: str = Query("", max_length=200),
               page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=100),
-              date_from: date | None = None, date_to: date | None = None, status: str = ""):
+              date_from: date | None = None, date_to: date | None = None, status: str = "",
+              company: str = ""):
     with connect(database) as con:
         if table not in tables(con):
             raise HTTPException(404, "找不到資料表")
@@ -262,6 +273,8 @@ def list_rows(database: str, table: str, q: str = Query("", max_length=200),
             raise HTTPException(422, "此資料表沒有日期篩選")
         if status and status not in meta.get("statuses", {}):
             raise HTTPException(422, "此資料表沒有此狀態")
+        if company and (database, table) != ("app", "voucher_records"):
+            raise HTTPException(422, "此資料表沒有公司篩選")
         hidden_columns = HIDDEN_COLUMNS.get((database, table), set())
         schema = [row for row in con.execute(f"PRAGMA table_info({quote(table)})")
                   if row["name"] not in hidden_columns]
@@ -287,6 +300,9 @@ def list_rows(database: str, table: str, q: str = Query("", max_length=200),
         if status:
             clauses.append('"status" = ?')
             params.append(status)
+        if company:
+            clauses.append('"company" = ?')
+            params.append(company)
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         total = con.execute(f"SELECT COUNT(*) FROM {quote(table)}{where}", params).fetchone()[0]
         pages = max(1, (total + page_size - 1) // page_size)

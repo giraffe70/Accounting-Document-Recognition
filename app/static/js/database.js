@@ -32,6 +32,7 @@
     $("dateFromPicker").value = "";
     $("dateToPicker").value = "";
     $("statusSelect").value = "";
+    $("companySelect").value = "";
   }
 
   function parseDate(value) {
@@ -102,6 +103,19 @@
       option.value = value; option.textContent = label;
       $("statusSelect").append(option);
     });
+    const companies = table?.companies;
+    $("companyWrap").classList.toggle("hidden", !companies);
+    const previousCompany = $("companySelect").value;
+    $("companySelect").replaceChildren();
+    const allCompanies = document.createElement("option");
+    allCompanies.value = ""; allCompanies.textContent = "全部公司";
+    $("companySelect").append(allCompanies);
+    (companies || []).forEach((company) => {
+      const option = document.createElement("option");
+      option.value = company; option.textContent = company;
+      $("companySelect").append(option);
+    });
+    if (companies?.includes(previousCompany)) $("companySelect").value = previousCompany;
   }
 
   function displayValue(column, value, table) {
@@ -371,7 +385,8 @@
     const start = data.total ? (page - 1) * data.page_size + 1 : 0;
     $("dataMessage").textContent = data.total
       ? `共 ${data.total} 筆，顯示第 ${start}–${start + data.rows.length - 1} 筆。憑證重點與詳細內容可在右側面板查看。`
-      : query ? "沒有符合關鍵字的資料。" : "此資料表目前沒有資料。";
+      : (query || dateFrom || dateTo || $("statusSelect").value || $("companySelect").value)
+        ? "沒有符合篩選條件的資料。" : "此資料表目前沒有資料。";
     $("tableWrap").scrollTo(0, 0);
   }
 
@@ -390,6 +405,7 @@
       if (selected.date_label && dateFrom) params.set("date_from", dateFrom);
       if (selected.date_label && dateTo) params.set("date_to", dateTo);
       if (selected.statuses?.length && $("statusSelect").value) params.set("status", $("statusSelect").value);
+      if (selected.companies && $("companySelect").value) params.set("company", $("companySelect").value);
       const data = await api(`/api/database/rows?${params}`);
       if (id === requestId) render(data);
     } catch (error) {

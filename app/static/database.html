@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>歷史紀錄 — 憑證辨識系統</title>
   <link rel="stylesheet" href="/css/styles.css">
-  <link rel="stylesheet" href="/css/database.css?v=20261029-voucher-summary">
-  <script src="/js/database.js?v=20261029-voucher-summary" defer></script>
+  <link rel="stylesheet" href="/css/database.css?v=20261029-history-filters">
+  <script src="/js/database.js?v=20261029-history-filters" defer></script>
 </head>
 <body>
   <header class="topbar">
@@ -27,6 +27,7 @@
         <label class="database-search">關鍵字<input id="searchInput" class="select" type="search" maxlength="200" placeholder="搜尋目前資料表的可見欄位"></label>
         <label id="dateFromWrap" class="hidden"><span id="dateFromLabel">起日</span><span class="database-date-field"><input id="dateFrom" class="select" type="text" inputmode="numeric" autocomplete="off" placeholder="年／月／日"><button id="dateFromPickerButton" class="database-date-picker-button" type="button" aria-label="選擇起日">選擇</button><input id="dateFromPicker" class="database-native-date-picker" type="date" tabindex="-1" aria-hidden="true"></span></label>
         <label id="dateToWrap" class="hidden"><span id="dateToLabel">迄日</span><span class="database-date-field"><input id="dateTo" class="select" type="text" inputmode="numeric" autocomplete="off" placeholder="年／月／日"><button id="dateToPickerButton" class="database-date-picker-button" type="button" aria-label="選擇迄日">選擇</button><input id="dateToPicker" class="database-native-date-picker" type="date" tabindex="-1" aria-hidden="true"></span></label>
+        <label id="companyWrap" class="hidden">歸屬公司<select id="companySelect" class="select"></select></label>
         <label id="statusWrap" class="hidden">狀態<select id="statusSelect" class="select"></select></label>
         <label>每頁筆數<select id="pageSize" class="select"><option>25</option><option>50</option><option>100</option></select></label>
         <button class="btn primary" type="submit">搜尋</button>

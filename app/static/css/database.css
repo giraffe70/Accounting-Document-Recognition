@@ -3,7 +3,7 @@
 .database-controls label { display: flex; flex-direction: column; gap: 5px; font-size: 14px; }
 .database-controls label.hidden { display: none; }
 .database-description { flex: 0 0 100%; margin: 0; }
-.database-search { flex: 1; min-width: 220px; }
+.database-search { flex: 1 1 220px; min-width: 180px; max-width: 320px; }
 .database-controls .select { width: 100%; min-height: 38px; }
 .database-date-field { position: relative; display: flex; }
 .database-date-field .select { padding-right: 56px; }
@@ -45,6 +45,7 @@ body.database-drawer-open { overflow: hidden; }
 @media (max-width: 650px) {
   .database-layout { padding: 0 10px; margin: 12px auto; }
   .database-controls label { width: 100%; }
+  .database-search { max-width: none; }
   .topbar { flex-wrap: wrap; }
   .database-detail-drawer { width: 100%; padding: 16px; }
 }
