@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import threading
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
@@ -15,6 +16,12 @@ from app.models.schemas import Voucher
 
 logger = logging.getLogger("pdf_scan.pipeline")
 _PDF_LOCK = threading.RLock()
+
+
+@dataclass
+class PreparedPage:
+    documents: list[Voucher]
+    layout: dict
 
 def render_to_images(file_path: str) -> list[str]:
     """PDF → 逐頁 PNG 路徑（輸出至暫存區，不污染來源目錄）；圖片 → 原路徑。"""
@@ -69,11 +76,10 @@ def managed_upload_name(file_path: str) -> str:
 
 
 def prepare_pages(file_path: str) -> list[Voucher]:
-    """Route immutable native pages and prepare separate documents for appearance review."""
-    import uuid
+    """Prepare actual documents without persisting an additional source page."""
     out = []
-    for vouchers in iter_prepare_pages(file_path):
-        out.extend(vouchers)
+    for page in iter_prepare_pages(file_path):
+        out.extend(page.documents)
     return out
 
 
@@ -148,18 +154,14 @@ def prepare_manual_page(source, file_path, page_no, *, token, group_id=None):
     if managed_upload_name(file_path):
         origin["upload_file"] = managed_upload_name(file_path)
     origin["preparation"] = preparation.fresh(pdf=Path(file_path).suffix.lower()==".pdf")
-    parent = Voucher(origin={**deepcopy(origin),"record_role":"source_page",
-                             "layout":{"auto_split":False,"content_kind":"unknown","regions":[],"issues":[]}},
-                     quality={"version":1,"state":"unassessed","content_kind":"unknown","issues":[]})
-    child = Voucher(origin=deepcopy(origin), quality={"version":1,"state":"unassessed","content_kind":"unknown","issues":[]})
-    for voucher in (parent, child):
-        voucher.source_image = str(source)
-        voucher.source_file = f"{Path(file_path).name} p{page_no}"
-    return [parent, child]
+    document = Voucher(origin=deepcopy(origin), quality={"version":1,"state":"unassessed","content_kind":"unknown","issues":[]})
+    document.source_image = str(source)
+    document.source_file = f"{Path(file_path).name} p{page_no}"
+    return PreparedPage([document], {"auto_split":False,"content_kind":"unknown","regions":[],"issues":[]})
 
 
 def prepare_page(source, file_path, page_no, *, token=None, group_id=None, confirmed_preparation=None):
-    """One immutable page, with stable identities supplied by resumable imports."""
+    """Separate layout metadata from the actual documents of a resumable page."""
     import uuid
     from app import config
     from app.core import page_layout, invocation_trace, model_invocation, work_progress, image_evidence
@@ -182,13 +184,8 @@ def prepare_page(source, file_path, page_no, *, token=None, group_id=None, confi
         else:
             layout = page_layout.detect(input_path, native_path=source)
         work_progress.emit("saving")
-        source_origin = {**page_layout.origin(source, {"box": [0, 0, 1000, 1000]}, page_no),
-                         "record_role": "source_page", "source_token": token, "layout": layout, **group}
-        parent = Voucher.model_validate({"doc_type_key": layout["type"], "origin": source_origin,
-            "quality": {"version": 1, "state": "needs_review" if not layout["auto_split"] else "usable", "content_kind": layout["content_kind"], "issues": layout["issues"]}})
-        parent.source_file = f"{Path(file_path).name} p{page_no}"
-        parent.source_image = source
-        out = [parent]
+        source_file = f"{Path(file_path).name} p{page_no}"
+        out = []
         if layout["auto_split"] and layout["content_kind"] == "document":
             for document_index, region in enumerate(layout["regions"]):
                 crop_path = page_layout.crop(source, region, folder / f"document_{document_index}.png")
@@ -196,7 +193,7 @@ def prepare_page(source, file_path, page_no, *, token=None, group_id=None, confi
                     "origin": {**page_layout.origin(source, region, page_no), "source_token": token, "document_index": document_index,
                                "layout_fallback": layout.get("fallback_reason"), **group},
                     "quality": {"version": 1, "state": "unassessed", "content_kind": layout["content_kind"], "issues": []}})
-                child.source_file, child.source_image = parent.source_file, crop_path
+                child.source_file, child.source_image = source_file, crop_path
                 if confirmed_preparation is not None:
                     from app.core import preparation, text_evidence
                     child.origin["preparation"] = preparation.fresh()
@@ -205,7 +202,15 @@ def prepare_page(source, file_path, page_no, *, token=None, group_id=None, confi
                 if confirmed_preparation is not None:
                     child.field_evidence["doc_type_key"][0].update(text_identity_sha256=ocr_cache.digest(text_evidence.identity(crop_path)),structure_setting=settings_store.get_settings()["structure"])
                 out.append(child)
-        return out
+        if not layout["auto_split"]:
+            from app.core import preparation
+            working = Voucher.model_validate({"doc_type_key": layout["type"],
+                "origin": {**page_layout.origin(source, {"box":[0,0,1000,1000]}, page_no),
+                           "source_token": token, "layout": layout, "preparation": preparation.fresh(), **group},
+                "quality": {"version":1,"state":"needs_review","content_kind":layout["content_kind"],"issues":layout["issues"]}})
+            working.source_file, working.source_image = source_file, str(source)
+            out.append(working)
+        return PreparedPage(out, layout)
 
 
 def _is_blank_page(image_path: str, ink_thresh: float = 0.004) -> bool:

@@ -124,13 +124,13 @@ def _view(session, job):
     data = []
     for page in pages:
         data.append({"id": page.id, "file_name": names[page.file_id], "page_no": page.page_no,
-                     "status": page.status, "phase": page.phase, "source_page_id": page.source_page_id,
+                     "status": page.status, "phase": page.phase, "source_page_id": None,
                      "voucher_ids": json.loads(page.voucher_ids_json), "error": page.error,
                      "preview_url": f"/api/import-jobs/{job.id}/pages/{page.id}/preview" if page.preview_path else None})
     current = next((p for p in data if p["status"] not in ("completed",)), None)
     review_ids = []
     if current and current["status"] == "preview_ready":
-        for ident in current["voucher_ids"] or [current["source_page_id"]]:
+        for ident in current["voucher_ids"]:
             rec = session.get(review.VoucherRecord, ident) if ident else None
             if rec and rec.status == review.ReviewStatus.prepared and (rec.record_role != "source_page" or not current["voucher_ids"]):
                 review_ids.append(rec.id)
@@ -319,15 +319,8 @@ def _run(job_id):
                 with work_progress.capture(lambda phase: _phase(job_id, page["id"], phase)):
                     prepare = pipeline.prepare_manual_page if manual_mode else pipeline.prepare_page
                     vouchers = prepare(source, file["path"], page["page_no"], token=page["source_token"], group_id=file["group_id"])
-                if sequential and not manual_mode and vouchers and not any(v.origin.get("record_role") != "source_page" for v in vouchers) and not vouchers[0].origin.get("layout", {}).get("auto_split"):
-                    # An uncertain automatic layout still needs an editable copy;
-                    # the immutable source cannot serve as the manual split remainder.
-                    from app.core import preparation
-                    working = vouchers[0].model_copy(deep=True)
-                    working.origin.pop("record_role", None)
-                    working.origin.pop("layout", None)
-                    working.origin["preparation"] = preparation.fresh()
-                    vouchers.append(working)
+                prepared = vouchers
+                vouchers = prepared.documents
                 for voucher in vouchers:
                     voucher.source_file = f"{file['name']} p{page['page_no']}"
                     if manual_mode or sequential:
@@ -340,16 +333,16 @@ def _run(job_id):
                         continue
                     try:
                         records = review.save_prepared_page(vouchers, company, session)
-                        saved_page.source_page_id = next((r.id for r in records if r.record_role == "source_page"), None)
-                        parent = next((r for r in records if r.record_role == "source_page"), None)
-                        if parent and parent.image_path:
-                            saved_page.preview_path = str(config.UPLOAD_DIR / parent.image_path)
-                        saved_page.voucher_ids_json = json.dumps([r.id for r in records if r.record_role != "source_page"])
-                        needs_review = manual_mode or (sequential and (json.loads(saved_page.voucher_ids_json) or not vouchers[0].origin.get("layout", {}).get("auto_split")))
+                        saved_page.source_page_id = None
+                        saved_page.preview_path = str(config.UPLOAD_DIR / records[0].image_path) if records and records[0].image_path else ""
+                        saved_page.voucher_ids_json = json.dumps([r.id for r in records])
+                        needs_review = bool(records) and (manual_mode or sequential)
                         saved_page.status = "preview_ready" if needs_review else "completed"
-                        saved_page.phase = "awaiting_review" if needs_review else "completed"
+                        saved_page.phase = "awaiting_review" if needs_review else "completed" if records else "skipped"
                         if needs_review:
                             saved_page.preparation_json = json.dumps({"operation":"review", "preview_ready_at":utc_now().isoformat()})
+                        elif not records:
+                            saved_page.preparation_json = json.dumps({"operation":"skipped", "layout":prepared.layout}, ensure_ascii=False)
                         saved = session.get(ImportJob, job_id)
                         if saved.first_result_seconds is None:
                             saved.first_result_seconds = (utc_now() - saved.created_at).total_seconds()
@@ -485,9 +478,9 @@ def _run_layout(job_id, page, file, operation, company):
         raise JobConflict("方向確認已失效")
     _phase(job_id, page["id"], "layout")
     with work_progress.capture(lambda phase: _phase(job_id, page["id"], phase)):
-        vouchers = pipeline.prepare_page(str(source), file["path"], page["page_no"], token=page["source_token"],
+        prepared = pipeline.prepare_page(str(source), file["path"], page["page_no"], token=page["source_token"],
             group_id=file["group_id"], confirmed_preparation=preparation.state(current))
-    layout = vouchers[0].origin["layout"]
+    layout = prepared.layout
     with get_session() as session:
         session.connection().exec_driver_sql("BEGIN IMMEDIATE")
         saved = session.get(review.VoucherRecord, rec.id)
@@ -501,26 +494,30 @@ def _run_layout(job_id, page, file, operation, company):
         data["origin"]["layout"] = layout
         child_ids = []
         if layout["auto_split"]:
-            saved.record_role = "source_page"
-            data["origin"]["record_role"] = "source_page"
-            for voucher in vouchers[1:]:
+            for index, voucher in enumerate(prepared.documents):
                 voucher.origin.update(import_job_id=job_id, import_page_id=page["id"])
                 voucher.source_file = saved.source_file
-                child = review.save_voucher(voucher, company, review.ReviewStatus.prepared, source_parent_id=rec.id, session=session)
+                child = review.save_voucher(voucher, company, review.ReviewStatus.prepared, session=session,
+                    _record=saved if index == 0 else None)
                 child_ids.append(child.id)
-            data["quality"] = vouchers[0].quality
+            if not child_ids:
+                review._remove_empty_working_record(session, saved)
             waiting = _sequential(session.get(ImportJob, job_id)) and bool(child_ids)
-            saved_page.status, saved_page.phase = ("preview_ready", "awaiting_review") if waiting else ("completed", "completed")
+            saved_page.status, saved_page.phase = ("preview_ready", "awaiting_review") if waiting else ("completed", "completed" if child_ids else "skipped")
         else:
             data["quality"] = {"version":1,"state":"needs_review","content_kind":"unknown","issues":layout["issues"]}
             data["origin"]["preparation"]["document_mode"] = "manual_split"
             saved_page.status, saved_page.phase = "preview_ready", "awaiting_review"
             child_ids = [rec.id]
-        saved.current_json = json.dumps(data, ensure_ascii=False)
-        saved.updated_at = datetime.now()
+        if not layout["auto_split"]:
+            saved.current_json = json.dumps(data, ensure_ascii=False)
+            saved.updated_at = datetime.now()
+            session.add(saved)
         saved_page.voucher_ids_json = json.dumps(child_ids)
-        saved_page.preparation_json = json.dumps({"operation":"review"})
-        session.add(saved); session.add(saved_page)
+        saved_page.source_page_id = None
+        saved_page.preview_path = str(config.UPLOAD_DIR / saved.image_path) if child_ids else ""
+        saved_page.preparation_json = json.dumps({"operation":"review"} if child_ids else {"operation":"skipped", "layout":layout}, ensure_ascii=False)
+        session.add(saved_page)
         try:
             session.commit()
         except Exception:
@@ -528,6 +525,7 @@ def _run_layout(job_id, page, file, operation, company):
             for image in session.info.get("import_images", []):
                 image.unlink(missing_ok=True)
             raise
+    review._cleanup_prepared_images(source)
 
 
 def run_once():

@@ -81,15 +81,12 @@ class FastWorkflowContracts(unittest.TestCase):
     @staticmethod
     def _vouchers(token, source, file_name="source.png"):
         prep = preparation.fresh(pdf=False)
-        parent = Voucher(origin={"source_token": token, "record_role": "source_page",
-                                 "preparation": dict(prep),
-                                 "layout": {"auto_split": False, "content_kind": "unknown",
-                                            "regions": [], "issues": []}})
         child = Voucher(origin={"source_token": token, "preparation": dict(prep)})
-        for voucher in (parent, child):
+        for voucher in (child,):
             voucher.source_image = str(source)
             voucher.source_file = file_name
-        return [parent, child]
+        return pipeline.PreparedPage([child], {"auto_split": False, "content_kind": "unknown",
+                                              "regions": [], "issues": []})
 
     def _manual_record(self, name):
         image = self.uploads / "pages" / name
@@ -126,14 +123,12 @@ class FastWorkflowContracts(unittest.TestCase):
             ids = json.loads(page.voucher_ids_json)
             records = {row.id: row for row in self._rows(VoucherRecord)}
             child = records[ids[0]]
-            parent = records[page.source_page_id]
-            self.assertEqual(parent.record_role, "source_page")
+            self.assertIsNone(page.source_page_id)
             self.assertEqual(child.status, ReviewStatus.prepared)
             self.assertEqual(child.record_role, "voucher")
             self.assertNotEqual(self.uploads / child.image_path, source1)
             self.assertTrue((self.uploads / child.image_path).is_file())
             self.assertEqual((self.uploads / child.image_path).read_bytes(), source1.read_bytes())
-            self.assertEqual((self.uploads / parent.image_path).read_bytes(), source1.read_bytes())
             automatic.assert_not_called()
             get_ocr.assert_not_called()
             detect.assert_not_called()
@@ -497,15 +492,14 @@ class FastWorkflowContracts(unittest.TestCase):
         self.assertEqual([line["text"] for line in observed["ocr_lines"]],
                          ["Invoice Left 001", "Invoice Right 002"])
         self.assertEqual(import_jobs.get_job(job["id"], 1)["pages"][0]["status"], "preview_ready")
-        source_page = review.get_voucher(rec_id)
-        self.assertEqual(source_page.record_role, "source_page")
         page = self._rows(ImportPage)[0]
+        self.assertIsNone(page.source_page_id)
         child_ids = json.loads(page.voucher_ids_json)
         self.assertEqual(len(child_ids), 2)
         self.assertEqual(len(set(child_ids)), 2)
-        self.assertNotIn(rec_id, child_ids)
+        self.assertEqual(child_ids[0], rec_id)
         children = [review.get_voucher(ident) for ident in child_ids]
-        self.assertTrue(all(child.source_parent_id == rec_id for child in children))
+        self.assertTrue(all(child.record_role == "voucher" and child.source_parent_id is None for child in children))
         self.assertEqual(len({child.image_path for child in children}), 2)
         self.assertEqual(sorted(text_evidence.read(self.uploads / child.image_path, folder=folder)["text"]
                                 for child in children), ["Invoice Left 001", "Invoice Right 002"])
@@ -554,13 +548,16 @@ class FastWorkflowContracts(unittest.TestCase):
         self.assertEqual(recognized_data["doc_type_key"], "invoice")
         self.assertEqual(recognized_data["field_evidence"]["doc_type_key"][0]["source"], "route")
 
-    def test_manual_split_creates_unconfirmed_prepared_copy(self):
+    def test_manual_split_deletes_blank_remainder_and_returns_prepared_copy(self):
         rec_id = self._manual_record("split.png")
         rec = review.get_voucher(rec_id)
         original_path = self.uploads / rec.image_path
-        original_pixels = original_path.read_bytes()
+        original_baseline = original_path.with_suffix(".baseline.png")
 
-        child = review.split_voucher(rec_id, [0, 0, 0.5, 1], expected_updated_at=rec.updated_at.isoformat())
+        with patch.object(review, "is_blank_image", return_value=True):
+            child = review.split_voucher(
+                rec_id, [0, 0, 0.5, 1], expected_updated_at=rec.updated_at.isoformat(),
+            )
 
         self.assertIsNotNone(child)
         self.assertEqual(child.status, ReviewStatus.prepared)
@@ -570,13 +567,17 @@ class FastWorkflowContracts(unittest.TestCase):
         self.assertFalse(preparation.state(child_data)["type_confirmed"])
         self.assertEqual(preparation.state(child_data)["document_mode"], "single")
         self.assertEqual(preparation.state(child_data)["transforms"][-1]["kind"], "crop")
-        self.assertNotEqual(original_path.read_bytes(), original_pixels)
-        updated_parent = review.get_voucher(rec_id)
-        self.assertEqual(updated_parent.status, ReviewStatus.prepared)
-        self.assertFalse(preparation.confirmed(
-            json.loads(updated_parent.current_json), original_path,
-        ))
-        self.assertTrue((self.uploads / child.image_path).is_file())
+        self.assertIsNone(review.get_voucher(rec_id))
+        self.assertFalse(original_path.exists())
+        self.assertFalse(original_baseline.exists())
+        child_path = self.uploads / child.image_path
+        child_baseline = child_path.with_suffix(".baseline.png")
+        self.assertTrue(child_path.is_file())
+        self.assertTrue(child_baseline.is_file())
+        self.assertEqual(child_baseline.read_bytes(), child_path.read_bytes())
+        with Image.open(child_path) as cropped:
+            self.assertEqual(cropped.size, (20, 30))
+            self.assertEqual(cropped.convert("RGB").getpixel((0, 0)), (220, 230, 240))
 
     def test_legacy_import_pages_get_additive_preparation_json_column(self):
         legacy_engine = create_engine(f"sqlite:///{self.root / 'legacy.sqlite'}")

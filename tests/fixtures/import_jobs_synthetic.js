@@ -98,11 +98,13 @@ async function pollScenario() {
   events.length = 0; importJobs.clear(); importJobTimers.clear(); importSeenPages.clear();
   const api = context.testImport;
   importJobs.set("cross-tab", { id: "cross-tab", status: "awaiting_review" });
-  responses.set("/api/import-jobs/cross-tab", { body: { id: "cross-tab", status: "awaiting_review", current_page: 1, total_pages: 3, review_ids: [41], pages: [{ status: "preview_ready", source_page_id: 99, voucher_ids: [99] }] } });
+  responses.set("/api/import-jobs/cross-tab", { body: { id: "cross-tab", status: "awaiting_review", current_page: 1, total_pages: 3, review_ids: [41], pages: [{ status: "preview_ready", voucher_ids: [41] }] } });
   const idsPreferJobReviewList = JSON.stringify(api.currentReviewIds({ status: "awaiting_review", review_ids: [41], pages: [{ status: "preview_ready", voucher_ids: [99] }] }));
+  const idsFromPageVouchers = JSON.stringify(api.currentReviewIds({ status: "awaiting_review", pages: [{ status: "preview_ready", voucher_ids: [42], source_page_id: 99 }] }));
+  const idsNeverFallBackToSourcePage = JSON.stringify(api.currentReviewIds({ status: "awaiting_review", pages: [{ status: "preview_ready", voucher_ids: [], source_page_id: 99 }] }));
   context.currentStage = "import"; await api.pollImportJob("cross-tab");
   const first = events.filter(e => e[0] === "setStage").length;
-  responses.set("/api/import-jobs/cross-tab", { body: { id: "cross-tab", status: "awaiting_review", current_page: 2, total_pages: 3, review_ids: [42], pages: [{ status: "preview_ready", source_page_id: 99, voucher_ids: [99] }] } });
+  responses.set("/api/import-jobs/cross-tab", { body: { id: "cross-tab", status: "awaiting_review", current_page: 2, total_pages: 3, review_ids: [42], pages: [{ status: "preview_ready", voucher_ids: [42] }] } });
   await api.pollImportJob("cross-tab");
   const afterPageTwo = events.filter(e => e[0] === "loadList").length;
   const pagePosition = nodes.appearancePosition.textContent;
@@ -122,7 +124,7 @@ async function pollScenario() {
   api.stopImportPolling();
   resolveLate({ ok: true, status: 200, json: async () => ({ id: "late", status: "running", pages: [] }) });
   await latePoll;
-  return { first, afterPageTwo, afterDirtyPage, pagePosition, timersAtAwaiting, idsPreferJobReviewList, reviewButtonVisible, reviewButtonHiddenWithoutIds,
+  return { first, afterPageTwo, afterDirtyPage, pagePosition, timersAtAwaiting, idsPreferJobReviewList, idsFromPageVouchers, idsNeverFallBackToSourcePage, reviewButtonVisible, reviewButtonHiddenWithoutIds,
     staleTimerAfterLogout: importJobTimers.has("late"), jobsAfterLogout: importJobs.size,
     lateResponseDidNotNavigate: events.filter(e => e[0] === "setStage").length === first };
 }
@@ -150,12 +152,12 @@ async function listScenario() {
   nodes.listEmpty.classList.remove("hidden"); nodes.listTable.classList.add("hidden");
   nodes.listBody.html = "";
   nodes.confirmationFilter.value = "prepared";
-  const rows = [{ id: 1, status: "prepared", doc_type: "one" }, { id: 2, status: "prepared", doc_type: "two" }, { id: 3, status: "queued", doc_type: "three" }];
+  const rows = [{ id: 1, status: "prepared", doc_type: "one", origin: { layout: { auto_split: true } } }, { id: 2, status: "prepared", doc_type: "two" }, { id: 3, status: "queued", doc_type: "three" }];
   context.currentStage = "prepared"; context.currentId = null;
+  context.EMPTY_LIST_TEXT = "此階段目前沒有憑證。";
   let activeJobForList = { id: "job", status: "awaiting_review", review_ids: [2] };
   context.activeImportJob = () => activeJobForList;
   context.currentReviewIds = (job) => job?.review_ids || [];
-  context.queueViewModel = (items) => ({ vouchers: items, emptyText: "empty" });
   context.STAGE_STATUS = { prepared: "prepared", queued: "queued" };
   context.STAGE_TITLE = { prepared: "ready", queued: "queue" };
   context.STATUS_CLASS = {}; context.STATUS_LABEL = {}; context.DOC_TYPES = {};
@@ -177,7 +179,10 @@ async function listScenario() {
   context.currentStage = "prepared"; nodes.confirmationFilter.value = "prepared";
   await context.testLoadList();
   const emptyTextWhenNoReview = nodes.listEmpty.textContent;
-  return { preparedIds, preparedHasCheckboxes, queuedIds, queuedCheckedIds, emptyTextWhenNoReview };
+  activeJobForList = { id: "job", status: "awaiting_review", review_ids: [], pages: [{ status: "completed", phase: "skipped" }] };
+  await context.testLoadList();
+  const emptyTextWhenSkipped = nodes.listEmpty.textContent;
+  return { preparedIds, preparedHasCheckboxes, queuedIds, queuedCheckedIds, emptyTextWhenNoReview, emptyTextWhenSkipped };
 }
 (async () => {
   await context.testImport.restoreImportJobs();

@@ -101,17 +101,20 @@ def _period_of(date_str: str) -> str:
 
 
 def save_voucher(voucher: Voucher, company: str = "",
-                 status: ReviewStatus = ReviewStatus.pending, *, source_parent_id=None, session=None) -> VoucherRecord:
+                 status: ReviewStatus = ReviewStatus.pending, *, source_parent_id=None, session=None,
+                 _record=None) -> VoucherRecord:
     """辨識完成後落地紀錄。ai_json 與 current_json 初始相同。
     status 預設 pending（已辨識待確認）；匯入外觀確認階段傳 prepared（僅判類型/轉正）。"""
+    if source_parent_id is not None or voucher.origin.get("record_role", "voucher") != "voucher":
+        raise ValueError("僅能保存實際憑證，不再建立來源頁或父來源關聯")
     payload = mapping.strip_accounting(voucher.model_dump())
     raw_entries = [{k: v for k, v in row.items() if k not in sources.ENTRY_META} for row in payload.get("entries", [])]
     payload["entries"] = raw_entries
     blob = json.dumps(mapping.strip_accounting(payload), ensure_ascii=False)
     rec = VoucherRecord(
         source_file=voucher.source_file,
-        record_role=voucher.origin.get("record_role", "voucher"),
-        source_parent_id=source_parent_id,
+        record_role="voucher",
+        source_parent_id=None,
         company=company,
         period=_period_of(voucher.date),
         status=status,
@@ -121,6 +124,12 @@ def save_voucher(voucher: Voucher, company: str = "",
         ocr_provider=voucher.ocr_provider,
         structure_model=voucher.structure_model,
     )
+    if _record is not None:
+        for key in ("source_file", "record_role", "source_parent_id", "company", "period", "status",
+                    "confidence", "ai_json", "current_json", "ocr_provider", "structure_model"):
+            setattr(_record, key, getattr(rec, key))
+        rec = _record
+        rec.updated_at = datetime.now()
     with (get_session() if session is None else nullcontext(session)) as s:
         registered = companies.resolve(s, company)
         rec.company_id = registered.id if registered else None
@@ -206,27 +215,12 @@ def recognition_account_warnings(rec, data):
 
 
 def save_prepared_vouchers(vouchers, company=""):
-    parents, records = {}, []
-    for voucher in vouchers:
-        token = voucher.origin.get("source_token")
-        rec = save_voucher(voucher, company, ReviewStatus.prepared, source_parent_id=parents.get(token))
-        if rec.record_role == "source_page":
-            parents[token] = rec.id
-        records.append(rec)
-    return records
+    return [save_voucher(voucher, company, ReviewStatus.prepared) for voucher in vouchers]
 
 
 def save_prepared_page(vouchers, company, session):
     """Flush the entire page into the caller's transaction, without committing."""
-    parents, records = {}, []
-    for voucher in vouchers:
-        token = voucher.origin.get("source_token")
-        rec = save_voucher(voucher, company, ReviewStatus.prepared,
-                           source_parent_id=parents.get(token), session=session)
-        if rec.record_role == "source_page":
-            parents[token] = rec.id
-        records.append(rec)
-    return records
+    return [save_voucher(voucher, company, ReviewStatus.prepared, session=session) for voucher in vouchers]
 
 
 class RecognitionProtected(ValueError):
@@ -832,17 +826,13 @@ def split_voucher(rec_id: int, box, *, expected_updated_at=None, actor=None):
     })
     v.source_image = str(tmp)                       # 讓 save_voucher 複製此裁切影像
     v.source_file = f"{rec.source_file}（分割）"
-    if rec.record_role == "source_page":
-        from app.core import page_layout
-        v.origin = page_layout.origin(p, {"box": [round(x1*1000), round(y1*1000), round(x2*1000), round(y2*1000)], "rotate": 0}, json.loads(rec.current_json).get("origin", {}).get("page_no", 1))
     v.origin["source_token"] = source_token
     # Keep the upload group so "delete whole upload" also reaches manually split documents.
     parent_origin = json.loads(rec.current_json).get("origin") or {}
     for key in ("source_group_id", "upload_file"):
         if parent_origin.get(key):
             v.origin[key] = parent_origin[key]
-    new_rec = save_voucher(v, company=rec.company, status=ReviewStatus.prepared,
-                           source_parent_id=rec.id if rec.record_role == "source_page" else rec.source_parent_id)
+    new_rec = save_voucher(v, company=rec.company, status=ReviewStatus.prepared)
     # 新憑證已建立，才把該區從原圖抹掉（先建後抹：中途失敗不會兩邊都沒有）
     if new_rec and rec.record_role != "source_page" and _mask_region(p, (L, T, R, B)):
         _clear_boxes(rec_id)
@@ -901,7 +891,7 @@ def _split_manual(rec_id, box, *, expected_updated_at=None, actor=None):
         text_evidence.inherit(source,target,region,folder=original_folder,target_folder=folder)
         voucher = Voucher.model_validate(child_data)
         voucher.source_image, voucher.source_file = str(target), rec.source_file + "（分割）"
-        child = save_voucher(voucher,rec.company,ReviewStatus.prepared,source_parent_id=rec.source_parent_id,session=session)
+        child = save_voucher(voucher,rec.company,ReviewStatus.prepared,session=session)
         if not _mask_region(source,(l,t,r,b)):
             raise RecognitionProtected("無法更新工作副本，分割未保存")
         _clear_boxes(rec_id,session=session,actor=actor)
@@ -914,13 +904,36 @@ def _split_manual(rec_id, box, *, expected_updated_at=None, actor=None):
             page.voucher_ids_json = json.dumps(ids)
             session.add(page)
         if is_blank_image(rec_id):
-            data = json.loads(rec.current_json)
-            rec.record_role = "source_page"
-            data["origin"].update(record_role="source_page", layout={"auto_split":True,"content_kind":"document","regions":[]})
-            rec.current_json = json.dumps(data,ensure_ascii=False)
-            session.add(rec)
+            if page:
+                page.voucher_ids_json = json.dumps([ident for ident in json.loads(page.voucher_ids_json) if ident != rec_id])
+                page.preview_path = str(config.UPLOAD_DIR / child.image_path)
+                session.add(page)
+            _remove_empty_working_record(session, rec)
         session.commit(); session.refresh(child)
-        return child
+    _cleanup_prepared_images(source)
+    return child
+
+
+def _cleanup_prepared_images(path):
+    from app.db.source_page_retirement import cleanup_images
+    import logging
+    try:
+        with get_session() as session:
+            engine = session.get_bind()
+        report = cleanup_images(engine, config.UPLOAD_DIR,
+            [path, *(_sidecar(path, kind) for kind in ("baseline", "deskew", "orig"))])
+        if report["cleanup_failed"]:
+            logging.getLogger("pdf_scan.review").warning("準備影像清理未完成：%s", report["cleanup_failed"])
+    except Exception:
+        logging.getLogger("pdf_scan.review").exception("準備影像清理失敗，憑證已保存")
+
+
+def _remove_empty_working_record(session, rec):
+    """Remove an exhausted preparation remainder without cascading to documents."""
+    for model in (ItemAccountMapping, MappingHistory):
+        session.execute(update(model).where(model.source_voucher_id == rec.id).values(source_voucher_id=None))
+    session.delete(rec)
+    session.flush()
 
 
 def appearance_batch(items, operation, *, actor):
@@ -1020,35 +1033,46 @@ def re_recognize(rec_id: int, *, actor=None) -> Optional[VoucherRecord]:
 
 
 def _route_unconfirmed_page(rec):
-    """Convert an unconfirmed legacy page while leaving its source pixels intact."""
+    """Prepare legacy documents in place, without manufacturing a source record."""
     from app.core import page_layout, invocation_trace
     current = json.loads(rec.current_json)
     manual = any(r.get("source") == "manual" and r.get("selected") for records in current.get("field_evidence", {}).values() for r in records)
     if rec.source_parent_id or manual or rec.status == ReviewStatus.confirmed:
         return None, None
+    if current.get("origin", {}).get("document_index") is not None:
+        return None, current.get("doc_type_key") or None
     source = config.UPLOAD_DIR / rec.image_path
     layout = page_layout.detect(str(source))
     if (layout["content_kind"] == "document" and layout["auto_split"] and len(layout["regions"]) == 1
             and layout["regions"][0]["rotate"] == 0 and layout["regions"][0]["box"] == [0,0,1000,1000]):
         return None, layout["regions"][0]["type"]
-    origin = {**page_layout.origin(source, {"box":[0,0,1000,1000]}, current.get("origin", {}).get("page_no", 1)), "record_role":"source_page", "layout": layout}
-    # Recheck human state in the transaction after the model call.
-    with get_session() as session:
-        parent = session.get(VoucherRecord, rec.id)
-        if parent.current_json != rec.current_json or parent.status != rec.status:
-            raise RecognitionProtected("辨識期間資料已被修改，請重新載入")
-        parent.record_role = "source_page"
-        parent.current_json = json.dumps({**current, "origin": origin, "quality":{"version":1,"state":"needs_review","content_kind":layout["content_kind"],"issues":[{"code":"manual_split","message":"來源頁保留，請確認子單據"}]}}, ensure_ascii=False)
-        session.add(parent); session.commit(); session.refresh(parent)
+    origin = {**current.get("origin", {}), **page_layout.origin(source, {"box":[0,0,1000,1000]}, current.get("origin", {}).get("page_no", 1)), "layout": layout}
+    documents = []
     if layout["auto_split"] and layout["content_kind"] == "document":
         for index, region in enumerate(layout["regions"]):
             target = config.UPLOAD_DIR / "_pages" / f"source_{rec.id}" / f"document_{index}.png"
             native = page_layout.crop(source, region, target)
             voucher = Voucher.model_validate({"doc_type_key": region["type"], "doc_type": page_layout.doc_types.get(region["type"])["label"],
-                "origin": {**page_layout.origin(source, region, origin["page_no"]), "document_index":index, "layout_fallback":layout.get("fallback_reason")},
+                "origin": {**origin, **page_layout.origin(source, region, origin["page_no"]), "document_index":index, "layout_fallback":layout.get("fallback_reason")},
                 "quality":{"version":1,"state":"unassessed","content_kind":layout["content_kind"],"issues":[]}})
             voucher.source_image, voucher.source_file = native, rec.source_file
-            save_voucher(voucher, rec.company, ReviewStatus.prepared, source_parent_id=rec.id)
+            documents.append(voucher)
+    # Recheck human state in the transaction after the model call.
+    with get_session() as session:
+        parent = session.get(VoucherRecord, rec.id)
+        if parent.current_json != rec.current_json or parent.status != rec.status:
+            raise RecognitionProtected("辨識期間資料已被修改，請重新載入")
+        if documents:
+            for index, voucher in enumerate(documents):
+                save_voucher(voucher, rec.company, ReviewStatus.prepared, session=session,
+                             _record=parent if index == 0 else None)
+        else:
+            from app.core import preparation
+            origin["preparation"] = preparation.fresh()
+            parent.status = ReviewStatus.prepared
+            parent.current_json = json.dumps({**current, "origin": origin, "quality":{"version":1,"state":"needs_review","content_kind":layout["content_kind"],"issues":layout["issues"]}}, ensure_ascii=False)
+            session.add(parent)
+        session.commit()
     return get_voucher(rec.id), None
 
 
@@ -1372,6 +1396,12 @@ def _delete_targets(session, rec, scope: str) -> dict:
         if group:
             for other in session.exec(select(VoucherRecord).where(VoucherRecord.current_json.contains(group))).all():
                 if _origin_of(other).get("source_group_id") == group:
+                    found[other.id] = other
+        elif _origin_of(rec).get("import_page_id"):
+            page_id = _origin_of(rec)["import_page_id"]
+            for other in session.exec(select(VoucherRecord).where(VoucherRecord.current_json.contains(page_id))).all():
+                if (_origin_of(other).get("import_page_id") == page_id
+                        and _origin_of(other).get("import_job_id") == _origin_of(rec).get("import_job_id")):
                     found[other.id] = other
     for child in _child_records(session, [r.id for r in found.values() if r.record_role == "source_page"]):
         found[child.id] = child

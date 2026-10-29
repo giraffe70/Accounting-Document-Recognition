@@ -72,13 +72,12 @@ class SequentialImportTests(unittest.TestCase):
 
     def _prepared_vouchers(self, source_image, token, name, page_no):
         origin = {"source_token": token, "preparation": preparation.fresh(pdf=False)}
-        parent = Voucher(origin={**origin, "record_role": "source_page"})
         first = Voucher(doc_type_key="invoice", origin=dict(origin))
         second = Voucher(doc_type_key="invoice", origin=dict(origin))
-        for voucher in (parent, first, second):
+        for voucher in (first, second):
             voucher.source_image = str(source_image)
             voucher.source_file = f"{name} p{page_no}"
-        return [parent, first, second]
+        return pipeline.PreparedPage([first, second], {"content_kind": "document", "auto_split": True})
 
     def test_default_is_single_file_sequential_and_owner_lock_is_scoped(self):
         first_path = self._source("owner-one.pdf")
@@ -229,7 +228,7 @@ class SequentialImportTests(unittest.TestCase):
         self.assertEqual([page["status"] for page in view["pages"]], ["preview_ready", "queued"])
         self.assertEqual(prepared_pages, [1])
 
-    def test_automatic_uncertain_source_page_gets_working_copy_and_pauses(self):
+    def test_automatic_uncertain_layout_gets_one_working_copy_and_pauses(self):
         pdf = self._source("uncertain-layout.pdf")
         job = self._create(pdf.name, mode="automatic")
         source_image = self.root / "uncertain-render.png"
@@ -239,15 +238,16 @@ class SequentialImportTests(unittest.TestCase):
         draw.rectangle((24, 4, 37, 25), fill="black")
         image.save(source_image)
         original_bytes = source_image.read_bytes()
-        source_only = Voucher(origin={
-            "source_token": "uncertain-layout-token", "record_role": "source_page",
+        uncertain = Voucher(origin={
+            "source_token": "uncertain-layout-token",
             "layout": {"content_kind": "unknown", "auto_split": False, "regions": []},
         })
-        source_only.source_image = str(source_image)
+        uncertain.source_image = str(source_image)
 
         with patch.object(import_jobs.pipeline, "page_count", return_value=2), \
              patch.object(import_jobs.pipeline, "render_page", return_value=source_image), \
-             patch.object(import_jobs.pipeline, "prepare_page", return_value=[source_only]):
+             patch.object(import_jobs.pipeline, "prepare_page", return_value=pipeline.PreparedPage(
+                 [uncertain], {"content_kind": "unknown", "auto_split": False, "regions": []})):
             self.assertTrue(import_jobs.run_once())
 
         view = import_jobs.get_job(job["id"], 1)
@@ -255,19 +255,15 @@ class SequentialImportTests(unittest.TestCase):
         self.assertEqual([page["status"] for page in view["pages"]], ["preview_ready", "queued"])
         self.assertEqual(len(view["pages"][0]["voucher_ids"]), 1)
         page = next(row for row in self._rows(ImportPage) if row.page_no == 1)
-        source_record = review.get_voucher(page.source_page_id)
         working_copy = review.get_voucher(view["pages"][0]["voucher_ids"][0])
-        source_data = json.loads(source_record.current_json)
         working_data = json.loads(working_copy.current_json)
-        self.assertEqual(source_record.record_role, "source_page")
+        self.assertIsNone(page.source_page_id)
         self.assertEqual(working_copy.record_role, "voucher")
-        self.assertEqual(source_data["origin"]["layout"]["content_kind"], "unknown")
+        self.assertEqual(working_data["origin"]["layout"]["content_kind"], "unknown")
         self.assertEqual(working_data["origin"]["import_job_id"], job["id"])
         self.assertEqual(working_data["origin"]["import_page_id"], page.id)
-        self.assertNotIn("record_role", working_data["origin"])
-        self.assertNotIn("layout", working_data["origin"])
-        self.assertTrue(preparation.manual(working_data))
-        self.assertFalse(preparation.state(working_data)["direction_confirmed"])
+        self.assertEqual(working_copy.status, ReviewStatus.prepared)
+        self.assertFalse(preparation.state(working_data).get("direction_confirmed", False))
         self.assertEqual(source_image.read_bytes(), original_bytes)
 
     def test_automatic_working_copy_split_is_model_free_and_tracks_every_child(self):
@@ -279,17 +275,13 @@ class SequentialImportTests(unittest.TestCase):
         draw.rectangle((3, 4, 16, 25), fill="black")
         draw.rectangle((24, 4, 37, 25), fill="black")
         image.save(source_image)
-        parent = Voucher(origin={
-            "source_token": "automatic-split-token", "record_role": "source_page",
-            "layout": {"content_kind": "unknown", "auto_split": False, "regions": []},
-        })
         original_working = Voucher(doc_type_key="invoice", origin={"source_token": "automatic-split-token"})
-        for voucher in (parent, original_working):
-            voucher.source_image = str(source_image)
+        original_working.source_image = str(source_image)
 
         with patch.object(import_jobs.pipeline, "page_count", return_value=2), \
              patch.object(import_jobs.pipeline, "render_page", return_value=source_image), \
-             patch.object(import_jobs.pipeline, "prepare_page", return_value=[parent, original_working]):
+             patch.object(import_jobs.pipeline, "prepare_page", return_value=pipeline.PreparedPage(
+                 [original_working], {"content_kind": "unknown", "auto_split": False, "regions": []})):
             self.assertTrue(import_jobs.run_once())
         first = import_jobs.get_job(job["id"], 1)
         self.assertEqual(first["status"], "awaiting_review")
@@ -368,15 +360,13 @@ class SequentialImportTests(unittest.TestCase):
             "import_page_id": second_page.id,
             "preparation": preparation.fresh(pdf=False),
         }
-        source_record = Voucher(origin={**second_origin, "record_role": "source_page"})
         second_working_copy = Voucher(doc_type_key="invoice", origin=dict(second_origin))
-        for voucher in (source_record, second_working_copy):
-            voucher.source_image = str(source_image)
+        second_working_copy.source_image = str(source_image)
         with Session(self.engine) as session:
-            records = review.save_prepared_page([source_record, second_working_copy], "", session)
+            records = review.save_prepared_page([second_working_copy], "", session)
             session.commit()
-            noncurrent_id = records[1].id
-            noncurrent_updated_at = records[1].updated_at.isoformat()
+            noncurrent_id = records[0].id
+            noncurrent_updated_at = records[0].updated_at.isoformat()
 
         with self.assertRaises(import_jobs.JobConflict):
             review.confirm_appearance(
@@ -484,7 +474,7 @@ class SequentialImportTests(unittest.TestCase):
                 self.assertEqual(list(preview["previews"]), ["page"])
                 info = preview["previews"]["page"]
                 self.assertEqual((info["page_no"], info["voucher_count"], info["source_page_count"]),
-                                 (page_no, 1, 1))
+                                 (page_no, 1, 0))
                 self.assertEqual(preview["can_delete"], {"page": True})
                 images = [review.config.UPLOAD_DIR / review.get_voucher(ident).image_path for ident in info["ids"]]
                 token = json.loads(rec.current_json)["origin"]["source_token"]
@@ -613,18 +603,17 @@ class SequentialImportTests(unittest.TestCase):
             future = next(page for page in self._rows(ImportPage) if page.page_no == 2)
             origin = {"source_token": future.source_token, "import_job_id": job_id,
                       "import_page_id": future.id, "preparation": preparation.fresh()}
-            vouchers = [Voucher(origin={**origin, "record_role": "source_page"}), Voucher(origin=origin)]
-            for voucher in vouchers:
-                voucher.source_image = str(review.config.UPLOAD_DIR / current.image_path)
+            future_voucher = Voucher(origin=origin)
+            future_voucher.source_image = str(review.config.UPLOAD_DIR / current.image_path)
             with Session(self.engine) as session:
-                records = review.save_prepared_page(vouchers, "", session)
+                records = review.save_prepared_page([future_voucher], "", session)
                 page = session.get(ImportPage, future.id)
                 page.status, page.phase = "preview_ready", "awaiting_review"
-                page.source_page_id = records[0].id
-                page.voucher_ids_json = json.dumps([records[1].id])
+                page.source_page_id = None
+                page.voucher_ids_json = json.dumps([records[0].id])
                 session.add(page)
                 session.commit()
-                future_id = records[1].id
+                future_id = records[0].id
             future_rec = review.get_voucher(future_id)
             preview = review.delete_previews(future_id, actor_id=1)
             self.assertFalse(preview["can_delete"]["page"])
@@ -663,15 +652,15 @@ class SequentialImportTests(unittest.TestCase):
             rec = self._current_delete_record(job_id)
             sibling_data = Voucher.model_validate(json.loads(rec.current_json))
             sibling_data.source_image = str(review.config.UPLOAD_DIR / rec.image_path)
-            sibling = review.save_voucher(sibling_data, status=ReviewStatus.confirmed,
-                                          source_parent_id=rec.source_parent_id)
+            sibling = review.save_voucher(sibling_data, status=ReviewStatus.confirmed)
             preview = review.delete_previews(rec.id, actor_id=1)
             self.assertEqual(preview["previews"]["page"]["voucher_count"], 2)
+            self.assertEqual(preview["previews"]["page"]["source_page_count"], 0)
             self.assertFalse(preview["can_delete"]["page"])
             with self.assertRaises(review.DeleteForbidden):
                 self._delete_page(rec)
             result = self._delete_page(rec, is_admin=True)
-            self.assertEqual(result["deleted_ids"], sorted([rec.id, rec.source_parent_id, sibling.id]))
+            self.assertEqual(result["deleted_ids"], sorted([rec.id, sibling.id]))
             self.assertEqual(import_jobs.get_job(job_id, 1)["status"], "completed")
 
 

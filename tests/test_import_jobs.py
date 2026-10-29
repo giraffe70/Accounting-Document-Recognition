@@ -64,11 +64,13 @@ class ImportJobsTests(unittest.TestCase):
 
     @staticmethod
     def _vouchers(token, file_name, page_no):
-        return [
-            Voucher(origin={"source_token": token, "record_role": "source_page"}),
+        documents = [
             Voucher(doc_type_key="invoice", source_file=f"{file_name} p{page_no}",
-                    origin={"source_token": token, "record_role": "voucher"}),
+                    origin={"source_token": token}),
+            Voucher(doc_type_key="invoice", source_file=f"{file_name} p{page_no}",
+                    origin={"source_token": token}),
         ]
+        return import_jobs.pipeline.PreparedPage(documents, {})
 
     def test_owner_isolation_and_preview_is_bound_to_job_and_owner(self):
         one = self._job("one.pdf", owner=1)
@@ -92,6 +94,24 @@ class ImportJobsTests(unittest.TestCase):
             import_jobs.preview(one["id"], page_id, 2)
         with self.assertRaises(import_jobs.JobNotFound):
             import_jobs.preview(two["id"], page_id, 2)
+
+    def test_skipped_page_finishes_without_a_voucher_or_source_record(self):
+        job = self._job()
+        layout = {"auto_split": True, "content_kind": "blank", "regions": [], "issues": []}
+        with patch.object(import_jobs.pipeline, "page_count", return_value=1), \
+             patch.object(import_jobs.pipeline, "render_page", return_value=str(self.root / "preview.png")), \
+             patch.object(import_jobs.pipeline, "prepare_page", return_value=import_jobs.pipeline.PreparedPage([], layout)):
+            self.assertTrue(import_jobs.run_once())
+        view = import_jobs.get_job(job["id"], 1)
+        self.assertEqual(view["status"], "completed")
+        self.assertEqual(view["review_ids"], [])
+        self.assertEqual(self._rows(VoucherRecord), [])
+        page = self._rows(ImportPage)[0]
+        self.assertEqual((page.status, page.phase), ("completed", "skipped"))
+        self.assertIsNone(page.source_page_id)
+        self.assertEqual(json.loads(page.voucher_ids_json), [])
+        self.assertEqual(page.preview_path, "")
+        self.assertEqual(json.loads(page.preparation_json)["layout"], layout)
 
     def test_pages_commit_independently_and_retry_does_not_duplicate_success(self):
         job = self._job()
@@ -121,10 +141,10 @@ class ImportJobsTests(unittest.TestCase):
             self.assertEqual([page["status"] for page in retried["pages"]], ["completed", "completed"])
             self.assertEqual(attempts, {1: 1, 2: 2})
             self.assertEqual(len(self._rows(VoucherRecord)), 4)
-            sources = [row for row in self._rows(VoucherRecord) if row.record_role == "source_page"]
-            children = [row for row in self._rows(VoucherRecord) if row.record_role != "source_page"]
-            self.assertTrue(all(child.source_parent_id == sources[0].id for child in children if "p1" in child.source_file))
-            self.assertEqual(len({row.source_file for row in children}), 2)
+            saved = self._rows(VoucherRecord)
+            self.assertEqual(len(saved), 4)
+            self.assertTrue(all(row.record_role == "voucher" and row.source_parent_id is None for row in saved))
+            self.assertEqual(len({row.source_file for row in saved}), 2)
 
     def test_recovery_and_cancel_happen_at_page_boundaries(self):
         job = self._job()
@@ -208,9 +228,9 @@ class ImportJobsTests(unittest.TestCase):
 
         def prepare(_source, _path, page_no, *, token, group_id):
             import_jobs.action(job["id"], 1, "cancel")
-            vouchers = self._vouchers(token, "last-page.pdf", page_no)
-            vouchers[0].source_image = str(source_image)
-            return vouchers
+            prepared = self._vouchers(token, "last-page.pdf", page_no)
+            prepared.documents[0].source_image = str(source_image)
+            return prepared
 
         with patch.object(import_jobs.pipeline, "page_count", return_value=1), \
              patch.object(import_jobs.pipeline, "render_page", return_value=source_image), \

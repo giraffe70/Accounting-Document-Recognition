@@ -57,7 +57,7 @@ class PageRoleTests(unittest.TestCase):
                 self.assertEqual(data["documents"],[])
                 self.assertEqual(data["voucher"],{})
 
-    def test_formal_non_voucher_page_creates_only_immutable_source(self):
+    def test_formal_non_voucher_page_creates_no_voucher(self):
         with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1]/"app/data/test-tmp-plan") as temp:
             image = Path(temp)/"application.png"
             Image.new("RGB",(600,800),"white").save(image)
@@ -65,9 +65,7 @@ class PageRoleTests(unittest.TestCase):
             layout = {"type":"other", "content_kind":"non_voucher","auto_split":True,"regions":[],"issues":[]}
             with patch.object(config,"UPLOAD_DIR",Path(temp)/"uploads"), patch.object(page_layout,"detect",return_value=layout):
                 vouchers = pipeline.prepare_pages(str(image))
-            self.assertEqual(len(vouchers),1)
-            self.assertEqual(vouchers[0].origin["record_role"],"source_page")
-            self.assertIsNone(vouchers[0].total_amount)
+            self.assertEqual(vouchers, [])
             self.assertEqual(image.read_bytes(),original)
 
     def test_prepared_pages_share_group_id_and_record_only_managed_uploads(self):
@@ -84,7 +82,7 @@ class PageRoleTests(unittest.TestCase):
                 kept = pipeline.prepare_pages(str(managed))
                 outside = pipeline.prepare_pages(str(external))
             groups = {v.origin["source_group_id"] for v in kept}
-            self.assertEqual(len(kept),2)
+            self.assertEqual(len(kept),1)
             self.assertEqual(len(groups),1)
             self.assertTrue(all(v.origin["upload_file"] == managed.name for v in kept))
             self.assertEqual(len({v.origin["source_group_id"] for v in outside}),1)

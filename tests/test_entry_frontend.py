@@ -19,10 +19,11 @@ class EntryFrontendWorkflowTests(unittest.TestCase):
 
     def test_saved_items_keep_the_editor_visible_even_for_other_types(self):
         self.assertRegex(self.js, re.compile(
-            r"const hasItems\s*=\s*!sourcePage",
+            r"const hasItems\s*=\s*true",
             re.S,
         ))
         self.assertIn('$("itemsSection").classList.toggle("hidden", !hasItems)', self.js)
+        self.assertIn('renderItems(v.items || [])', self.js)
 
     def test_confirmation_has_full_width_recognition_details_and_six_columns(self):
         split = self.html.index('id="revSplit"')

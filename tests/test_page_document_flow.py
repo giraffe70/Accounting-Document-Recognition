@@ -32,7 +32,7 @@ def _region(type_key, box):
 
 
 class PreparedVoucherFlowTests(unittest.TestCase):
-    def test_source_parent_children_listing_confirmed_recognition_and_manual_history(self):
+    def test_prepared_vouchers_listing_confirmed_recognition_and_manual_history(self):
         with _temporary_directory() as temp:
             root = Path(temp)
             engine = create_engine(f"sqlite:///{root / 'review.db'}", connect_args={"check_same_thread": False})
@@ -41,32 +41,25 @@ class PreparedVoucherFlowTests(unittest.TestCase):
             Image.new("RGB", (120, 80), "white").save(source)
             before_hash = hashlib.sha256(source.read_bytes()).hexdigest()
 
-            def voucher(role="voucher", amount=None, token="source-token"):
+            def voucher(amount=None, token="source-token"):
                 data = {"doc_type_key": "receipt", "doc_type": "收據／雜項開銷",
                         "fields": {"vendor": "合成店家", "total_amount": amount},
                         "date": "2026-10-01", "origin": {"source_token": token}, "source_file": "scan.pdf"}
-                if role == "source_page":
-                    data["origin"].update(record_role="source_page", page_no=1)
                 result = Voucher.model_validate(data)
                 result.source_image = str(source)
                 return result
 
-            prepared = [voucher("source_page"), voucher(amount=100), voucher(amount=200), voucher(amount=300)]
+            prepared = [voucher(amount=100), voucher(amount=200), voucher(amount=300)]
             with patch.object(review, "get_session", side_effect=lambda: Session(engine)), \
                  patch.object(config, "UPLOAD_DIR", root / "uploads"):
                 records = review.save_prepared_vouchers(prepared, company="Synthetic Co")
-                self.assertEqual(len(records), 4)
-                self.assertEqual(records[0].record_role, "source_page")
-                self.assertTrue(all(r.source_parent_id == records[0].id for r in records[1:]))
+                self.assertEqual(len(records), 3)
+                self.assertTrue(all(r.record_role == "voucher" for r in records))
+                self.assertTrue(all(r.source_parent_id is None for r in records))
                 self.assertEqual([r.record_role for r in review.list_vouchers()], ["voucher"] * 3)
-                self.assertEqual(len(review.list_vouchers(include_sources=True)), 4)
+                self.assertEqual(len(review.list_vouchers(include_sources=True)), 3)
                 self.assertIn("共 3 張", reports._summary("2026-10", "Synthetic Co"))
                 self.assertEqual(hashlib.sha256(source.read_bytes()).hexdigest(), before_hash)
-
-                with self.assertRaises(review.RecognitionProtected):
-                    review.update_current(records[0].id, {"fields": {"total_amount": 123}})
-                with self.assertRaises(review.RecognitionProtected):
-                    review.crop_image(records[0].id, [0, 0, 0.5, 0.5])
 
                 confirmed = review.save_voucher(voucher(amount=400), status=ReviewStatus.confirmed)
                 with patch("app.core.pipeline.canonicalize_voucher", side_effect=lambda value: value), \
@@ -74,13 +67,17 @@ class PreparedVoucherFlowTests(unittest.TestCase):
                     reprocessed = review._save_recognition(confirmed.id, voucher(amount=999))
                 self.assertEqual(reprocessed.status, ReviewStatus.pending)
 
-                original_ai = json.loads(records[1].ai_json)
+                edited_record = next(
+                    record for record in records
+                    if json.loads(record.current_json)["fields"].get("total_amount") == 100
+                )
+                original_ai = json.loads(edited_record.ai_json)
                 manual_edit = {"fields": {"total_amount": 200},
                                "items": [{"description": "人工品項", "amount": 200}],
                                "entries": [{"description": "人工分錄", "amount": 200}]}
                 with patch("app.core.pipeline.canonicalize_voucher", side_effect=lambda value: value):
-                    review.update_current(records[1].id, manual_edit)
-                current_record = review.get_voucher(records[1].id)
+                    review.update_current(edited_record.id, manual_edit)
+                current_record = review.get_voucher(edited_record.id)
                 current = json.loads(current_record.current_json)
                 self.assertEqual(current["entries"], [])
                 self.assertEqual(current["field_evidence"]["items"][-1]["source"], "manual")
@@ -89,8 +86,8 @@ class PreparedVoucherFlowTests(unittest.TestCase):
                 model_result = voucher(amount=900)
                 with patch("app.core.pipeline.canonicalize_voucher", side_effect=lambda value: value), \
                      patch("app.core.model_invocation.source_versions", return_value={"version": "synthetic"}):
-                    review._save_recognition(records[1].id, model_result)
-                updated = review.get_voucher(records[1].id)
+                    review._save_recognition(edited_record.id, model_result)
+                updated = review.get_voucher(edited_record.id)
                 new_current = json.loads(updated.current_json)
                 history = json.loads(updated.recognition_history)
                 self.assertEqual(json.loads(updated.ai_json), original_ai)

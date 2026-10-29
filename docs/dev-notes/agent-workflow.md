@@ -27,6 +27,12 @@ OCR 計時與快取驗收範圍：快取以每頁結果獨立保存，不跨模�
 
 前端離線檢查可執行 `node --check app/static/js/validation.js` 與 `python -m unittest tests.test_frontend_form`；驗證 API／匯出契約使用 `scripts\verify.bat -Scope validation`。這些檢查不啟動真實模型，也不替代獨立人工證據核對。
 
+## 單一憑證紀錄部署
+
+正式憑證紀錄一筆代表一張可編輯單據：`record_role` 固定為 `voucher`，`source_parent_id` 為 `null`。同頁含多張單據時建立多筆憑證；版面無法確定時仍建立一筆可編輯憑證供人工處理。匯入工作 `review_ids` 與各頁 `voucher_ids` 必須是實際憑證 ID。相容回應欄位 `source_page_id`、`source_page_ids`、`source_page_count` 保留為 `null`、`[]`、`0`，不代表另一種憑證紀錄。
+
+部署此契約更新前，先停止服務並確認 SQLite 寫入已結束。以 `pdfscan312` 執行 `python -B -X utf8 scripts/retire_source_pages.py` 唯讀核對清單，再加 `--apply` 執行專用清理；程式先建立並驗證 SQLite 一致性備份，再以交易清理舊版 `source_page` 紀錄。保留所有真實 `voucher` 的 ID、JSON、狀態及確認資料，只解除父來源關聯；不得以一般刪除功能清理來源頁，以免連帶刪除單據。匯入頁依自身識別與 `source_token` 核對真憑證，不以舊來源編號猜測；無單據的待處理頁標記為已捨棄。只清除無引用的來源頁專用影像，保留真憑證影像、復原點、PDF、快取及外部掃描來源。核對清理後筆數、外鍵與檔案清單，再啟動新版服務並以 `Ctrl+F5` 強制更新前端。
+
 辨識畫面中的 items 明細、科目記憶規則及辨識報告列印仍保留。紙面傳票的 `entries`、合計與 evidence 仍是辨識資料。AI 分錄建議、分錄草稿／確認、日記帳及會計傳票格式已退役；不要再依賴舊手冊中分錄狀態與入帳確認的說明。
 
 ## 會計分錄功能退役部署

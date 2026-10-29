@@ -67,6 +67,16 @@ class ConfirmationServiceTests(unittest.TestCase):
     def save(self, status=ReviewStatus.pending, role="voucher"):
         return review.save_voucher(_voucher(role=role), status=status)
 
+    def legacy_source_page(self):
+        blob = _voucher(role="source_page").model_dump_json()
+        with Session(self.engine) as session:
+            record = VoucherRecord(record_role="source_page", status=ReviewStatus.prepared,
+                                   ai_json=blob, current_json=blob)
+            session.add(record)
+            session.commit()
+            session.refresh(record)
+            return record
+
     def test_confirm_checks_version_status_and_source_page(self):
         record = self.save()
         expected = record.updated_at.isoformat()
@@ -77,7 +87,7 @@ class ConfirmationServiceTests(unittest.TestCase):
         stale = self.save()
         with self.assertRaises(review.RecognitionProtected):
             review.confirm_record(stale.id, "2000-01-01T00:00:00")
-        source_page = self.save(role="source_page")
+        source_page = self.legacy_source_page()
         with self.assertRaises(review.RecognitionProtected):
             review.confirm_record(source_page.id, source_page.updated_at.isoformat())
         confirmed_at = confirmed.confirmed_at
@@ -88,6 +98,12 @@ class ConfirmationServiceTests(unittest.TestCase):
             with self.assertRaises(review.RecognitionProtected):
                 review.confirm_record(draft.id, draft.updated_at.isoformat())
         self.assertIsNone(review.confirm_record(999999, "missing"))
+
+    def test_save_voucher_rejects_source_roles_and_parent_links(self):
+        with self.assertRaises(ValueError):
+            review.save_voucher(_voucher(role="source_page"))
+        with self.assertRaises(ValueError):
+            review.save_voucher(_voucher(), source_parent_id=12345)
 
     def test_list_vouchers_accepts_one_or_multiple_review_statuses(self):
         self.save(status=ReviewStatus.pending)
@@ -415,14 +431,19 @@ class VoucherDeleteTests(unittest.TestCase):
         return self.uuid.uuid4().hex, name, token
 
     def record(self, upload=None, *, role="voucher", status=ReviewStatus.pending, parent=None, auto_split=True):
-        origin = {"record_role": role, "layout": {"auto_split": auto_split}}
+        origin = {"layout": {"auto_split": auto_split}}
         if upload:
             group, name, token = upload
-            origin.update(source_group_id=group, upload_file=name, source_token=token)
+            origin.update(source_group_id=group, upload_file=name, source_token=token,
+                          import_page_id=f"page-{group}")
+        elif parent is not None:
+            origin.update(json.loads(parent.current_json).get("origin", {}))
+        else:
+            origin["import_page_id"] = f"page-{self.uuid.uuid4().hex}"
         voucher = Voucher.model_validate({"doc_type_key": "receipt", "doc_type": "收據", "origin": origin,
                                           "source_file": "scan.pdf p1"})
         voucher.source_image = str(self.source)
-        rec = review.save_voucher(voucher, status=status, source_parent_id=parent.id if parent else None)
+        rec = review.save_voucher(voucher, status=status)
         pages = self.upload / "pages"
         for name in (f"{rec.id}.orig.png", f"{rec.id}_att1.png", f"{rec.id}_model_input.png",
                      f"{rec.id}0.png"):          # the last one belongs to another record id
@@ -439,7 +460,7 @@ class VoucherDeleteTests(unittest.TestCase):
         return sorted(r.id for r in review.list_vouchers(include_sources=True))
 
     def family(self, upload, children=2, **child_kwargs):
-        parent = self.record(upload, role="source_page")
+        parent = self.record(upload)
         return parent, [self.record(upload, parent=parent, **child_kwargs) for _ in range(children)]
 
     def test_deleting_one_document_keeps_siblings_source_and_shared_files(self):
@@ -460,15 +481,15 @@ class VoucherDeleteTests(unittest.TestCase):
         self.assertTrue(self.exists("_pages", upload[2]), "token still used by the source page")
         self.assertTrue(self.exists(upload[1]))
 
-    def test_deleting_last_document_removes_hidden_source_and_unreferenced_upload(self):
+    def test_deleting_last_document_removes_unreferenced_upload(self):
         upload = self.make_upload()
         other = self.make_upload()
         other_parent, (other_child,) = self.family(other, children=1)
-        parent, (only,) = self.family(upload, children=1)
+        only = self.record(upload)
 
         result = review.delete_vouchers(only.id, "record")
 
-        self.assertEqual(sorted(result["deleted_ids"]), [parent.id, only.id])
+        self.assertEqual(result["deleted_ids"], [only.id])
         self.assertEqual(self.ids(), [other_parent.id, other_child.id])
         self.assertFalse(self.exists("_pages", upload[2]))
         self.assertFalse(self.exists(upload[1]))
@@ -476,16 +497,14 @@ class VoucherDeleteTests(unittest.TestCase):
         self.assertTrue(self.exists(other[1]) and self.exists("_pages", other[2]))
         self.assertTrue(self.exists("pages", f"{other_child.id}.png"))
 
-    def test_source_page_waiting_for_manual_split_is_kept_after_last_document_is_deleted(self):
+    def test_uncertain_layout_is_one_editable_voucher_with_no_source_count(self):
         upload = self.make_upload()
-        parent = self.record(upload, role="source_page", auto_split=False)
-        child = self.record(upload, parent=parent)
+        uncertain = self.record(upload, auto_split=False)
 
-        review.delete_vouchers(child.id, "record")
+        preview = review.delete_preview(uncertain.id, "upload")
 
-        self.assertEqual(self.ids(), [parent.id])
-        self.assertTrue(self.exists("pages", f"{parent.id}.png"))
-        self.assertTrue(self.exists(upload[1]))
+        self.assertEqual((preview["voucher_count"], preview["source_page_count"]), (1, 0))
+        self.assertEqual(self.ids(), [uncertain.id])
 
     def test_upload_scope_deletes_the_whole_group_and_nothing_else(self):
         upload, other = self.make_upload(), self.make_upload()
@@ -496,7 +515,7 @@ class VoucherDeleteTests(unittest.TestCase):
         other_parent, (other_child,) = self.family(other, children=1)
 
         preview = review.delete_preview(first.id, "upload")
-        self.assertEqual((preview["voucher_count"], preview["source_page_count"]), (3, 1))
+        self.assertEqual((preview["voucher_count"], preview["source_page_count"]), (4, 0))
         self.assertEqual(review.delete_preview(first.id, "record")["ids"], [first.id])
         result = review.delete_vouchers(first.id, "upload")
 
@@ -507,7 +526,7 @@ class VoucherDeleteTests(unittest.TestCase):
         self.assertFalse(self.exists(upload[1]))
         self.assertTrue(self.exists(other[1]) and self.exists("_pages", other[2]))
 
-    def test_upload_scope_without_group_id_falls_back_to_source_page_and_children(self):
+    def test_upload_scope_without_upload_group_uses_import_page_id(self):
         parent, (child, sibling) = self.family(None)
         other_parent, (other_child,) = self.family(None, children=1)
 
@@ -544,14 +563,14 @@ class VoucherDeleteTests(unittest.TestCase):
         self.assertTrue(self.exists("pages", f"{sibling.id}.png"))
         self.assertTrue(self.exists(upload[1]))
 
-    def test_deleting_a_source_page_takes_its_documents_with_it(self):
+    def test_record_scope_deletes_only_selected_voucher_with_group_siblings(self):
         upload = self.make_upload()
         parent, (first, second) = self.family(upload)
 
-        result = review.delete_vouchers(parent.id, "record")
+        result = review.delete_vouchers(first.id, "record")
 
-        self.assertEqual(result["deleted_ids"], sorted([parent.id, first.id, second.id]))
-        self.assertEqual(self.ids(), [])
+        self.assertEqual(result["deleted_ids"], [first.id])
+        self.assertEqual(self.ids(), sorted([parent.id, second.id]))
 
     def test_confirmed_records_are_admin_only_and_audited_without_content(self):
         upload = self.make_upload()

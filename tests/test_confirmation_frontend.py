@@ -222,8 +222,6 @@ function renderAmountcheck() {}
 function renderEntries() {}
 function setupImage() {}
 function renderPages() {}
-function sourceHintHtml() { return ''; }
-function sourceTrace() { return {}; }
 function esc(s) { return s == null ? '' : String(s); }
 function loadList() { events.push({ type: 'loadList' }); }
 function alert(message) { events.push({ type: 'alert', message }); }
@@ -251,7 +249,7 @@ const context = { console, events, requests, input, nodes, $, currentUser, fileI
   DOC_TYPES: { other: { fields: [] } }, companyRecords,
   async loadItemAccountChart() { events.push({ type: 'loadItemAccountChart', company: node('revCompanySel').value }); },
   setCropMode, resetFineTool, updateRestoreButton, setStatus, setPendingActionVisibility, populateTypeSel, buildActiveFields, renderFields, renderItems,
-  renderTaxcheck, renderDatecheck, renderAmountcheck, renderEntries, setupImage, renderPages, sourceHintHtml, sourceTrace,
+  renderTaxcheck, renderDatecheck, renderAmountcheck, renderEntries, setupImage, renderPages,
   esc, loadList, alert, toast, confirm, json, persistCurrentEdits, withInferProgress, fetch };
 vm.createContext(context);
 const reviewCode = source.slice(openStart, openEnd) + '\n' + source.slice(clearStart, clearEnd) + '\n' + source.slice(roleStart, roleEnd) + '\n' + source.slice(recognizeStart, recognizeEnd) + '\n' + source.slice(companyTaxStart, companyTaxEnd);
@@ -266,6 +264,10 @@ vm.runInContext(reviewCode + '\nglobalThis.api = { openReview, clearReview, appl
     out.absentNodes = [...removed].every((id) => !nodes[id]);
     out.restoreCalls = restoreCalls;
     out.hiddenTools = Object.fromEntries(['btnReRecognize', 'btnRestore'].map((id) => [id, node(id).classList.contains('hidden')]));
+    out.confirmDisabled = node('btnConfirm').disabled;
+    out.reviewBodyHidden = node('reviewBody').classList.contains('hidden');
+    out.detailsHidden = node('recognitionDetails').classList.contains('hidden');
+    out.imageToolsLocked = !!context.imageToolsLocked;
   } else if (input.action === 'role') {
     context.api.applyRole();
     out.visible = Object.fromEntries(['databaseBtn', 'usersBtn', 'settingsBtn'].map((id) => [id, !node(id).classList.contains('hidden')]));
@@ -300,25 +302,6 @@ vm.createContext(context);
 vm.runInContext(source.slice(start, end) + '\nglobalThis.api = { openFromHash };', context);
 for (const hash of input.hashes) { location.hash = hash; context.api.openFromHash(); }
 process.stdout.write(JSON.stringify(events));
-"""
-
-
-TRACE_HARNESS = r"""
-const fs = require('fs');
-const vm = require('vm');
-const input = JSON.parse(fs.readFileSync(0, 'utf8'));
-const source = input.source;
-const start = source.indexOf('  const EMPTY_LIST_TEXT');
-const end = source.indexOf('  // ── 清單 ──', start);
-if (start < 0 || end < 0) throw new Error('could not locate source page functions');
-const esc = (s) => (s == null ? "" : String(s));
-const context = { esc, JSON };
-vm.createContext(context);
-vm.runInContext(source.slice(start, end) + '\nglobalThis.api = { queueViewModel, sourceHintHtml, sourceTrace };', context);
-const out = {};
-if (input.rows) out.view = context.api.queueViewModel(input.rows, input.stage);
-if (input.hint) out.hint = context.api.sourceHintHtml(context.api.sourceTrace(input.hint.row, 0), input.hint.autoSplit);
-process.stdout.write(JSON.stringify(out));
 """
 
 
@@ -719,72 +702,32 @@ process.stdout.write(JSON.stringify(input.cases.map(([dx, dy]) => context.f(dx, 
             self.assertTrue(edited["buttonDisabledAfterEdit"])
             self.assertEqual(edited["requests"], [])
 
-    def run_trace(self, rows, stage="prepared", hint=None):
-        payload = {"source": self.source, "rows": rows, "stage": stage, "hint": hint}
+    def test_auto_split_voucher_remains_editable_and_source_page_branches_are_absent(self):
+        record = self.review_record()
+        record["current"]["origin"] = {"layout": {"auto_split": True}}
+        result = self.run_review(action="open", recordId=12, records={"12": record})
+
+        self.assertFalse(result["confirmDisabled"])
+        self.assertFalse(result["reviewBodyHidden"])
+        self.assertFalse(result["detailsHidden"])
+        self.assertFalse(result["imageToolsLocked"])
+        self.assertNotIn("record_role === \"source_page\"", self.source)
+        self.assertNotIn("source_parent_id", self.source)
+        self.assertNotIn("sourceHintHtml", self.source)
+
+    def test_skipped_page_notice_is_derived_from_import_job_status(self):
+        self.assertIn('pages?.filter(page => page.phase === "skipped")', self.source)
+        self.assertNotIn("sourceTrace", self.source)
+
+        fixture = ROOT / "tests" / "fixtures" / "import_jobs_synthetic.js"
         completed = subprocess.run(
-            [str(NODE), "-e", TRACE_HARNESS],
-            input=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            capture_output=True, check=False,
+            [str(NODE), str(fixture), str(APP_JS)], capture_output=True, check=False,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr.decode("utf-8", errors="replace"))
-        return json.loads(completed.stdout.decode("utf-8"))
-
-    @staticmethod
-    def source_row(row_id, content_kind, auto_split, regions=0, **extra):
-        layout = {"content_kind": content_kind, "auto_split": auto_split, "regions": [{}] * regions}
-        return {"id": row_id, "record_role": "source_page", "source_file": f"scan.pdf p{row_id}",
-                "origin": {"page_no": row_id, "layout": layout}, **extra}
-
-    def test_queue_hides_split_and_skipped_source_pages_but_keeps_manual_ones_actionable(self):
-        rows = [
-            self.source_row(1, "document", True, regions=1),
-            {"id": 2, "record_role": "voucher", "source_parent_id": 1, "origin": {"page_no": 1}},
-            self.source_row(3, "blank", True),
-            self.source_row(4, "document", False),
-        ]
-        result = self.run_trace(rows)["view"]
-
-        # Split and blank source pages are not shown; a page the system could not split stays reachable.
-        self.assertEqual([r["id"] for r in result["vouchers"]], [2, 4])
-        self.assertEqual(result["hidden"], 2)
-        self.assertEqual(result["skipped"], 1)
-
-        later = self.run_trace(rows, stage="queued")["view"]
-        self.assertEqual([r["id"] for r in later["vouchers"]], [2])
-
-    def test_manual_source_only_row_is_hidden_while_legacy_source_only_remains_visible(self):
-        manual_source = self.source_row(9, "document", False)
-        manual_source["origin"]["preparation"] = {"mode": "manual_review"}
-        manual_view = self.run_trace([manual_source])["view"]
-
-        self.assertEqual(manual_view["vouchers"], [])
-        self.assertEqual(manual_view["hidden"], 1)
-
-        legacy_source = self.source_row(10, "document", False)
-        legacy_view = self.run_trace([legacy_source])["view"]
-        self.assertEqual([row["id"] for row in legacy_view["vouchers"]], [10])
-        self.assertEqual(legacy_view["hidden"], 0)
-
-    def test_blank_only_import_shows_skipped_notice_instead_of_source_rows(self):
-        result = self.run_trace([self.source_row(7, "blank", True)])["view"]
-
-        self.assertEqual(result["vouchers"], [])
-        self.assertIn("已自動略過 1 個非單據頁", result["emptyText"])
-        self.assertEqual(self.run_trace([])["view"]["emptyText"], "此階段目前沒有憑證。")
-
-    def test_source_hint_matches_page_role_without_pointing_to_missing_documents(self):
-        hint = self.run_trace(None, hint={"row": self.source_row(1, "blank", True), "autoSplit": True})["hint"]
-        self.assertIn("已略過", hint)
-        self.assertIn("空白頁", hint)
-        self.assertNotIn("拆分出的單據", hint)
-
-        hint = self.run_trace(None, hint={"row": self.source_row(2, "document", True, regions=1), "autoSplit": True})["hint"]
-        self.assertIn("單張完整單據", hint)
-        self.assertIn("不需重複處理", hint)
-
-        hint = self.run_trace(None, hint={"row": self.source_row(3, "document", False), "autoSplit": False})["hint"]
-        self.assertNotIn("裁切為新憑證", hint)
-        self.assertIn("一頁一張", hint)
+        result = json.loads(completed.stdout.decode("utf-8"))
+        self.assertEqual(result["poll"]["idsFromPageVouchers"], "[42]")
+        self.assertEqual(result["poll"]["idsNeverFallBackToSourcePage"], "[]")
+        self.assertIn("已略過 1 個非單據頁", result["list"]["emptyTextWhenSkipped"])
 
     def run_delete(self, action, **scenario):
         payload = {"source": self.source, "action": action, **scenario}
@@ -798,18 +741,19 @@ process.stdout.write(JSON.stringify(input.cases.map(([dx, dy]) => context.f(dx, 
 
     @staticmethod
     def preview(ids, **counts):
-        return {"ids": ids, "voucher_count": counts.get("vouchers", len(ids)), "source_page_count": counts.get("sources", 0),
+        return {"ids": ids, "voucher_count": counts.get("vouchers", len(ids)),
                 "confirmed_count": counts.get("confirmed", 0), "attachment_count": counts.get("attachments", 0),
                 "requires_admin": bool(counts.get("confirmed", 0))}
 
     def test_delete_choices_describe_scope_and_hide_upload_when_identical(self):
         record = self.preview([5])
-        upload = self.preview([3, 4, 5], vouchers=2, sources=1, attachments=1)
+        upload = self.preview([3, 4, 5], vouchers=2, attachments=1)
         data = {"previews": {"record": record, "upload": upload}, "can_delete": {"record": True, "upload": True}}
         choices = self.run_delete("choices", data=data)["choices"]
         self.assertEqual([c["scope"] for c in choices], ["record", "upload"])
         self.assertEqual(choices[0]["summary"], "1 張單據")
-        self.assertEqual(choices[1]["summary"], "2 張單據、1 個原始掃描頁（含 1 張附頁）")
+        self.assertEqual(choices[1]["summary"], "2 張單據（含 1 張附頁）")
+        self.assertNotIn("source_page_count", self.source)
         self.assertTrue(all(c["allowed"] and not c["warning"] for c in choices))
 
         same = {"previews": {"record": record, "upload": self.preview([5])}, "can_delete": {"record": True, "upload": True}}
@@ -830,7 +774,7 @@ process.stdout.write(JSON.stringify(input.cases.map(([dx, dy]) => context.f(dx, 
         self.assertIn("憑證與明細彙總", warning)
 
     def test_queued_delete_only_previews_and_deletes_current_record(self):
-        page = self.preview([12], sources=1)
+        page = self.preview([12])
         page.update(page_no=4, blocked_reason="")
         data = {"previews": {"record": self.preview([12]), "upload": self.preview([10, 11, 12]), "page": page},
                 "can_delete": {"record": True, "upload": True, "page": True}, "busy": False}
@@ -851,7 +795,7 @@ process.stdout.write(JSON.stringify(input.cases.map(([dx, dy]) => context.f(dx, 
         self.assertIn("loadList", [e["type"] for e in done["events"]])
 
     def test_queued_delete_choices_ignore_page_and_upload_previews(self):
-        page = self.preview([12], sources=1)
+        page = self.preview([12])
         page.update(page_no=1, blocked_reason="")
         data = {"previews": {"page": page, "upload": self.preview([11, 12]), "record": self.preview([12])},
                 "can_delete": {"page": True, "upload": True, "record": True}}
@@ -861,7 +805,7 @@ process.stdout.write(JSON.stringify(input.cases.map(([dx, dy]) => context.f(dx, 
         self.assertNotIn('value="upload"', opened["choicesHtml"])
 
     def test_importing_page_is_the_only_choice_and_carries_page_metadata(self):
-        page = self.preview([12], sources=1)
+        page = self.preview([12])
         page.update(page_no=3, blocked_reason="此頁已確認")
         data = {"previews": {"page": page, "record": self.preview([12]), "upload": self.preview([10, 12])},
                 "can_delete": {"page": False, "record": True, "upload": True}}
@@ -874,7 +818,7 @@ process.stdout.write(JSON.stringify(input.cases.map(([dx, dy]) => context.f(dx, 
         self.assertIn("此頁已確認", opened["choicesHtml"])
 
     def test_delete_flow_cancel_failure_and_success(self):
-        data = {"previews": {"record": self.preview([12]), "upload": self.preview([11, 12], sources=1)},
+        data = {"previews": {"record": self.preview([12]), "upload": self.preview([11, 12])},
                 "can_delete": {"record": True, "upload": True}, "busy": False, "ok": True}
         opened = self.run_delete("open", data=data)
         self.assertEqual([r["method"] for r in opened["requests"]], ["GET"])
@@ -936,7 +880,7 @@ process.stdout.write(JSON.stringify(input.cases.map(([dx, dy]) => context.f(dx, 
         self.assertNotIn("1 張單據", superseded["choicesHtml"])
 
     def test_page_delete_uses_opened_version_and_restores_import_before_refresh(self):
-        page = self.preview([12], sources=1)
+        page = self.preview([12])
         page.update(page_no=2, blocked_reason="")
         data = {"previews": {"page": page}, "can_delete": {"page": True}, "busy": False}
         done = self.run_delete("confirm", currentStage="prepared", data=data, scope="page", currentVersion="version /+中文",
@@ -981,7 +925,7 @@ process.stdout.write(JSON.stringify(input.cases.map(([dx, dy]) => context.f(dx, 
         for marker in ('id="dropZone"', 'id="fileInput"'):
             self.assertIn(marker, html)
 
-    def test_source_pages_are_not_rendered_as_a_separate_frontend_area(self):
+    def test_legacy_trace_area_is_not_rendered(self):
         html = APP_HTML.read_text(encoding="utf-8")
         self.assertNotIn("追溯資料", html)
         self.assertNotIn("traceBox", html)

@@ -105,10 +105,10 @@ class PipelineReuseIntegrationTests(unittest.TestCase):
                  patch("app.core.pipeline.reread_fields", return_value={}) as reread, \
                  settings_store.isolated_settings({"ocr": "paddle/pp-ocrv5", "structure": "fake/model", "classify": "fake/model"}):
                 prepared = pipeline.prepare_pages(str(source))
-                child = next(item for item in prepared if item.origin.get("record_role") != "source_page")
+                child = prepared[0]
                 copied = root / "review-copy.png"
                 shutil.copyfile(child.source_image, copied)
-                rec = SimpleNamespace(current_json=child.model_dump_json(), source_parent_id=1, id=2)
+                rec = SimpleNamespace(current_json=child.model_dump_json(), source_parent_id=None, id=2)
                 loader.reset_mock()
                 with invocation_trace.capture() as trace, ocr_cache.scope(review._ocr_cache_directory(rec)):
                     result = pipeline.extract_for_type(str(copied), child.doc_type_key, confirmed_type=True)
@@ -154,7 +154,7 @@ class PipelineReuseIntegrationTests(unittest.TestCase):
             source = root / "source.png"
             copied = root / "review-copy.png"
             Image.new("RGB", (1000, 800), "white").save(source)
-            parent = SimpleNamespace(id=1, source_parent_id=None, record_role="source_page",
+            parent = SimpleNamespace(id=1, source_parent_id=None, record_role="voucher",
                                      current_json="{}", company="", source_file="synthetic.png")
             fake = self.FakePaddle()
 
@@ -164,12 +164,13 @@ class PipelineReuseIntegrationTests(unittest.TestCase):
 
             def save(voucher, **kwargs):
                 shutil.copyfile(voucher.source_image, copied)
-                return SimpleNamespace(id=2, source_parent_id=1, current_json=voucher.model_dump_json())
+                return SimpleNamespace(id=2, source_parent_id=None, current_json=voucher.model_dump_json())
 
             with patch.object(config, "UPLOAD_DIR", root / "uploads"), \
                  patch.object(review, "get_voucher", return_value=parent), \
                  patch.object(review, "_image_path_of", return_value=source), \
                  patch.object(review, "save_voucher", side_effect=save), \
+                 patch.object(review, "_clear_boxes"), \
                  patch.object(pipeline, "prepare_image", side_effect=prepare), \
                  patch("app.core.ocr_engine._get_paddle", return_value=fake) as loader, \
                  patch("app.core.model_factory.get_chat_model", return_value=_Chat()), \
@@ -357,12 +358,10 @@ class ReviewCacheScopeTests(unittest.TestCase):
     def test_source_token_and_record_fallback_scopes(self):
         token = "a" * 32
         rec = SimpleNamespace(current_json=json.dumps({"origin": {"source_token": token}}),
-                              source_parent_id="parent", id="record")
+                              source_parent_id=None, id="record")
         with patch.object(config, "UPLOAD_DIR", Path("uploads")), patch.object(config, "DATA_DIR", Path("data")):
             self.assertEqual(review._ocr_cache_directory(rec), Path("uploads/_pages") / token / "ocr_cache")
             rec.current_json = json.dumps({"origin": {"source_token": "invalid"}})
-            self.assertEqual(review._ocr_cache_directory(rec), Path("data/recognition/parent/ocr_cache"))
-            rec.source_parent_id = None
             self.assertEqual(review._ocr_cache_directory(rec), Path("data/recognition/record/ocr_cache"))
 
 

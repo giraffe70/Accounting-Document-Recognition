@@ -18,7 +18,7 @@
   let DOC_TYPES = {};   // 各單據類型欄位契約（/api/doc-types）
   let cropping = false; // 裁切模式中
   let edgeMode = false; // 沿邊緣拉線對齊模式中
-  let imageToolsLocked = false; // 自動分割來源頁不可改影像
+  let imageToolsLocked = false;
 
   // 後端錯誤轉人看得懂的字串：detail 可能是字串、FastAPI 422 的物件陣列、或整包物件。
   // 直接把 detail 丟給 alert()，遇到後兩者會顯示「[object Object]」，等於錯誤訊息被吃掉。
@@ -94,7 +94,7 @@
     if (!job || job.status !== "awaiting_review") return [];
     if (Array.isArray(job.review_ids)) return job.review_ids;
     const page = (job.pages || []).find(page => page.status === "preview_ready");
-    return page ? page.voucher_ids?.length ? page.voucher_ids : [page.source_page_id].filter(Boolean) : [];
+    return page?.voucher_ids || [];
   }
   function renderImportState() {
     const job = activeImportJob(), blocked = uploadsBlocked();
@@ -287,57 +287,7 @@
     } catch (e) { /* ignore */ }
   }
 
-  // ── 來源頁：僅保留原圖供追溯，不顯示於前端清單 ──
   const EMPTY_LIST_TEXT = "此階段目前沒有憑證。";
-  function isSourceRecord(r) { return !!r && r.record_role === "source_page"; }
-  // 由既有版面判定衍生來源頁狀態（不新增資料庫狀態）：
-  // skipped 已略過（空白／佐證／非單據）、split 已拆分、review 待人工處理
-  function sourceTrace(r, childCount) {
-    const layout = (r && r.origin && r.origin.layout) || {};
-    const kind = layout.content_kind || (r && r.quality && r.quality.content_kind) || "";
-    const auto = layout.auto_split === true;
-    const skipLabel = { blank: "空白頁", supporting: "佐證附頁", non_voucher: "非單據頁" }[kind];
-    if (auto && skipLabel) return { state: "skipped", label: `已略過（${skipLabel}）`, reason: kind };
-    if (childCount > 0 || (auto && kind === "document")) {
-      const regions = Array.isArray(layout.regions) ? layout.regions.length : 0;
-      return { state: "split", label: "已拆分", reason: kind || "document", regions };
-    }
-    return { state: "review", label: "待人工處理", reason: kind };
-  }
-  // 清單分流：已拆分／已略過的來源頁不顯示；尚未自動分割、需人工處理的來源頁仍須可見，
-  // 否則該頁內容會無人處理（②外觀確認階段才有來源頁）
-  function queueViewModel(rows, stage) {
-    const all = rows || [];
-    const counts = {};
-    all.forEach((r) => { if (!isSourceRecord(r) && r.source_parent_id != null) counts[r.source_parent_id] = (counts[r.source_parent_id] || 0) + 1; });
-    let hidden = 0, skipped = 0;
-    const vouchers = all.filter((r) => {
-      if (!isSourceRecord(r)) return true;
-      // 人工模式保留不可變來源頁，另有可編輯單據；跨階段篩選時兩者未必同時回傳。
-      if (r.origin?.preparation?.mode === "manual_review") { hidden += 1; return false; }
-      const t = sourceTrace(r, counts[r.id] || 0);
-      if (stage === "prepared" && t.state === "review") return true;
-      hidden += 1; if (t.state === "skipped") skipped += 1;
-      return false;
-    });
-    const emptyText = !vouchers.length && skipped
-      ? `目前沒有待外觀確認的單據（已自動略過 ${skipped} 個非單據頁）。` : EMPTY_LIST_TEXT;
-    return { vouchers, hidden, skipped, emptyText };
-  }
-  // 依來源頁狀態給出準確提示（僅需人工處理的來源頁通常可被開啟）
-  function sourceHintHtml(trace, autoSplit) {
-    if (trace.state === "skipped") {
-      const what = { blank: "空白頁", supporting: "佐證附頁", non_voucher: "非單據頁" }[trace.reason] || "非單據頁";
-      return `<b>來源頁（已略過）</b>：此頁確認為${what}，沒有可處理的單據；原圖保留供追溯，不會確認或送入辨識。`;
-    }
-    if (autoSplit) {
-      return trace.regions === 1
-        ? "<b>來源頁</b>：此頁為單張完整單據，已建立對應的單據；來源頁僅保留原圖供追溯，請處理清單中的該單據，不需重複處理。"
-        : "<b>來源頁</b>：這一頁含有多張單據，系統已自動拆分；來源頁僅保留原圖供追溯，請開啟清單中拆分出的單據逐張處理，或改以一頁一張重新處理。";
-    }
-    return "<b>來源頁（待人工處理）</b>：系統無法判定此頁只有一張單據。本系統一次只處理一頁一張，請改以一頁一張重新處理；來源頁保留供追溯，不會確認或送入辨識。";
-  }
-
   // ── 清單 ──
   async function loadList() {
     if (currentStage === "import") { refreshStats(); return; }
@@ -346,8 +296,7 @@
     const url = "/api/vouchers" + (status ? `?status=${encodeURIComponent(status)}` : "");
     const data = await (await fetch(url)).json();
     if (stage !== currentStage) return;
-    const view = queueViewModel(data.items || [], currentStage);
-    let rows = view.vouchers;
+    let rows = data.items || [];
     if (stage === "prepared") {
       const job = activeImportJob(), ids = currentReviewIds(job);
       if (job) rows = rows.filter(row => ids.includes(row.id));
@@ -355,7 +304,8 @@
     }
     const body = $("listBody");
     const activeJob = stage === "prepared" ? activeImportJob() : null;
-    $("listEmpty").textContent = activeJob && IMPORT_ACTIVE.has(activeJob.status) ? "正在準備目前頁面，請稍候…" : activeJob && ["failed","partial_failed","interrupted"].includes(activeJob.status) ? "目前頁面尚未完成，請重試或取消目前匯入。" : activeJob?.status === "awaiting_review" && !currentReviewIds(activeJob).length ? "目前工作沒有可確認的單據，請取消目前匯入後重新上傳。" : view.emptyText;
+    const skippedPages = activeJob?.pages?.filter(page => page.phase === "skipped").length || 0;
+    $("listEmpty").textContent = activeJob && IMPORT_ACTIVE.has(activeJob.status) ? "正在準備目前頁面，請稍候…" : activeJob && ["failed","partial_failed","interrupted"].includes(activeJob.status) ? "目前頁面尚未完成，請重試或取消目前匯入。" : activeJob?.status === "awaiting_review" && !currentReviewIds(activeJob).length ? skippedPages ? `目前匯入工作已略過 ${skippedPages} 個非單據頁。` : "目前工作沒有可確認的單據，請取消目前匯入後重新上傳。" : EMPTY_LIST_TEXT;
     if (!rows.length) { body.innerHTML = ""; $("listTable").classList.add("hidden"); $("listEmpty").classList.remove("hidden"); updateMergeBtn(); refreshStats(); if (stage === "prepared" && !recognitionDirty && !editBusy) clearReview(); renderImportState(); return; }
     $("listEmpty").classList.add("hidden"); $("listTable").classList.remove("hidden");
     const mergeable = currentStage === "queued";
@@ -368,11 +318,9 @@
       // 以欄位契約的正式標籤為準；current_json.doc_type 是模型回傳的字串，可能簡略或走樣
       const spec = DOC_TYPES[r.doc_type_key];
       const type = esc((spec && spec.label) || r.doc_type) || "自動判斷類型";
-      const sourceTag = r.source_parent_id != null
-        ? ` <span class="att-badge" title="此單據拆分自原始掃描頁">來自${r.origin?.page_no != null ? ` p${esc(r.origin.page_no)}` : ` #${esc(r.source_parent_id)}`}</span>` : "";
       return `
       <tr data-id="${r.id}" class="${r.id === currentId ? "sel" : ""}" title="${esc(r.source_file || "")}">
-        <td>${chk}${currentStage === "prepared" && r.has_image ? `<img src="/api/vouchers/${r.id}/image?expected_updated_at=${encodeURIComponent(r.updated_at)}" alt="單據縮圖" loading="lazy" style="width:72px;height:88px;object-fit:contain;vertical-align:middle">` : ""}${esc(r.voucher_id) || "—"}${att}${sourceTag}<div class="row-sub">${type}</div></td>
+        <td>${chk}${currentStage === "prepared" && r.has_image ? `<img src="/api/vouchers/${r.id}/image?expected_updated_at=${encodeURIComponent(r.updated_at)}" alt="單據縮圖" loading="lazy" style="width:72px;height:88px;object-fit:contain;vertical-align:middle">` : ""}${esc(r.voucher_id) || "—"}${att}<div class="row-sub">${type}</div></td>
         <td>${esc(r.company) || "—"}</td>
         <td>${esc(r.date) || "—"}</td>
         <td>${nf(r.total_amount)}</td>
@@ -406,7 +354,6 @@
   function deleteScopeText(p) {
     const parts = [];
     if (p.voucher_count) parts.push(`${p.voucher_count} 張單據`);
-    if (p.source_page_count) parts.push(`${p.source_page_count} 個原始掃描頁`);
     const extra = [];
     if (p.attachment_count) extra.push(`含 ${p.attachment_count} 張附頁`);
     if (p.confirmed_count) extra.push(`其中 ${p.confirmed_count} 張已確認`);
@@ -537,11 +484,8 @@
     currentVersion = rec.updated_at;
     reviewedItems = {};
     currentIsImport = !!rec.is_import;
-    const autoSplitSource = v.origin?.layout?.auto_split === true;
-    const sourcePage = rec.record_role === "source_page" || autoSplitSource;
-    $("revForm").classList.toggle("source-only", autoSplitSource);
-    $("reviewBody").classList.toggle("hidden", autoSplitSource);
-    $("recognitionDetails").classList.toggle("hidden", autoSplitSource);
+    $("reviewBody").classList.remove("hidden");
+    $("recognitionDetails").classList.remove("hidden");
     $("importBadge").classList.toggle("hidden", !currentIsImport);
     $("revEmpty").classList.add("hidden"); $("revForm").classList.remove("hidden");
     setStatus(rec.status);
@@ -552,18 +496,15 @@
     const prep = v.origin?.preparation;
     const manualMode = prep?.mode === "manual_review";
     $("revForm").classList.toggle("prepared", isPreExtract);
-    $("prepHint").classList.toggle("hidden", !isPreExtract && !autoSplitSource);
+    $("prepHint").classList.toggle("hidden", !isPreExtract);
     $("btnConfirmRecognize").classList.toggle("hidden", !isPreExtract);
-    $("btnConfirmRecognize").disabled = sourcePage;
     // 外觀確認階段還沒有欄位可重辨；重新辨識只在待確認／已確認時出現，外觀確認改放「復原」。
     $("btnReRecognize").classList.toggle("hidden", isPreExtract);
-    $("btnReRecognize").disabled = sourcePage;
     $("btnRestore").classList.toggle("hidden", !isPrepared);
-    $("btnConfirm").disabled = sourcePage;
-    imageToolsLocked = autoSplitSource;
+    imageToolsLocked = false;
     resetFineTool();
     updateRestoreButton(rec.image_restore_available);
-    $("revConfWrap").classList.toggle("hidden", isPreExtract || autoSplitSource);
+    $("revConfWrap").classList.toggle("hidden", isPreExtract);
     if (isPrepared) {
       stageAction = "confirm";
       $("btnConfirmRecognize").textContent = "✅ 確認外觀（加入掃描清單）";
@@ -573,11 +514,6 @@
       stageAction = "recognize";
       $("btnConfirmRecognize").textContent = "🔍 辨識此張";
       $("prepHint").innerHTML = "<b>③ 掃描清單</b>：外觀已確認。按「🔍 辨識此張」提取內容欄位，或到清單頂端「⚡ 一鍵提取全部」批次處理。";
-    }
-    if (sourcePage && isPreExtract) {
-      $("prepHint").innerHTML = sourceHintHtml(sourceTrace({ origin: v.origin, quality: v.quality }, 0), autoSplitSource);
-    } else if (isPrepared && rec.source_parent_id != null) {
-      $("prepHint").innerHTML += `<br><span class="hint">此單據拆分自來源頁 #${esc(rec.source_parent_id)}${v.origin?.page_no != null ? `（原始頁 p${esc(v.origin.page_no)}）` : ""}。</span>`;
     }
     $("revCompanySel").value = rec.company_id == null ? "" : String(rec.company_id);
     updateReviewCompanyTaxId();
@@ -590,7 +526,7 @@
     $("revConf").textContent = conf;
     $("revConf").className = "tag " + (conf === "high" ? "high" : conf === "low" ? "low" : "warn");
     $("f-note").value = v.note || "";
-    const hasItems = !sourcePage;
+    const hasItems = true;
     $("itemsSection").classList.toggle("hidden", !hasItems);
     renderItems(v.items || []);
     renderTaxcheck(rec.taxcheck || {});

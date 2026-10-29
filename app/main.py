@@ -398,9 +398,9 @@ async def api_analyze(file: UploadFile = File(...), company: str = Form("")):
         if not vouchers:
             return JSONResponse({"ok": False, "detail": "無法讀取任何頁面"}, status_code=400)
         records = review.save_prepared_vouchers(vouchers, company)
-        ids = [r.id for r in records if r.record_role != "source_page"] or [r.id for r in records]
+        ids = [r.id for r in records]
         return {"ok": True, "id": ids[0], "ids": ids, "count": len(ids),
-                "prepared": True, "source_page_ids": [r.id for r in records if r.record_role == "source_page"],
+                "prepared": True, "source_page_ids": [],
                 "voucher": next(v.model_dump() for v,r in zip(vouchers,records) if r.id == ids[0])}
     except Exception as exc:  # noqa: BLE001
         logger.exception("分析失敗")
