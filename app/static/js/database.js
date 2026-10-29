@@ -4,6 +4,12 @@
   let selectedTables = [];
   let busy = false;
   let detailTrigger = null;
+  const hiddenColumns = {
+    users: new Set(["password_hash", "salt"]),
+    companies: new Set(["id", "account_chart_key"]),
+    item_account_mappings: new Set(["id", "created_by", "updated_by", "version"]),
+    voucher_records: new Set(["source_file", "attachments", "recognition_history", "company_id", "confirmed_by"]),
+  };
   const statusLabels = Object.fromEntries([
     ["prepared", "待外觀確認"], ["queued", "待提取"], ["pending", "待確認"],
     ["confirmed", "已確認"], ["running", "執行中"], ["succeeded", "成功"],
@@ -111,6 +117,9 @@
           minute: "2-digit", second: "2-digit" }).format(timestamp);
       }
     }
+    if (typeof value === "string" && /^(datetime|timestamp)\b/i.test(column.type || "")) {
+      return value.replace(/^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})\.\d+(?=$|[zZ]$|[+-]\d{2}:?\d{2}$)/, "$1");
+    }
     if ((column.name === "manual_entry" || column.name === "warmup" || column.name === "cancel_requested" || column.name === "is_admin")
       && (value === 0 || value === 1)) return value ? "是" : "否";
     return String(value);
@@ -187,8 +196,10 @@
     $("dataHead").replaceChildren();
     $("dataBody").replaceChildren();
     const table = selectedTable();
+    const hidden = table?.database === "app" ? hiddenColumns[table.name] : undefined;
+    const columns = data.columns.filter((column) => !hidden?.has(column.name));
     const header = document.createElement("tr");
-    data.columns.forEach((column) => {
+    columns.forEach((column) => {
       const th = document.createElement("th");
       th.scope = "col";
       th.textContent = column.label || column.name;
@@ -200,7 +211,7 @@
     $("dataHead").append(header);
     data.rows.forEach((row) => {
       const tr = document.createElement("tr");
-      data.columns.forEach((column) => {
+      columns.forEach((column) => {
         const td = document.createElement("td");
         const value = row[column.name];
         const text = displayValue(column, value, table);
@@ -259,7 +270,8 @@
     setBusy(true);
     try {
       const data = await api("/api/database/tables");
-      selectedTables = data.tables;
+      selectedTables = data.tables.filter((table) =>
+        !(table.database === "app" && table.name === "mapping_history"));
       const databases = [...new Map(selectedTables.map((table) =>
         [table.database, table.database_label])).entries()];
       $("databaseSelect").replaceChildren();
