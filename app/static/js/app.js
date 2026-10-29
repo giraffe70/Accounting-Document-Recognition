@@ -554,9 +554,6 @@
     const isPreExtract = isPrepared || isQueued;   // 尚未萃取欄位：隱藏編輯器
     const prep = v.origin?.preparation;
     const manualMode = prep?.mode === "manual_review";
-    const timings = v.recognition_diagnostics?.timings;
-    $("fastTiming").classList.toggle("hidden", !timings);
-    $("fastTiming").textContent = timings ? [["首次預覽",timings.first_preview_seconds],["人工確認等待",timings.human_wait_seconds],["本次辨識",timings.recognition_seconds],["OCR",timings.ocr_seconds],["補讀OCR",timings.supplement_ocr_seconds],["上傳至今",timings.overall_seconds]].filter(([,value]) => value != null).map(([label,value]) => `${label} ${Number(value).toFixed(1)} 秒`).join(" · ") : "";
     $("revForm").classList.toggle("prepared", isPreExtract);
     $("prepHint").classList.toggle("hidden", !isPreExtract && !autoSplitSource);
     $("btnConfirmRecognize").classList.toggle("hidden", !isPreExtract);
@@ -582,7 +579,7 @@
     }
     if (sourcePage && isPreExtract) {
       $("prepHint").innerHTML = sourceHintHtml(sourceTrace({ origin: v.origin, quality: v.quality }, 0), autoSplitSource);
-    } else if (isPreExtract && rec.source_parent_id != null) {
+    } else if (isPrepared && rec.source_parent_id != null) {
       $("prepHint").innerHTML += `<br><span class="hint">此單據拆分自來源頁 #${esc(rec.source_parent_id)}${v.origin?.page_no != null ? `（原始頁 p${esc(v.origin.page_no)}）` : ""}。</span>`;
     }
     $("revCompanySel").value = rec.company_id == null ? "" : String(rec.company_id);

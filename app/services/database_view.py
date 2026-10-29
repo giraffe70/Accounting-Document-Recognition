@@ -27,6 +27,16 @@ HIDDEN_TABLES = {
     ("app", "import_jobs"),
     ("app", "import_pages"),
 }
+HIDDEN_COLUMNS = {
+    ("app", "voucher_records"): {
+        "confidence",
+        "ocr_provider",
+        "structure_model",
+        "image_path",
+        "record_role",
+        "source_parent_id",
+    },
+}
 
 # The metadata is shared by the table selector, headers and query validation.
 TABLE_META = {
@@ -257,7 +267,9 @@ def list_rows(database: str, table: str, q: str = Query("", max_length=200),
             raise HTTPException(422, "此資料表沒有日期篩選")
         if status and status not in meta.get("statuses", {}):
             raise HTTPException(422, "此資料表沒有此狀態")
-        schema = list(con.execute(f"PRAGMA table_info({quote(table)})"))
+        hidden_columns = HIDDEN_COLUMNS.get((database, table), set())
+        schema = [row for row in con.execute(f"PRAGMA table_info({quote(table)})")
+                  if row["name"] not in hidden_columns]
         columns = [{"name": r["name"], "label": meta.get("columns", {}).get(r["name"], r["name"]),
                     "type": r["type"], "utc": r["name"] in meta.get("utc_columns", ()),
                     "masked": r["name"].lower() in SENSITIVE} for r in schema]

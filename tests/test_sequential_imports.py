@@ -635,7 +635,7 @@ class SequentialImportTests(unittest.TestCase):
                 rec.status = ReviewStatus.queued
                 session.add(rec)
                 session.commit()
-            self.assertFalse(review.delete_previews(current.id, actor_id=1)["can_delete"]["page"])
+            self.assertFalse(review.delete_previews(current.id, "page", actor_id=1)["can_delete"]["page"])
             with self.assertRaises(review.DeleteConflict):
                 self._delete_page(current)
             self.assertEqual(import_jobs.get_job(job_id, 1)["current_page"], 1)

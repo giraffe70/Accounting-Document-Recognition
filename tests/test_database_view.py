@@ -34,7 +34,10 @@ class DatabaseViewTests(unittest.TestCase):
                 correction_note TEXT DEFAULT '', confirmed_at TEXT,
                 entries_status TEXT DEFAULT 'none', entries_confirmed_at TEXT,
                 entries_confirmed_by INTEGER, entries_confirmed_by_name TEXT DEFAULT '',
-                entries_proposal_json TEXT DEFAULT '{}', entries_history TEXT DEFAULT '[]'
+                entries_proposal_json TEXT DEFAULT '{}', entries_history TEXT DEFAULT '[]',
+                confidence TEXT DEFAULT '', ocr_provider TEXT DEFAULT '',
+                structure_model TEXT DEFAULT '', image_path TEXT DEFAULT '',
+                record_role TEXT DEFAULT 'voucher', source_parent_id INTEGER
             );
             CREATE TABLE companies (id INTEGER PRIMARY KEY, name TEXT, short TEXT, tax_id TEXT, account_chart_key TEXT);
             CREATE TABLE item_account_mappings (id INTEGER PRIMARY KEY, company_id INTEGER, item_name_key TEXT,
@@ -106,6 +109,17 @@ class DatabaseViewTests(unittest.TestCase):
         self.assertNotIn("secret-salt", response.text)
         self.assertEqual(response.json()["rows"][0]["password_hash"], database_view.MASKED)
         self.assertEqual(self.rows(table="users", q="secret").json()["total"], 0)
+
+    def test_voucher_internal_columns_remain_in_database_but_are_not_exposed(self):
+        self.login()
+        internal = {"confidence", "ocr_provider", "structure_model", "image_path",
+                    "record_role", "source_parent_id"}
+        with closing(sqlite3.connect(self.db)) as con:
+            persisted = {row[1] for row in con.execute("PRAGMA table_info(voucher_records)")}
+        self.assertTrue(internal.issubset(persisted))
+        response = self.rows()
+        returned = {column["name"] for column in response.json()["columns"]}
+        self.assertTrue(internal.isdisjoint(returned))
 
     def test_invalid_inputs_and_no_writes(self):
         self.login()

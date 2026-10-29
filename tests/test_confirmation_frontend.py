@@ -620,6 +620,12 @@ class ConfirmationFrontendTests(unittest.TestCase):
         self.assertIn('document_mode:"single"', appearance)
         self.assertNotIn("請先確認目前影像方向正確", self.source)
 
+    def test_recognition_timing_row_is_not_rendered(self):
+        html = APP_HTML.read_text(encoding="utf-8")
+        self.assertNotIn('id="fastTiming"', html)
+        self.assertNotIn("fastTiming", self.source)
+        self.assertNotIn("recognition_diagnostics?.timings", self.source)
+
     def test_appearance_toolbar_has_one_crop_and_no_split_or_page_mode(self):
         html = APP_HTML.read_text(encoding="utf-8")
         for removed in ('id="btnSplit"', 'id="documentMode"', "裁切為新憑證", "多張混貼"):
