@@ -21,7 +21,7 @@ pillow
 pypdfium2                   # PDF → 頁圖（純 Python，免 poppler）
 
 # ── 資料庫 ──
-sqlmodel                    # SQLite + ORM（憑證/分錄/審核/回饋）
+sqlmodel==0.0.42                    # SQLite + ORM（憑證/分錄/審核/回饋）
 
 # ── 其他 ──
 requests
