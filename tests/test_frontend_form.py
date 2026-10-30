@@ -19,7 +19,7 @@ const vm = require('vm');
 const input = JSON.parse(fs.readFileSync(0, 'utf8'));
 const source = input.source;
 const start = source.indexOf('  function itemSpecs()');
-const specsEnd = source.indexOf('  async function loadItemAccountChart()', start);
+const specsEnd = source.indexOf('  function renderItems(items)', start);
 const rowStart = source.indexOf('  function itemRow(it)', specsEnd);
 const rowEnd = source.indexOf('  function bindItemRows()', rowStart);
 const collectStart = source.indexOf('  function collectForm()', rowEnd);
@@ -67,6 +67,35 @@ vm.runInContext(`${escCode}\n${specsCode}\n${itemRowCode}\n${collectCode}\ngloba
 process.stdout.write(JSON.stringify(context.result));
 """
 
+BIND_ITEM_HARNESS = r"""
+const fs = require('fs');
+const vm = require('vm');
+const source = fs.readFileSync(0, 'utf8');
+const bindStart = source.indexOf('  function bindItemRows()');
+const statusStart = source.indexOf('  function showItemAccountStatus(tr)', bindStart);
+const statusEnd = source.indexOf('  function setItemAccount(tr, match)', statusStart);
+if ([bindStart, statusStart, statusEnd].some((p) => p < 0)) throw new Error('could not locate item binding functions');
+function input(value) { return { value, listeners: {}, addEventListener(type, fn) { this.listeners[type] = fn; } }; }
+const code = input('0000'), name = input('手動名稱');
+const status = { textContent: '' };
+const button = () => ({ addEventListener() {}, classList: { toggle() {} } });
+const buttons = { '.del': button(), '.keep-account': button(), '.use-account': button() };
+const tr = { dataset: { itemId: 'item-1', source: 'mapping', needsReview: '0' },
+  querySelector(selector) {
+    if (selector === '[data-item-key="account_code"]') return code;
+    if (selector === '[data-item-key="account_name"]') return name;
+    if (selector === '.account-status') return status;
+    return buttons[selector];
+  }, querySelectorAll() { return []; } };
+const context = { reviewedItems: {}, markRecognitionDirty() {},
+  $(id) { return id === 'itemsBody' ? { querySelectorAll: () => [tr] } : null; } };
+vm.createContext(context);
+vm.runInContext(source.slice(bindStart, statusEnd) + '\nglobalThis.bindItemRows = bindItemRows;', context);
+context.bindItemRows();
+code.listeners.input();
+process.stdout.write(JSON.stringify({ code: code.value, name: name.value, source: tr.dataset.source, status: status.textContent }));
+"""
+
 
 def frontend_doc_types() -> dict[str, dict[str, object]]:
     """Pass the real Python document contracts as the frontend API response."""
@@ -97,6 +126,18 @@ class FrontendFormRegressionTests(unittest.TestCase):
         )
         self.assertEqual(completed.returncode, 0, completed.stderr.decode("utf-8", errors="replace"))
         return json.loads(completed.stdout.decode("utf-8"))
+
+    def test_entering_account_code_keeps_leading_zeroes_and_manual_name(self):
+        completed = subprocess.run(
+            [str(NODE), "-e", BIND_ITEM_HARNESS],
+            input=self.source.encode("utf-8"), capture_output=True, check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr.decode("utf-8", errors="replace"))
+        result = json.loads(completed.stdout.decode("utf-8"))
+        self.assertEqual(result["code"], "0000")
+        self.assertEqual(result["name"], "手動名稱")
+        self.assertEqual(result["source"], "manual")
+        self.assertEqual(result["status"], "人工指定")
 
     def test_import_item_fields_and_collect_preserve_unrendered_data(self):
         original_item = {
@@ -187,22 +228,23 @@ class FrontendFormRegressionTests(unittest.TestCase):
         result = self.run_form(
             typeKey="other", activeFields=[],
             voucher={"doc_type_key": "other", "fields": {}, "items": []},
-            rows=[{"original": "{}", "inputs": inputs, "remember": False}],
+            rows=[{"original": "{}", "inputs": inputs, "remember": True}],
             rowItem={"account_code": "00120", "account_name": "手填科目", "description": "零件",
-                     "remember_mapping": False},
+                     "remember_mapping": True},
         )
 
         specs = result["itemSpecs"]
         self.assertEqual([field["key"] for field in specs[:2]], ["account_code", "account_name"])
         self.assertLess(result["itemHtml"].index('data-item-key="account_code"'),
                         result["itemHtml"].index('data-item-key="description"'))
-        self.assertIn('data-item-key="account_code" data-kind="text" type="text" list="itemAccountCodes" value="00120"',
+        self.assertIn('data-item-key="account_code" data-kind="text" type="text" value="00120"',
                       result["itemHtml"])
-        self.assertIn('class="remember-mapping" >記住品名對應', result["itemHtml"])
+        self.assertNotIn('itemAccountCodes', result["itemHtml"])
+        self.assertIn('class="remember-mapping" checked>記住品名對應', result["itemHtml"])
         item = result["collected"]["items"][0]
         self.assertEqual(item["account_code"], "00120")
         self.assertEqual(item["account_name"], "手填科目")
-        self.assertFalse(item["remember_mapping"])
+        self.assertTrue(item["remember_mapping"])
 
     def test_empty_metadata_only_item_is_filtered(self):
         result = self.run_form(

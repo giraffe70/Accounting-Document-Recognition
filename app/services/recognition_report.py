@@ -150,7 +150,7 @@ def render(rec, voucher, account_warnings=None) -> str:
         if isinstance(confirmed_at, datetime):
             if confirmed_at.utcoffset() is not None:
                 confirmed_at = confirmed_at.astimezone(ZoneInfo("Asia/Taipei"))
-            confirmed_at = confirmed_at.isoformat(sep=" ")
+            confirmed_at = confirmed_at.isoformat(sep=" ", timespec="seconds")
         else:
             confirmed_at = confirmed_at.isoformat()
     confirmed_by = _get(rec, "confirmed_by_name") or "未留存"

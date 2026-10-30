@@ -204,14 +204,8 @@ def get_voucher(rec_id: int) -> Optional[VoucherRecord]:
 
 
 def recognition_account_warnings(rec, data):
-    from app.services import accounts
-    with get_session() as session:
-        company = companies.resolve(session, company_id=rec.company_id) if rec.company_id else None
-        if not company:
-            return ["尚未指定歸屬公司，無法核對明細科目"] if data.get("items") else []
-        # Match the chart displayed by the account editor: own chart, then default.
-        chart = accounts.load_accounts(company.account_chart_key)
-    return details.report_warnings(data, chart)
+    """Check detail completeness and source totals without a company chart."""
+    return details.report_warnings(data)
 
 
 def save_prepared_vouchers(vouchers, company=""):

@@ -247,7 +247,6 @@ const context = { console, events, requests, input, nodes, $, currentUser, fileI
   editBusy, inferBusy, cropping, stageAction, currentVersion: '', reviewedItems: { stale: true },
   updateRecognitionState, applyRecognitionState,
   DOC_TYPES: { other: { fields: [] } }, companyRecords,
-  async loadItemAccountChart() { events.push({ type: 'loadItemAccountChart', company: node('revCompanySel').value }); },
   setCropMode, resetFineTool, updateRestoreButton, setStatus, setPendingActionVisibility, populateTypeSel, buildActiveFields, renderFields, renderItems,
   renderTaxcheck, renderDatecheck, renderAmountcheck, renderEntries, setupImage, renderPages,
   esc, loadList, alert, toast, confirm, json, persistCurrentEdits, withInferProgress, fetch };
@@ -562,8 +561,7 @@ class ConfirmationFrontendTests(unittest.TestCase):
         self.assertEqual(opened["currentId"], 12)
         self.assertEqual(opened["currentVersion"], "version-12")
         self.assertEqual(opened["reviewedItems"], {})
-        chart_loads = [e for e in opened["events"] if e["type"] == "loadItemAccountChart"]
-        self.assertEqual(chart_loads, [{"type": "loadItemAccountChart", "company": "3"}])
+        self.assertFalse(any(e["type"] == "loadItemAccountChart" for e in opened["events"]))
         self.assertTrue(opened["absentNodes"])
 
         regular = self.run_review(action="role", is_admin=False)

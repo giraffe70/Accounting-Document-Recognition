@@ -82,8 +82,7 @@ class ItemAccountApiTests(unittest.TestCase):
             if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "_PUBLIC_API"
                 for target in node.targets)))
         for module, name, value in ((importdecl, "is_import", False), (taxid, "check_voucher", {}),
-                                    (taxid, "check_date", {}), (taxid, "check_amounts", {}),
-                                    (review, "recognition_account_warnings", [])):
+                                    (taxid, "check_date", {}), (taxid, "check_amounts", {})):
             fixture_patch = patch.object(module, name, return_value=value)
             fixture_patch.start()
             self.addCleanup(fixture_patch.stop)
@@ -154,7 +153,7 @@ class ItemAccountApiTests(unittest.TestCase):
     def test_save_endpoint_returns_current_and_mapping_history_uses_authenticated_actor(self):
         rec = self.new_record()
         row = json.loads(rec.current_json)["items"][0]
-        row.update(account_code="00120", account_name="文具費", remember_mapping=True)
+        row.update(account_code="0000", account_name="文具費", remember_mapping=True)
         payload = self.payload(rec, items=[row], actor={"username": "spoof", "name": "偽造"})
         with patch.object(auth, "get_user_by_token", return_value=self.actor), \
              patch.object(self.api["importdecl"], "is_import", return_value=False), \
@@ -164,7 +163,12 @@ class ItemAccountApiTests(unittest.TestCase):
             response = self.call_save(rec.id, payload)
         self.assertIsInstance(response, dict)
         self.assertEqual(response["id"], rec.id)
-        self.assertEqual(response["current"]["items"][0]["account_code"], "00120")
+        self.assertEqual(response["current"]["items"][0]["account_code"], "0000")
+        self.assertEqual(response["current"]["items"][0]["account_name"], "文具費")
+        self.assertEqual(response["detail_account_warnings"], [])
+        reloaded = self.api["_rec_to_dict"](review.get_voucher(rec.id), full=True)
+        self.assertEqual(reloaded["current"]["items"][0]["account_code"], "0000")
+        self.assertEqual(reloaded["detail_account_warnings"], [])
         self.assertIn("mapping_skipped", response)
         with Session(self.engine) as session:
             rule = session.exec(select(ItemAccountMapping)).one()
@@ -172,6 +176,7 @@ class ItemAccountApiTests(unittest.TestCase):
             self.assertEqual(rule.created_by, self.user_id)
             self.assertEqual(rule.updated_by_name, "API 審核者")
             self.assertEqual((history.actor_id, history.actor_name), (self.user_id, "API 審核者"))
+            self.assertEqual((rule.account_code, rule.account_name), ("0000", "文具費"))
 
     def test_lookup_is_company_scoped_and_strict_accounts_do_not_fall_back(self):
         rec = self.new_record(0)

@@ -71,22 +71,17 @@ def content(data):
     return result
 
 
-def account_warnings(data, chart):
-    names = {str(row["code"]): row["name"] for row in chart}
+def account_warnings(data):
     warnings = []
     for index, row in enumerate(data.get("items") or [], 1):
         code, name = str(row.get("account_code") or "").strip(), str(row.get("account_name") or "").strip()
         if not code or not name:
             warnings.append(f"第 {index} 列：科目待指定" if not code and not name else f"第 {index} 列：科目代號或名稱未完整")
-        elif code not in names:
-            warnings.append(f"第 {index} 列：科目 {code} 未列於公司科目表")
-        elif name != names[code]:
-            warnings.append(f"第 {index} 列：科目代號與名稱不符")
     return warnings
 
 
-def report_warnings(data, chart):
-    warnings = account_warnings(data, chart)
+def report_warnings(data):
+    warnings = account_warnings(data)
     if doc_types.get(data.get("doc_type_key", "")).get("has_entries"):
         for side, label in (("debit", "借方"), ("credit", "貸方")):
             rows = [row for row in data.get("items") or [] if row.get("source_direction") == side]

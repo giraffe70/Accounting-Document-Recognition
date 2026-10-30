@@ -94,31 +94,34 @@ class RecognitionDetailsTests(unittest.TestCase):
         self.assertNotEqual(recognition_details.content(original), recognition_details.content(account_changed))
         self.assertNotEqual(recognition_details.content(original), recognition_details.content(detail_changed))
 
-    def test_account_warnings_cover_blank_unknown_and_mismatched_accounts(self):
+    def test_account_warnings_only_check_completeness_and_preserve_free_text(self):
         data = {"items": [
             {"account_code": "", "account_name": ""},
             {"account_code": "6100", "account_name": "旅費"},
             {"account_code": "9999", "account_name": "未知科目"},
             {"account_code": "2100", "account_name": "現金"},
+            {"account_code": "0000", "account_name": "自訂科目"},
+            {"account_code": "6100", "account_name": " "},
+            {"account_code": " ", "account_name": "只有名稱"},
         ]}
-        chart = [{"code": "6100", "name": "旅費"}, {"code": "2100", "name": "銀行存款"}]
+        original = deepcopy(data)
 
-        warnings = recognition_details.account_warnings(data, chart)
+        warnings = recognition_details.account_warnings(data)
 
         self.assertEqual(warnings, [
             "第 1 列：科目待指定",
-            "第 3 列：科目 9999 未列於公司科目表",
-            "第 4 列：科目代號與名稱不符",
+            "第 6 列：科目代號或名稱未完整",
+            "第 7 列：科目代號或名稱未完整",
         ])
+        self.assertEqual(data, original)
 
     def test_report_checks_each_original_side_without_adding_sides_together(self):
         data = {"doc_type_key": "journal_voucher", "fields": {"debit_total": 100, "credit_total": 100},
                 "items": [{"account_code": "6200", "account_name": "運費", "source_direction": side, "amount": 100}
                           for side in ("debit", "credit")]}
-        chart = [{"code": "6200", "name": "運費"}]
-        self.assertEqual(recognition_details.report_warnings(data, chart), [])
+        self.assertEqual(recognition_details.report_warnings(data), [])
         data["items"][0]["amount"] = 120
-        self.assertEqual(recognition_details.report_warnings(data, chart), ["明細借方金額與原稿借方合計不符，請對照原圖核對"])
+        self.assertEqual(recognition_details.report_warnings(data), ["明細借方金額與原稿借方合計不符，請對照原圖核對"])
 
 
 if __name__ == "__main__":

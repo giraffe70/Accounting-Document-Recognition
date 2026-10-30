@@ -64,8 +64,7 @@ class RecognitionReviewTests(unittest.TestCase):
         auth = SimpleNamespace(get_user_by_token=lambda token: self.actor if actor else None)
         route = endpoint("api_recognition_report", {"Request": Request, "HTMLResponse": HTMLResponse,
             "JSONResponse": JSONResponse, "auth": auth, "review": review, "json": json, "ReviewStatus": ReviewStatus})
-        with patch.object(review, "recognition_account_warnings", return_value=[]):
-            return route(SimpleNamespace(cookies={"session": "synthetic"}), rec.id, version or rec.updated_at.isoformat())
+        return route(SimpleNamespace(cookies={"session": "synthetic"}), rec.id, version or rec.updated_at.isoformat())
 
     def test_detail_save_preserves_original_entries_instead_of_creating_posting_drafts(self):
         rec = self.record()
@@ -146,25 +145,39 @@ class RecognitionReviewTests(unittest.TestCase):
             "review": review, "json": json, "config": SimpleNamespace(UPLOAD_DIR=Path(self.tmp.name))})
         self.assertEqual(route(rec.id, expected_updated_at="old-version").status_code, 409)
 
-    def test_account_validation_uses_default_only_when_company_has_no_own_chart(self):
+    def test_account_validation_never_loads_company_or_default_chart(self):
         from app.services import accounts
-        rec = self.record()
-        data = {"doc_type_key": "receipt", "items": [{"account_code": "6050", "account_name": "運費"}]}
-        default = [{"code": "6050", "name": "運費"}]
-        with patch.object(accounts, "_company_key", side_effect=lambda value: value), \
-             patch.object(accounts, "_load_all", return_value={"_default": default}):
-            self.assertEqual(review.recognition_account_warnings(rec, data), [])
-        own = [{"code": "6205", "name": "運費"}]
-        with patch.object(accounts, "_company_key", side_effect=lambda value: value), \
-             patch.object(accounts, "_load_all", return_value={"_default": default, "synthetic": own}):
-            self.assertEqual(review.recognition_account_warnings(rec, data), ["第 1 列：科目 6050 未列於公司科目表"])
-            data["items"][0]["account_code"] = "6205"
-            self.assertEqual(review.recognition_account_warnings(rec, data), [])
+        data = {"doc_type_key": "receipt", "items": [{"account_code": "0000", "account_name": "自訂科目"}]}
+        with patch.object(accounts, "load_accounts", side_effect=AssertionError("must not load an account chart")), \
+             patch.object(review, "get_session", side_effect=AssertionError("warning checks do not need a company lookup")):
+            for company_id in (None, 1):
+                with self.subTest(company_id=company_id):
+                    self.assertEqual(review.recognition_account_warnings(SimpleNamespace(company_id=company_id), data), [])
 
-    def test_missing_company_is_distinguished_from_missing_account(self):
-        rec = SimpleNamespace(company_id=None)
-        data = {"items": [{"account_code": "6050", "account_name": "運費"}]}
-        self.assertEqual(review.recognition_account_warnings(rec, data), ["尚未指定歸屬公司，無法核對明細科目"])
+    def test_missing_company_does_not_suppress_account_or_amount_warnings(self):
+        data = {"doc_type_key": "journal_voucher", "fields": {"debit_total": 100},
+                "items": [{"account_code": "", "account_name": "", "source_direction": "debit", "amount": 120},
+                          {"account_code": "0000", "account_name": ""}]}
+        expected = ["第 1 列：科目待指定", "第 2 列：科目代號或名稱未完整",
+                    "明細借方金額與原稿借方合計不符，請對照原圖核對"]
+        for company_id in (None, 1):
+            with self.subTest(company_id=company_id):
+                self.assertEqual(review.recognition_account_warnings(SimpleNamespace(company_id=company_id), data), expected)
+
+    def test_custom_account_can_be_confirmed_and_printed_without_chart(self):
+        from app.services import accounts
+        with patch.object(accounts, "load_accounts", side_effect=AssertionError("must not load an account chart")):
+            rec = self.save(self.record(), "confirm", mutate=lambda data: data["items"][0].update(
+                account_code="0000", account_name="人工科目"))
+            reloaded = review.get_voucher(rec.id)
+            row = json.loads(reloaded.current_json)["items"][0]
+            self.assertEqual((row["account_code"], row["account_name"]), ("0000", "人工科目"))
+            result = self.report(reloaded)
+        self.assertEqual(result.status_code, 200)
+        html = result.body.decode("utf-8")
+        self.assertIn("0000", html)
+        self.assertIn("人工科目", html)
+        self.assertNotIn("公司科目表", html)
 
 
 class EntryGeometryTests(unittest.TestCase):

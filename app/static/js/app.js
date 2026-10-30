@@ -10,7 +10,7 @@
   let importJobGeneration = 0;
   let currentId = null;
   let currentVoucher = {};   // 目前載入的 current（保留 entries 等未編輯欄位）
-  let currentVersion = "", companyRecords = [], accountChart = [], reviewedItems = {};
+  let currentVersion = "", companyRecords = [], reviewedItems = {};
   let recognitionReady = false, recognitionDirty = false;
   let editBusy = false;
   let currentUser = null;
@@ -517,7 +517,6 @@
     }
     $("revCompanySel").value = rec.company_id == null ? "" : String(rec.company_id);
     updateReviewCompanyTaxId();
-    loadItemAccountChart();
     const typeKey = manualMode && isPreExtract && !prep.type_confirmed ? "" : v.doc_type_key || "other";
     populateTypeSel(typeKey);
     buildActiveFields(typeKey);
@@ -862,19 +861,6 @@
     "account_needs_review", "remember_mapping", "account_company_id", "account_item_key",
     "account_updated_by", "account_updated_by_name", "account_updated_at", "source_entry_id", "source_direction",
     "original_account_code", "original_account_name"]);
-  async function loadItemAccountChart() {
-    const company = selectedCompanyId();
-    accountChart = [];
-    const list = $("itemAccountCodes");
-    if (list) list.innerHTML = "";
-    if (company == null) return;
-    const response = await fetch(`/api/accounts?company_id=${company}`);
-    if (company !== selectedCompanyId() || !response.ok) return;
-    const chart = (await response.json()).accounts || [];
-    if (company !== selectedCompanyId()) return;
-    accountChart = chart;
-    if (list) list.innerHTML = accountChart.map((a) => `<option value="${esc(a.code)}">${esc(a.name)}</option>`).join("");
-  }
   function renderItems(items) {
     const body = $("itemsBody");
     const header = $("itemsSection").querySelector("thead tr");
@@ -893,7 +879,7 @@
         if (Number.isFinite(number)) value = number; else type = "text";
       }
       if (f.key === "description") return `<textarea data-item-key="description" data-kind="text" rows="2">${esc(value || "")}</textarea>`;
-      return `<input data-item-key="${esc(f.key)}" data-kind="${f.kind}" type="${type}"${type === "number" ? ' step="any" placeholder="—"' : ""}${f.key === "account_code" ? ' list="itemAccountCodes"' : ""} value="${esc(value ?? "")}">`;
+      return `<input data-item-key="${esc(f.key)}" data-kind="${f.kind}" type="${type}"${type === "number" ? ' step="any" placeholder="—"' : ""} value="${esc(value ?? "")}">`;
     };
     const source = it.account_needs_review ? "科目待核對" : {observed:"原稿科目",mapping:"由品名對應帶入",manual:"人工指定"}[it.account_source] || "科目待指定";
     return `<tr data-original="${esc(JSON.stringify(it))}" data-item-id="${esc(it.item_id)}"
@@ -918,11 +904,6 @@
         tr._lookupGeneration = (tr._lookupGeneration || 0) + 1;
         delete reviewedItems[tr.dataset.itemId];
         tr.dataset.source = "manual";
-        if (key === "account_code") {
-          const code = tr.querySelector('[data-item-key="account_code"]').value;
-          const known = accountChart.find((a) => a.code === code);
-          if (known) tr.querySelector('[data-item-key="account_name"]').value = known.name;
-        }
         showItemAccountStatus(tr);
       }));
       tr.querySelector(".keep-account").addEventListener("click", () => acknowledgeItemAccount(tr));
@@ -1493,7 +1474,6 @@
     updateReviewCompanyTaxId();
     if (!currentId) return;
     try {
-      await loadItemAccountChart();
       if ($("revForm").classList.contains("prepared")) {
         const company = companyRecords.find((c) => c.id === selectedCompanyId());
         const r = await fetch(`/api/vouchers/${currentId}/company`, { method:"POST",headers:json(),
