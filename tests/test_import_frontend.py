@@ -31,9 +31,9 @@ class ImportFrontendTests(unittest.TestCase):
         self.assertIn('id="uploadCompanyStatus"', html)
         self.assertNotIn("未指定", company_select)
         for marker in ('id="importState"', 'id="importHint"', 'id="btnImportReview"', 'id="btnImportRetry"', 'id="btnImportCancel"',
-                       'id="appearancePosition"', 'id="appearanceRecovery"', 'id="btnAppearanceRetry"', 'id="btnAppearanceCancel"'):
+                       'id="appearancePosition"', 'id="appearanceRecovery"', 'id="btnAppearanceRetry"', 'id="btnAppearanceCancel"', 'id="btnExtractAll"'):
             self.assertIn(marker, html)
-        for obsolete in ('id="importJobs"', 'id="appearanceBatch"', 'id="batchType"', 'id="dirInput"', 'id="uploadMode"'):
+        for obsolete in ('id="importJobs"', 'id="appearanceBatch"', 'id="batchType"', 'id="dirInput"', 'id="uploadMode"', 'id="btnMerge"'):
             self.assertNotIn(obsolete, html)
         self.assertNotIn("renderImportJobs", app_js)
         self.assertNotIn('href="/api/import-jobs/', html)
@@ -121,13 +121,18 @@ class ImportFrontendTests(unittest.TestCase):
         self.assertTrue(result["retryVisible"])
         self.assertFalse(result["restorePending"])
 
-    def test_prepared_list_is_single_review_item_while_queued_keeps_multiselect(self):
+    def test_prepared_list_is_single_review_item_and_queued_has_no_checkboxes(self):
         result = self.run_synthetic()["list"]
 
         self.assertEqual(result["preparedIds"], [2])
         self.assertFalse(result["preparedHasCheckboxes"])
         self.assertEqual(result["queuedIds"], [1, 2, 3])
-        self.assertEqual(result["queuedCheckedIds"], [2])
+        self.assertFalse(result["queuedHasCheckboxes"])
+        self.assertTrue(result["queuedExtractVisible"])
+        self.assertEqual(result["queuedOpenedId"], 3)
+        self.assertTrue(result["queuedEmptyVisible"])
+        self.assertTrue(result["pendingExtractHidden"])
+        self.assertTrue(result["importVisible"])
         self.assertIn("沒有可確認的單據", result["emptyTextWhenNoReview"])
 
 

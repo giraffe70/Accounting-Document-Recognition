@@ -37,15 +37,12 @@ function makeNode(id) {
   }});
   return nodes[id] = node;
 }
-const ids = ["dropZone","fileInput","progress","progressText","modal","importState","importHint","btnImportReview","btnImportRetry","btnImportCancel","uploadCompany","uploadCompanyStatus","uploadCompanyTaxId","revCompanySel","revCompanyTaxId","btnScanImport","appearanceRecovery","btnAppearanceRetry","btnAppearanceCancel","appearancePosition","btnScanList","scanFiles","scanDirHint","btnExtractAll","listBody","listEmpty","listTable","btnMerge","confirmationFilter","queueTitle"];
+const ids = ["dropZone","fileInput","progress","progressText","modal","importState","importHint","btnImportReview","btnImportRetry","btnImportCancel","uploadCompany","uploadCompanyStatus","uploadCompanyTaxId","revCompanySel","revCompanyTaxId","btnScanImport","appearanceRecovery","btnAppearanceRetry","btnAppearanceCancel","appearancePosition","btnScanList","scanFiles","scanDirHint","btnExtractAll","listBody","listEmpty","listTable","importView","queueView","confirmationFilter","queueTitle"];
 ids.forEach(makeNode);
 nodes.confirmationFilter.value = "prepared";
 const document = {
   getElementById: (id) => nodes[id] || null,
-  querySelectorAll(selector) {
-    if (selector === ".mchk:checked") return (nodes.listBody.checks || []).filter(x => x.checked);
-    return [];
-  },
+  querySelectorAll() { return []; },
 };
 const context = {
   console, Map, Set, Array, JSON, String, Number, encodeURIComponent, document, nodes, events, dropZone: nodes.dropZone, fileInput: nodes.fileInput, progress: nodes.progress, progressText: nodes.progressText, modal: nodes.modal,
@@ -242,21 +239,27 @@ async function scanScenario() {
   return JSON.parse(request.body);
 }
 async function listScenario() {
+  const stageStart = source.indexOf("  function setStage(stage)");
+  const stageEnd = source.indexOf("  async function refreshStats()", stageStart);
   const listStart = source.indexOf("  async function loadList()");
-  const listEnd = source.indexOf("  // 合併多頁為一張", listStart);
+  const listEnd = source.indexOf("  // ── 刪除 ──", listStart);
+  if (stageStart < 0 || stageEnd < 0) throw new Error("production setStage not found");
   if (listStart < 0 || listEnd < 0) throw new Error("production loadList not found");
   const body = nodes.listBody;
   body.checks = []; body.rows = [];
   Object.defineProperty(body, "innerHTML", { configurable: true, get() { return this.html || ""; }, set(html) {
     this.html = html;
-    this.checks = Array.from(html.matchAll(/class="mchk" data-id="(\d+)"( checked)?/g), m => ({ dataset: { id: m[1] }, checked: !!m[2], addEventListener() {} }));
-    this.rows = Array.from(html.matchAll(/<tr data-id="(\d+)"/g), m => ({ dataset: { id: m[1] }, addEventListener() {} }));
+    this.checks = Array.from(html.matchAll(/<input\b[^>]*\btype="checkbox"[^>]*>/g));
+    this.rows = Array.from(html.matchAll(/<tr data-id="(\d+)"/g), m => ({
+      dataset: { id: m[1] }, listeners: {},
+      addEventListener(type, handler) { this.listeners[type] = handler; },
+    }));
   }});
-  body.querySelectorAll = (selector) => selector === ".mchk:checked" ? body.checks.filter(cb => cb.checked) : selector === ".mchk" ? body.checks : body.rows;
+  body.querySelectorAll = (selector) => selector === "tr" ? body.rows : [];
   nodes.listEmpty.classList.remove("hidden"); nodes.listTable.classList.add("hidden");
   nodes.listBody.html = "";
   nodes.confirmationFilter.value = "prepared";
-  const rows = [{ id: 1, status: "prepared", doc_type: "one", origin: { layout: { auto_split: true } } }, { id: 2, status: "prepared", doc_type: "two" }, { id: 3, status: "queued", doc_type: "three" }];
+  let rows = [{ id: 1, status: "prepared", doc_type: "one", origin: { layout: { auto_split: true } } }, { id: 2, status: "prepared", doc_type: "two" }, { id: 3, status: "queued", doc_type: "three" }];
   context.currentStage = "prepared"; context.currentId = null;
   context.EMPTY_LIST_TEXT = "此階段目前沒有憑證。";
   let activeJobForList = { id: "job", status: "awaiting_review", review_ids: [2] };
@@ -265,28 +268,40 @@ async function listScenario() {
   context.STAGE_STATUS = { prepared: "prepared", queued: "queued" };
   context.STAGE_TITLE = { prepared: "ready", queued: "queue" };
   context.STATUS_CLASS = {}; context.STATUS_LABEL = {}; context.DOC_TYPES = {};
-  context.updateMergeBtn = () => {};
   context.refreshStats = () => {};
   context.renderImportState = () => {};
   context.fetch = async () => ({ json: async () => ({ items: rows }) });
-  vm.runInContext(source.slice(listStart, listEnd) + "\nglobalThis.testLoadList = loadList;", context);
-  await context.testLoadList();
+  vm.runInContext(source.slice(stageStart, stageEnd) + source.slice(listStart, listEnd) +
+    "\nglobalThis.testLoadList = loadList; globalThis.testSetStage = setStage;", context);
+  async function switchStage(stage) {
+    context.testSetStage(stage);
+    await new Promise(setImmediate);
+  }
+  await switchStage("prepared");
   const preparedIds = body.rows.map(row => Number(row.dataset.id));
   const preparedHasCheckboxes = body.checks.length > 0;
-  context.currentStage = "queued"; nodes.confirmationFilter.value = "queued";
-  await context.testLoadList();
-  body.checks.find(cb => cb.dataset.id === "2").checked = true;
+  await switchStage("queued");
   await context.testLoadList();
   const queuedIds = body.rows.map(row => Number(row.dataset.id));
-  const queuedCheckedIds = body.checks.filter(cb => cb.checked).map(cb => Number(cb.dataset.id));
-  activeJobForList = { id: "job", status: "awaiting_review", review_ids: [] };
-  context.currentStage = "prepared"; nodes.confirmationFilter.value = "prepared";
+  const queuedHasCheckboxes = body.checks.length > 0;
+  const queuedExtractVisible = !nodes.btnExtractAll.classList.contains("hidden");
+  body.rows[2].listeners.click();
+  const queuedOpenedId = context.currentId;
+  rows = [];
   await context.testLoadList();
+  const queuedEmptyVisible = !body.rows.length && !nodes.listEmpty.classList.contains("hidden") && nodes.listTable.classList.contains("hidden");
+  await switchStage("pending");
+  const pendingExtractHidden = nodes.btnExtractAll.classList.contains("hidden");
+  await switchStage("import");
+  const importVisible = !nodes.importView.classList.contains("hidden") && nodes.queueView.classList.contains("hidden");
+  activeJobForList = { id: "job", status: "awaiting_review", review_ids: [] };
+  await switchStage("prepared");
   const emptyTextWhenNoReview = nodes.listEmpty.textContent;
   activeJobForList = { id: "job", status: "awaiting_review", review_ids: [], pages: [{ status: "completed", phase: "skipped" }] };
   await context.testLoadList();
   const emptyTextWhenSkipped = nodes.listEmpty.textContent;
-  return { preparedIds, preparedHasCheckboxes, queuedIds, queuedCheckedIds, emptyTextWhenNoReview, emptyTextWhenSkipped };
+  return { preparedIds, preparedHasCheckboxes, queuedIds, queuedHasCheckboxes, queuedExtractVisible, queuedOpenedId,
+    queuedEmptyVisible, pendingExtractHidden, importVisible, emptyTextWhenNoReview, emptyTextWhenSkipped };
 }
 (async () => {
   await context.testImport.restoreImportJobs();

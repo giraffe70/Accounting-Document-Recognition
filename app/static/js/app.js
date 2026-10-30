@@ -295,14 +295,9 @@
     $("queueView").classList.toggle("hidden", isImport);
     $("btnExtractAll").classList.toggle("hidden", stage !== "queued");
     $("confirmationFilter").classList.toggle("hidden", stage !== "pending");
-    $("btnMerge").classList.toggle("hidden", stage !== "queued");
     renderImportState();
     if (!isImport) { $("queueTitle").textContent = STAGE_TITLE[stage] || "佇列"; loadList(); }
     refreshStats();
-  }
-
-  function updateMergeBtn() {
-    $("btnMerge").disabled = document.querySelectorAll(".mchk:checked").length < 2;
   }
 
   async function refreshStats() {
@@ -333,12 +328,9 @@
     const activeJob = stage === "prepared" ? activeImportJob() : null;
     const skippedPages = activeJob?.pages?.filter(page => page.phase === "skipped").length || 0;
     $("listEmpty").textContent = activeJob && IMPORT_ACTIVE.has(activeJob.status) ? "正在準備目前頁面，請稍候…" : activeJob && ["failed","partial_failed","interrupted"].includes(activeJob.status) ? "目前頁面尚未完成，請重試或取消目前匯入。" : activeJob?.status === "awaiting_review" && !currentReviewIds(activeJob).length ? skippedPages ? `目前匯入工作已略過 ${skippedPages} 個非單據頁。` : "目前工作沒有可確認的單據，請取消目前匯入後重新上傳。" : EMPTY_LIST_TEXT;
-    if (!rows.length) { body.innerHTML = ""; $("listTable").classList.add("hidden"); $("listEmpty").classList.remove("hidden"); updateMergeBtn(); refreshStats(); if (stage === "prepared" && !recognitionDirty && !editBusy) clearReview(); renderImportState(); return; }
+    if (!rows.length) { body.innerHTML = ""; $("listTable").classList.add("hidden"); $("listEmpty").classList.remove("hidden"); refreshStats(); if (stage === "prepared" && !recognitionDirty && !editBusy) clearReview(); renderImportState(); return; }
     $("listEmpty").classList.add("hidden"); $("listTable").classList.remove("hidden");
-    const mergeable = currentStage === "queued";
-    const selectedIds = new Set(Array.from(body.querySelectorAll(".mchk:checked"), (cb) => cb.dataset.id));
     body.innerHTML = rows.map((r) => {
-      const chk = mergeable ? `<input type="checkbox" class="mchk" data-id="${r.id}"${selectedIds.has(String(r.id)) ? " checked" : ""}>` : "";
       const att = r.attachments ? ` <span class="att-badge" title="含 ${r.attachments} 附頁">📎${r.attachments}</span>` : "";
       // 憑證號常是空的（對帳單、部分收據無單號），故以「種類」為第二行辨識依據，
       // 否則清單只剩一排數字看不出是什麼單
@@ -347,34 +339,20 @@
       const type = esc((spec && spec.label) || r.doc_type) || "自動判斷類型";
       return `
       <tr data-id="${r.id}" class="${r.id === currentId ? "sel" : ""}" title="${esc(r.source_file || "")}">
-        <td>${chk}${currentStage === "prepared" && r.has_image ? `<img src="/api/vouchers/${r.id}/image?expected_updated_at=${encodeURIComponent(r.updated_at)}" alt="單據縮圖" loading="lazy" style="width:72px;height:88px;object-fit:contain;vertical-align:middle">` : ""}${esc(r.voucher_id) || "—"}${att}<div class="row-sub">${type}</div></td>
+        <td>${currentStage === "prepared" && r.has_image ? `<img src="/api/vouchers/${r.id}/image?expected_updated_at=${encodeURIComponent(r.updated_at)}" alt="單據縮圖" loading="lazy" style="width:72px;height:88px;object-fit:contain;vertical-align:middle">` : ""}${esc(r.voucher_id) || "—"}${att}<div class="row-sub">${type}</div></td>
         <td>${esc(r.company) || "—"}</td>
         <td>${esc(r.date) || "—"}</td>
         <td>${nf(r.total_amount)}</td>
         <td><span class="tag ${STATUS_CLASS[r.status] || ""}">${STATUS_LABEL[r.status] || r.status}</span></td>
       </tr>`;
     }).join("");
-    body.querySelectorAll("tr").forEach((tr) => tr.addEventListener("click", (e) => {
-      if (e.target.classList.contains("mchk")) return;
+    body.querySelectorAll("tr").forEach((tr) => tr.addEventListener("click", () => {
       openReview(Number(tr.dataset.id));
     }));
-    body.querySelectorAll(".mchk").forEach((cb) => cb.addEventListener("click", (e) => { e.stopPropagation(); updateMergeBtn(); }));
-    updateMergeBtn();
     refreshStats();
     renderImportState();
     if (stage === "prepared" && rows[0].id !== currentId && !recognitionDirty && !editBusy) await openReview(rows[0].id);
   }
-
-  // 合併多頁為一張（主頁＋附頁）
-  $("btnMerge").addEventListener("click", async () => {
-    const ids = Array.from(document.querySelectorAll(".mchk:checked")).map((c) => Number(c.dataset.id));
-    if (ids.length < 2) { alert("請勾選至少兩頁"); return; }
-    const primary = Math.min(...ids);
-    if (!confirm(`將勾選的 ${ids.length} 頁合併為一張憑證（以 #${primary} 為主頁、其餘為附頁，僅辨識主頁）？`)) return;
-    const d = await (await fetch("/api/vouchers/merge", { method: "POST", headers: json(), body: JSON.stringify({ primary_id: primary, ids }) })).json();
-    if (!d.ok) { alert(errText(d, "合併失敗")); return; }
-    toast(`已合併（主頁 #${primary}，${d.attachments} 附頁）`); loadList(); openReview(primary);
-  });
 
   // ── 刪除 ──
   function isAdminUser() { return !!currentUser && currentUser.is_admin === true; }

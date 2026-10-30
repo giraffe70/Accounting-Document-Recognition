@@ -204,7 +204,6 @@ table.list th:nth-child(4) { text-align: right; }
 .pg-thumb.active { background: var(--blue); color: #fff; border-color: var(--blue); font-weight: 600; }
 /* 清單附頁徽章 */
 .att-badge { font-size: 11px; color: #1b7c83; }
-.mchk { margin-right: 6px; vertical-align: middle; }
 
 /* 匯入頁：資料夾選取與掃描來源列檔 */
 .folder-btn { margin-top: 10px; }
