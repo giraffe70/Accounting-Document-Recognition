@@ -31,6 +31,8 @@ const nodes = {
   'btnSave': { disabled: false, addEventListener: () => {} },
   'btnConfirm': { disabled: false, addEventListener: () => {} },
   'btnReturnImport': { disabled: false, addEventListener: () => {} },
+  'confirmedVoucherLink': { href: '' },
+  'confirmationSuccess': { classList: { remove: () => events.push({ type: 'confirmationSuccess' }) } },
 };
 let currentId = input.currentId ?? 12;
 let currentVoucher = { fields: { amount: 125 }, items: [], entries: [{ id: 'untouched-entry' }], status: 'pending' };
@@ -108,6 +110,7 @@ globalThis.api = { confirmCurrent, saveDraft, persistCurrentEdits };`, context);
     fileValue: context.fileInput.value,
     currentId: vm.runInContext('currentId', context),
     currentVersion: vm.runInContext('currentVersion', context),
+    confirmedHref: nodes.confirmedVoucherLink.href,
   }));
 })().catch((error) => { console.error(error.stack || error); process.exit(1); });
 """
@@ -503,6 +506,17 @@ class ConfirmationFrontendTests(unittest.TestCase):
         self.assertEqual(requests[0]["body"]["expected_updated_at"], "original-ts")
         self.assertEqual(requests[0]["body"]["voucher"]["entries"], [{"id": "untouched-entry"}])
         self.assertIn("已確認", " ".join(e["message"] for e in result["events"] if e["type"] == "toast"))
+        self.assertIsNone(result["currentId"])
+        self.assertIn("clearReview", self.event_types(result))
+        self.assertIn("confirmationSuccess", self.event_types(result))
+        self.assertEqual(result["confirmedHref"], "/confirmed.html#v=12")
+
+    def test_failed_confirmation_keeps_editor_and_does_not_show_success_link(self):
+        result = self.run_flow(action="confirm", saveStatus=500)
+        self.assertEqual(result["currentId"], 12)
+        self.assertNotIn("clearReview", self.event_types(result))
+        self.assertNotIn("confirmationSuccess", self.event_types(result))
+        self.assertEqual(result["confirmedHref"], "")
 
     def test_save_return_and_default_temporary_send_the_right_action(self):
         saved = self.run_flow(action="draft")
@@ -670,14 +684,15 @@ process.stdout.write(JSON.stringify(input.cases.map(([dx, dy]) => context.f(dx, 
         self.assertFalse(any(r["url"].endswith("/set-type") or r["url"].endswith("/recognize") for r in failed["requests"]))
         self.assertTrue(any(e["type"] == "alert" and "辨識失敗" in e["message"] for e in failed["events"]))
 
-    def test_confirmation_tabs_and_filter_options_are_present(self):
+    def test_confirmation_tabs_are_pending_only_and_link_to_confirmed_history(self):
         parser = WorkflowMarkupParser()
         parser.feed(APP_HTML.read_text(encoding="utf-8"))
 
         self.assertEqual([stage for stage, _label in parser.tabs], ["import", "prepared", "queued", "pending"])
-        self.assertEqual(parser.options, [
-            ("pending", "待確認"), ("confirmed", "已確認"), ("pending,confirmed", "全部"),
-        ])
+        self.assertEqual(parser.options, [])
+        self.assertNotIn('$("confirmationFilter")', self.source)
+        self.assertIn('const status = STAGE_STATUS[currentStage] || "";', self.source)
+        self.assertIn('href="/confirmed.html"', APP_HTML.read_text(encoding="utf-8"))
 
     def test_print_requires_clean_confirmed_recognition_and_uses_report_version(self):
         dirty = self.run_print(ready=True, event="input")

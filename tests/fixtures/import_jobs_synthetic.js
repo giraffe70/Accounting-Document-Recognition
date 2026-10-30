@@ -37,9 +37,8 @@ function makeNode(id) {
   }});
   return nodes[id] = node;
 }
-const ids = ["dropZone","fileInput","progress","progressText","modal","importState","importHint","btnImportReview","btnImportRetry","btnImportCancel","uploadCompany","uploadCompanyStatus","uploadCompanyTaxId","revCompanySel","revCompanyTaxId","btnScanImport","appearanceRecovery","btnAppearanceRetry","btnAppearanceCancel","appearancePosition","btnScanList","scanFiles","scanDirHint","btnExtractAll","listBody","listEmpty","listTable","importView","queueView","confirmationFilter","queueTitle"];
+const ids = ["dropZone","fileInput","progress","progressText","modal","importState","importHint","btnImportReview","btnImportRetry","btnImportCancel","uploadCompany","uploadCompanyStatus","uploadCompanyTaxId","revCompanySel","revCompanyTaxId","btnScanImport","appearanceRecovery","btnAppearanceRetry","btnAppearanceCancel","appearancePosition","btnScanList","scanFiles","scanDirHint","btnExtractAll","listBody","listEmpty","listTable","importView","queueView","confirmationSuccess","queueTitle"];
 ids.forEach(makeNode);
-nodes.confirmationFilter.value = "prepared";
 const document = {
   getElementById: (id) => nodes[id] || null,
   querySelectorAll() { return []; },
@@ -258,7 +257,6 @@ async function listScenario() {
   body.querySelectorAll = (selector) => selector === "tr" ? body.rows : [];
   nodes.listEmpty.classList.remove("hidden"); nodes.listTable.classList.add("hidden");
   nodes.listBody.html = "";
-  nodes.confirmationFilter.value = "prepared";
   let rows = [{ id: 1, status: "prepared", doc_type: "one", origin: { layout: { auto_split: true } } }, { id: 2, status: "prepared", doc_type: "two" }, { id: 3, status: "queued", doc_type: "three" }];
   context.currentStage = "prepared"; context.currentId = null;
   context.EMPTY_LIST_TEXT = "此階段目前沒有憑證。";

@@ -284,7 +284,6 @@
   // ── 階段分頁 ──
   document.querySelectorAll(".stage-tab").forEach((t) =>
     t.addEventListener("click", () => setStage(t.dataset.stage)));
-  $("confirmationFilter").addEventListener("change", () => loadList());
 
   function setStage(stage) {
     currentStage = stage;
@@ -294,7 +293,7 @@
     $("importView").classList.toggle("hidden", !isImport);
     $("queueView").classList.toggle("hidden", isImport);
     $("btnExtractAll").classList.toggle("hidden", stage !== "queued");
-    $("confirmationFilter").classList.toggle("hidden", stage !== "pending");
+    $("confirmationSuccess").classList.add("hidden");
     renderImportState();
     if (!isImport) { $("queueTitle").textContent = STAGE_TITLE[stage] || "佇列"; loadList(); }
     refreshStats();
@@ -314,7 +313,7 @@
   async function loadList() {
     if (currentStage === "import") { refreshStats(); return; }
     const stage = currentStage;
-    const status = currentStage === "pending" ? $("confirmationFilter").value : STAGE_STATUS[currentStage] || "";
+    const status = STAGE_STATUS[currentStage] || "";
     const url = "/api/vouchers" + (status ? `?status=${encodeURIComponent(status)}` : "");
     const data = await (await fetch(url)).json();
     if (stage !== currentStage) return;
@@ -479,6 +478,7 @@
   // ── 審核編輯 ──
   async function openReview(id) {
     if (editBusy) return;
+    $("confirmationSuccess").classList.add("hidden");
     currentId = id;
     if (cropping) setCropMode(false);
     const rec = await (await fetch(`/api/vouchers/${id}`)).json();
@@ -1130,8 +1130,11 @@
 
   async function confirmCurrent() {
     try {
-      await persistCurrentEdits("confirm");
-      toast("辨識內容已確認，可列印報告");
+      const saved = await persistCurrentEdits("confirm");
+      if (currentId === saved.id) clearReview();
+      $("confirmedVoucherLink").href = `/confirmed.html#v=${saved.id}`;
+      $("confirmationSuccess").classList.remove("hidden");
+      toast("辨識內容已確認，可至已確認單據頁檢視與列印");
       loadList();
     } catch (err) {
       alert(`確認失敗：${err.message}`);
@@ -1606,6 +1609,7 @@
     importJobGeneration += 1;
     $("loginOverlay").classList.add("hidden");
     $("logoutBtn").classList.remove("hidden");
+    $("confirmedBtn").classList.remove("hidden");
     const chip = $("userChip");
     chip.textContent = `${currentUser.name}（${currentUser.is_admin ? "系統管理員" : "一般使用者"}）`;
     chip.classList.remove("hidden");

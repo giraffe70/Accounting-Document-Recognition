@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>已確認單據</title>
+  <link rel="stylesheet" href="/css/styles.css">
+  <link rel="stylesheet" href="/css/confirmed.css">
+  <script defer src="/js/confirmed.js"></script>
+</head>
+<body class="confirmed-page">
+  <header class="topbar">
+    <a class="btn" href="/" aria-label="返回作業頁">← 返回作業頁</a>
+    <div class="brand"><span class="logo">✓</span><span>已確認單據</span></div>
+    <span class="spacer"></span>
+    <span id="userName" class="hint"></span>
+  </header>
+  <main class="confirmed-main">
+    <section class="panel" aria-labelledby="listTitle">
+      <div class="row-between"><h2 id="listTitle">已確認單據</h2><span id="resultCount" class="hint"></span></div>
+      <form id="filters" class="confirmed-filters">
+        <label>公司<select id="companyFilter"><option value="">全部公司</option></select></label>
+        <label>單據日期起<input id="dateFrom" type="date"></label>
+        <label>單據日期迄<input id="dateTo" type="date"></label>
+        <div class="filter-actions"><button class="btn primary" type="submit">查詢</button><button class="btn" id="clearFilters" type="button">清除條件</button></div>
+      </form>
+      <div id="listMessage" class="callout hidden" role="status"></div>
+      <div class="confirmed-table-wrap">
+        <table class="list confirmed-table">
+          <thead><tr><th>號碼／種類</th><th>公司</th><th>單據日期</th><th>金額</th><th>確認人</th><th>確認時間</th></tr></thead>
+          <tbody id="confirmedRows"></tbody>
+        </table>
+      </div>
+      <nav class="confirmed-pagination" aria-label="清單頁碼">
+        <button class="btn" id="prevPage" type="button">上一頁</button><span id="pageStatus" aria-live="polite"></span><button class="btn" id="nextPage" type="button">下一頁</button>
+      </nav>
+    </section>
+  </main>
+  <dialog id="detailDialog" class="confirmed-dialog" aria-labelledby="detailTitle">
+    <div class="drawer-head"><div><h2 id="detailTitle">單據明細</h2><div id="detailMessage" class="hint" role="status"></div></div><button id="closeDetail" class="btn" type="button">關閉</button></div>
+    <div id="detailBody" class="drawer-body"></div>
+  </dialog>
+</body>
+</html>

@@ -1,0 +1,37 @@
+.confirmed-main { max-width: 1440px; padding: 20px 24px; margin: 0 auto; }
+.confirmed-filters { display: flex; align-items: end; gap: 12px; flex-wrap: wrap; margin: 12px 0; }
+.confirmed-filters label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--muted); }
+.confirmed-filters select, .confirmed-filters input { min-width: 175px; padding: 7px 9px; border: 1px solid var(--border); border-radius: 7px; background: white; font: inherit; color: var(--text); }
+.filter-actions { display: flex; gap: 7px; }
+.confirmed-table-wrap { overflow-x: auto; }
+.confirmed-table { min-width: 760px; }
+.confirmed-table th:nth-child(3), .confirmed-table th:nth-child(6), .confirmed-table td:nth-child(3), .confirmed-table td:nth-child(6) { white-space: nowrap; }
+.confirmed-table td:nth-child(4) { text-align: right; white-space: nowrap; }
+.confirmed-table th:nth-child(4) { text-align: right; }
+.confirmed-table .voucher-link { padding: 2px 5px; border: 0; background: transparent; color: var(--blue); text-decoration: underline; cursor: pointer; font: inherit; font-weight: 600; }
+.confirmed-pagination { display: flex; align-items: center; justify-content: center; gap: 14px; margin-top: 14px; }
+.confirmed-dialog { position: fixed; inset: 0 0 0 auto; margin: 0 0 0 auto; width: min(760px, 92vw); height: 100dvh; max-width: none; max-height: none; padding: 0; border: 0; background: var(--bg); color: var(--text); box-shadow: -8px 0 32px #0002; }
+.confirmed-dialog::backdrop { background: #1f232866; }
+.drawer-head { position: sticky; top: 0; z-index: 2; display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 14px 20px; border-bottom: 1px solid var(--border); background: var(--panel); }
+.drawer-head h2 { font-size: 18px; }
+.drawer-body { padding: 16px 20px 32px; }
+.drawer-body .card { overflow-x: auto; }
+.drawer-body img { max-width: 100%; max-height: 62vh; object-fit: contain; display: block; margin: 8px auto; border: 1px solid var(--border); background: #fff; }
+.drawer-pages { display: flex; gap: 6px; flex-wrap: wrap; }
+.drawer-pages button[aria-current="page"] { background: var(--blue); color: white; }
+.detail-table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 13px; }
+.detail-table th, .detail-table td { border: 1px solid var(--border); padding: 5px 7px; text-align: left; overflow-wrap: anywhere; }
+.detail-table th { background: #f6f8fa; }
+@media (max-width: 600px) {
+  .confirmed-page .topbar { flex-wrap: wrap; gap: 8px; padding: 10px 12px; }
+  .confirmed-page .topbar .btn { white-space: nowrap; text-decoration: none; font-size: 13px; }
+  .confirmed-page .topbar .brand { font-size: 16px; white-space: nowrap; }
+  .confirmed-page .topbar .spacer { display: none; }
+  .confirmed-page #userName { flex-basis: 100%; text-align: right; margin-top: 0; }
+  .confirmed-main { padding: 12px; }
+  .confirmed-filters label, .confirmed-filters select, .confirmed-filters input { width: 100%; }
+  .filter-actions { width: 100%; }
+  .filter-actions button { flex: 1; }
+  .confirmed-dialog { inset: 0; width: 100vw; height: 100dvh; }
+  .drawer-body { padding: 12px; }
+}

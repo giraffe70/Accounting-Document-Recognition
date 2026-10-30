@@ -10,6 +10,7 @@
   <header class="topbar">
     <div class="brand"><img class="brand-logo" src="/icons/ITRI_MiniLogo.png" alt="ITRI"> 憑證辨識系統 </div>
     <div class="spacer"></div>
+    <a id="confirmedBtn" class="btn hidden" href="/confirmed.html">已確認單據</a>
     <button id="databaseBtn" class="btn hidden" onclick="location.href='/database.html'">🗃️ 歷史紀錄</button>
     <button id="usersBtn" class="btn hidden" onclick="location.href='/users.html'">👥 權限管理</button>
     <button id="settingsBtn" class="btn hidden">⚙️ 模型設定</button>
@@ -81,14 +82,10 @@
         <div class="row-between">
           <h2 id="queueTitle">佇列</h2>
           <span>
-            <select id="confirmationFilter" class="select select-sm hidden" aria-label="確認狀態篩選">
-              <option value="pending">待確認</option>
-              <option value="confirmed">已確認</option>
-              <option value="pending,confirmed">全部</option>
-            </select>
             <button id="btnExtractAll" class="btn btn-sm primary hidden">⚡ 一鍵提取全部</button>
           </span>
         </div>
+        <p id="confirmationSuccess" class="hint hidden" role="status">辨識內容已確認。<a id="confirmedVoucherLink" href="/confirmed.html">查看已確認單據</a></p>
         <div id="eProgress" class="progress hidden">
           <div class="bar"><div id="eBarFill" class="fill"></div></div>
           <div id="eProgressText" class="hint"></div>
@@ -267,6 +264,6 @@
     <span class="eng-hint" id="engHint"></span>
   </div>
 
-  <script src="/js/app.js?v=20261030-remove-merge"></script>
+  <script src="/js/app.js?v=20261030-confirmed-page"></script>
 </body>
 </html>

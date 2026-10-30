@@ -285,6 +285,7 @@ OCR 本身不直接解析一般單據的語意欄位，主要內容仍由 VLM �
 | `POST /api/batch`、`GET /api/job` | 多檔背景匯入與進度輪詢 |
 | `GET /api/scan-source/list`、`POST /api/scan-source/import` | 掃描來源清單與匯入 |
 | `GET /api/vouchers`、`GET /api/vouchers/{rec_id}` | 依狀態／公司／期別查詢與單筆內容 |
+| `GET /api/confirmed-vouchers` | 已確認正式單據，依公司 ID、單據日期起迄查詢與分頁（預設 50、最多 100 筆） |
 | `PUT /api/vouchers/{rec_id}` | 保存人工修正內容 |
 | `POST /api/vouchers/{rec_id}/confirm-appearance` | 外觀確認，可帶 `doc_type_key`，加入待提取清單 |
 | `POST /api/vouchers/{rec_id}/confirm` | 保存辨識內容的人工確認；不代表會計分錄確認 |
@@ -299,6 +300,8 @@ OCR 本身不直接解析一般單據的語意欄位，主要內容仍由 VLM �
 AI 分錄建議、分錄草稿／確認、日記帳及會計傳票格式已退役；除摘要彙總表 API 外，相關會計模板端點回傳 404。`POST /api/analyze` 只處理辨識準備，不產生會計分錄。
 
 ## 7. 設定與啟動
+
+一般登入使用者可從主頁頂部「已確認單據」開啟 `/confirmed.html`，依歸屬公司與單據日期查閱歷史憑證、原圖及附頁，並列印既有辨識報告。第四步只列待確認單據；確認成功後收起編輯區並提供新頁面的單據連結。新頁面為唯讀，列印沿用既有版本保護。日期篩選包含起迄日，可單填其中一端；讀取時沿用日期正規化，不改寫保存內容，缺少有效完整日期的單據排在最後且不符合日期條件。後端以日期由新到舊、ID 由大到小排序與分頁，只回傳清單摘要。
 
 管理員可從主頁頂部「資料庫檢視」開啟 `/database.html`，依序選擇資料庫與資料表。後端 `GET /api/database/tables` 列出固定資料庫路徑中的非 SQLite 內部資料表、筆數、中文名稱、用途及可用篩選條件；`GET /api/database/rows` 接受 `database`、`table`、`q`、`page`、`page_size`，另可使用 `date_from`、`date_to`、`status` 篩選，欄位資訊含中文名稱。日期篩選僅用於有指定日期來源的表；憑證紀錄依 `current_json.date`，驗證資料庫的日期依台灣時間計算。搜尋、日期和狀態條件同時用於筆數與分頁查詢（每頁最多 100 筆）。
 資料來源包含 `app/data/app.db` 及已存在的 `app/data/validation/validation.db`。兩個 API 均在 router dependency 檢查管理員權限，以 SQLite `mode=ro` 與 `query_only` 讀取；查詢限定已存在的資料表並綁定搜尋參數，不提供任意 SQL 執行。`password_hash`、`salt` 在查詢結果中遮蔽，且排除於搜尋條件之外。
