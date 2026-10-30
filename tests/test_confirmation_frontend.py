@@ -145,7 +145,7 @@ async function fetch(url, options = {}) {
   return { ok: true, text: async () => '<html>recognition report</html>' };
 }
 const context = { console, input, events, requests, nodes, $, window, alert, errText, fetch,
-  currentId, currentVersion, recognitionReady, recognitionDirty, editBusy };
+  currentId, currentVersion, recognitionReady, recognitionDirty, editBusy, reviewInteractionVersion: 0 };
 vm.createContext(context);
 vm.runInContext(source.slice(stateStart, stateEnd) + '\n' + source.slice(printStart, printEnd) +
   '\nglobalThis.api = { applyRecognitionState, printVoucher };', context);
@@ -171,7 +171,7 @@ const clearStart = source.indexOf('  function clearReview()', openEnd);
 const clearEnd = source.indexOf('  // 外觀確認 → 加入掃描清單', clearStart);
 const roleStart = source.indexOf('  function applyRole()', clearEnd);
 const roleEnd = source.indexOf('  async function enterApp()', roleStart);
-const recognizeStart = source.indexOf('  async function runRecognize()', openEnd);
+const recognizeStart = source.indexOf('  function recognitionView()', openEnd);
 const recognizeEnd = source.indexOf('  function buildActiveFields(', recognizeStart);
 const companyTaxStart = source.indexOf('  function companyTaxIdText(company)');
 const companyTaxEnd = source.indexOf('\n  $("uploadCompany")', companyTaxStart);
@@ -227,6 +227,7 @@ function setupImage() {}
 function renderPages() {}
 function esc(s) { return s == null ? '' : String(s); }
 function loadList() { events.push({ type: 'loadList' }); }
+function refreshStats() {}
 function alert(message) { events.push({ type: 'alert', message }); }
 function toast(message) { events.push({ type: 'toast', message }); }
 function confirm(message) { events.push({ type: 'confirm', message }); return !!input.acceptConfirm; }
@@ -248,6 +249,7 @@ const context = { console, events, requests, input, nodes, $, currentUser, fileI
   get currentVoucher() { return currentVoucher; }, set currentVoucher(v) { currentVoucher = v; },
   get currentIsImport() { return currentIsImport; }, set currentIsImport(v) { currentIsImport = v; },
   editBusy, inferBusy, cropping, stageAction, currentVersion: '', reviewedItems: { stale: true },
+  currentStage: 'pending', reviewInteractionVersion: 0, recognitionDirty: false, refreshStats,
   updateRecognitionState, applyRecognitionState,
   DOC_TYPES: { other: { fields: [] } }, companyRecords,
   setCropMode, resetFineTool, updateRestoreButton, setStatus, setPendingActionVisibility, populateTypeSel, buildActiveFields, renderFields, renderItems,

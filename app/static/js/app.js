@@ -4,6 +4,7 @@
   const progress = $("progress"), progressText = $("progressText");
   const modal = $("modal");
   let jobTimer = null;
+  let extractGeneration = 0, reviewInteractionVersion = 0;
   const importJobs = new Map();
   const importJobTimers = new Map();
   const importSeenPages = new Map();
@@ -234,22 +235,47 @@
   $("btnAppearanceCancel").addEventListener("click", cancelCurrentImport);
 
   // ── ③掃描清單：一鍵批次提取 ──
-  $("btnExtractAll").addEventListener("click", async () => {
-    const d = await (await fetch("/api/extract-batch", { method: "POST", headers: json(), body: "{}" })).json();
-    if (!d.ok) { alert(errText(d, "無法開始提取")); return; }
+  $("btnExtractAll").addEventListener("click", startExtraction);
+  async function startExtraction() {
+    if ($("btnExtractAll").disabled) return;
+    const generation = ++extractGeneration, view = { ...recognitionView(), extraction: generation };
     $("btnExtractAll").disabled = true;
     clearInterval(jobTimer);
-    jobTimer = setInterval(async () => {
-      const job = await (await fetch("/api/extract-job")).json();
-      const pct = job.total ? job.done / job.total : 0;
-      eProgress(`內容提取中 ${job.done}/${job.total}　${job.current || ""}`, pct);
-      if (job.status === "completed") {
-        clearInterval(jobTimer); eProgressHide(); $("btnExtractAll").disabled = false;
-        toast("提取完成，已移至④確認"); loadList(); refreshStats();
-        if (job.errors && job.errors.length) alert("部分失敗：\n" + job.errors.join("\n"));
-      }
-    }, 1500);
-  });
+    let polling = false, completed = false;
+    const finish = () => {
+      completed = true;
+      clearInterval(jobTimer); jobTimer = null;
+      eProgressHide(); $("btnExtractAll").disabled = false;
+    };
+    try {
+      const response = await fetch("/api/extract-batch", { method: "POST", headers: json(), body: "{}" });
+      const d = await response.json();
+      if (!response.ok || !d.ok) throw new Error(errText(d, "無法開始提取"));
+      jobTimer = setInterval(async () => {
+        if (polling || completed || generation !== extractGeneration) return;
+        polling = true;
+        try {
+          const response = await fetch("/api/extract-job");
+          const job = await response.json();
+          if (completed || generation !== extractGeneration) return;
+          if (!response.ok) throw new Error(errText(job, "無法讀取提取進度"));
+          if (job.id !== d.job_id) throw new Error("提取工作已變更，請重新整理清單查看結果");
+          eProgress(`內容提取中 ${job.done}/${job.total}　${job.current || ""}`, job.total ? job.done / job.total : 0);
+          if (job.status === "completed") {
+            finish();
+            const ids = (job.results || []).map((result) => result.id);
+            const moved = ids.length && await enterConfirmation(ids, view);
+            toast(moved ? "提取完成，已切換至④確認" : ids.length ? "提取完成，可至④確認核對" : "提取未成功，請查看失敗訊息");
+            if (!moved && recognitionViewIsCurrent(view)) loadList();
+            refreshStats();
+            if (job.errors?.length) alert(`${ids.length ? "部分失敗" : "提取失敗"}：\n${job.errors.join("\n")}`);
+          }
+        } catch (error) {
+          if (!completed && generation === extractGeneration) { finish(); alert(error.message); }
+        } finally { polling = false; }
+      }, 1500);
+    } catch (error) { finish(); alert(error.message); }
+  }
   function eProgress(text, pct) { $("eProgress").classList.remove("hidden"); $("eBarFill").style.width = Math.round(pct * 100) + "%"; $("eProgressText").textContent = text; }
   function eProgressHide() { $("eProgress").classList.add("hidden"); }
 
@@ -286,6 +312,7 @@
     t.addEventListener("click", () => setStage(t.dataset.stage)));
 
   function setStage(stage) {
+    if (stage !== currentStage) reviewInteractionVersion++;
     currentStage = stage;
     document.querySelectorAll(".stage-tab").forEach((t) =>
       t.classList.toggle("active", t.dataset.stage === stage));
@@ -478,12 +505,13 @@
   // ── 審核編輯 ──
   async function openReview(id) {
     if (editBusy) return;
+    const interactionVersion = ++reviewInteractionVersion;
     $("confirmationSuccess").classList.add("hidden");
-    currentId = id;
     if (cropping) setCropMode(false);
     const rec = await (await fetch(`/api/vouchers/${id}`)).json();
-    if (id !== currentId) return;
+    if (interactionVersion !== reviewInteractionVersion || editBusy) return;
     if (rec.detail) { alert(errText(rec, "操作失敗")); return; }
+    currentId = id;
     const v = rec.current || {};
     currentVoucher = v;
     currentVersion = rec.updated_at;
@@ -571,6 +599,7 @@
   }
   function markRecognitionDirty() {
     if (!currentId) return;
+    reviewInteractionVersion++;
     recognitionDirty = true;
     updateRecognitionState();
   }
@@ -637,25 +666,55 @@
     el.value = typeKey;
   }
 
+  function recognitionView() {
+    return { stage: currentStage, id: currentId, version: reviewInteractionVersion, user: currentUser };
+  }
+  function recognitionViewIsCurrent(view) {
+    return currentUser && view.user === currentUser && view.stage === currentStage && view.id === currentId
+      && view.version === reviewInteractionVersion && (view.extraction == null || view.extraction === extractGeneration);
+  }
+  async function enterConfirmation(ids, view, allowInitialEdits = false) {
+    const canMove = () => view.stage === "queued" && recognitionViewIsCurrent(view) && !editBusy
+      && (allowInitialEdits || !recognitionDirty);
+    if (!canMove()) return false;
+    try {
+      const response = await fetch("/api/vouchers?status=pending");
+      const data = await response.json();
+      if (!response.ok || !canMove()) return false;
+      const pending = new Set((data.items || []).filter((record) => record.status === "pending").map((record) => record.id));
+      const id = ids.find((candidate) => pending.has(candidate));
+      if (id == null) return false;
+      clearReview();
+      setStage("pending");
+      await openReview(id);
+      return true;
+    } catch (_) { return false; } // Recognition succeeded; a failed view refresh must not report recognition failure.
+  }
+
   // 外觀確認 / 重新辨識：以「目前選定的類型」在準備好的影像上做內容辨識
   async function runRecognize() {
     if (!currentId || editBusy || inferBusy) return;
-    const id = currentId, tk = $("revTypeSel").value;
+    const id = currentId, tk = $("revTypeSel").value, view = recognitionView();
     try {
       if (!$("revForm").classList.contains("prepared")) await persistCurrentEdits();
+      if (!recognitionViewIsCurrent(view)) { toast("操作畫面已變更，請在目前單據重新執行辨識"); return; }
       const autoFastType = currentVoucher.origin?.preparation?.mode === "manual_review" && !currentVoucher.origin.preparation.type_confirmed && !tk;
       if (!autoFastType && (currentVoucher.origin?.preparation?.mode !== "manual_review" || tk !== (currentVoucher.doc_type_key || ""))) {
         const typeResp = await fetch(`/api/vouchers/${id}/set-type`, { method: "POST", headers: json(), body: JSON.stringify({ doc_type_key: tk, expected_updated_at:currentVersion }) });
         if (!typeResp.ok) throw new Error(await responseError(typeResp, "類型儲存失敗"));
         const typeRecord = await typeResp.json();
-        currentVersion = typeRecord.updated_at || currentVersion;
+        if (recognitionViewIsCurrent(view)) currentVersion = typeRecord.updated_at || currentVersion;
       }
       const d = await withInferProgress("內容辨識中…", () =>
         fetch(`/api/vouchers/${id}/recognize`, { method: "POST", headers: json() }).then((r) => r.json()));
       if (!d.ok) throw new Error(errText(d, "辨識失敗"));
-      toast("辨識完成，待確認");
-      if (currentId === id) await openReview(id);
-      loadList();
+      const moved = await enterConfirmation([id], view, true);
+      toast(moved ? "辨識完成，已切換至④確認" : "辨識完成，可至④確認核對");
+      if (!moved && recognitionViewIsCurrent(view) && !editBusy) {
+        if (view.stage !== "queued") await openReview(id);
+        else loadList();
+      }
+      refreshStats();
     } catch (err) {
       alert(`辨識失敗：${err.message}`);
     }
@@ -1461,6 +1520,7 @@
     toast("已裁切；完成影像整理後按「確認外觀」加入掃描清單");
   });
   function clearReview() {
+    reviewInteractionVersion++;
     $("revForm").classList.add("hidden"); $("revEmpty").classList.remove("hidden"); currentId = null;
     recognitionReady = false; recognitionDirty = false; updateRecognitionState();
   }

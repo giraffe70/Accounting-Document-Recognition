@@ -46,6 +46,7 @@ const document = {
 const context = {
   console, Map, Set, Array, JSON, String, Number, encodeURIComponent, document, nodes, events, dropZone: nodes.dropZone, fileInput: nodes.fileInput, progress: nodes.progress, progressText: nodes.progressText, modal: nodes.modal,
   currentUser: { id: 7 }, currentVoucher: {}, currentStage: "import", currentId: null,
+  reviewInteractionVersion: 0,
   recognitionDirty: false, editBusy: false, importJobs, importJobTimers, importSeenPages,
   uploadSending: false, importRestorePending: false, importJobGeneration: 0,
   companyRecords: [], companyLoadState: "loading",
