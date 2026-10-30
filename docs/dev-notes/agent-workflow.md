@@ -21,6 +21,8 @@
 
 ## 多單據結果與 offline 驗收
 
+圖文使用者手冊維護 `docs/manual/使用者手冊.html`，圖片放在同目錄的 `img/` 並配上圖說。更新後用文件工具環境執行 `python -B -X utf8 scripts/build_user_manual.py` 產生 `docs/manual/使用者手冊.pdf`；建置需要 ReportLab，預設中文字型為 Windows 的 `msjh.ttc`／`msjhbd.ttc`，可用 `--font`／`--bold-font` 指定其他字型。正式應用不需要 ReportLab，也不在下載時重新產生文件。發布前逐頁渲染並檢查 PDF，確認圖片清楚、中文及目錄正常。API 與內容回歸為 `tests/test_user_manual.py`，來源解析與安全圖檔路徑回歸為 `tests/test_manual_builder.py`；以合成帳號及暫存文件驗證，不啟動正式服務或真實模型。
+
 已確認單據查詢與唯讀頁面的離線回歸為 `tests/test_confirmed_vouchers.py`、`tests/test_confirmed_frontend.py`；第四步確認流程回歸為 `tests/test_confirmation_frontend.py`。後端公司／日期條件、排序與分頁共用同一查詢條件，舊日期只在讀取時解析；無日期條件時仍列出缺少日期及未指定公司的已確認單據。此功能不需要資料庫遷移；部署後重啟服務並強制重新載入前端。
 
 驗證輸出格式、辨識版本或單據切分契約有變時，建立新版本的驗證批次再檢查；已保存的舊批次不會補上 `documents[]`、`origin` 或 `quality`。可用合成輸入與模擬模型驗證 API、JSON/CSV 匯出和畫面，不把私人掃描檔、資料集或 gold 放進測試。`pages.csv` 每個輸入頁面只列一列；`vouchers.csv` 可依頁面所含文件展開多列，頁面耗時以 `pages.csv` 為準，避免按單據數重複加總。

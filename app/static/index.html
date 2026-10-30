@@ -10,6 +10,7 @@
   <header class="topbar">
     <div class="brand"><img class="brand-logo" src="/icons/ITRI_MiniLogo.png" alt="ITRI"> 憑證辨識系統 </div>
     <div class="spacer"></div>
+    <button id="manualBtn" class="btn hidden" type="button" onclick="window.open('/api/manual/', '_blank', 'noopener')">📘 使用者手冊</button>
     <button id="confirmedBtn" class="btn hidden" type="button" onclick="location.href='/confirmed.html'">✅ 已確認單據</button>
     <button id="databaseBtn" class="btn hidden" onclick="location.href='/database.html'">🗃️ 歷史紀錄</button>
     <button id="usersBtn" class="btn hidden" onclick="location.href='/users.html'">👥 權限管理</button>
@@ -264,6 +265,6 @@
     <span class="eng-hint" id="engHint"></span>
   </div>
 
-  <script src="/js/app.js?v=20261030-recognition-navigation"></script>
+  <script src="/js/app.js?v=20261030-user-manual"></script>
 </body>
 </html>

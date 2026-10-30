@@ -1670,6 +1670,7 @@
     $("loginOverlay").classList.add("hidden");
     $("logoutBtn").classList.remove("hidden");
     $("confirmedBtn").classList.remove("hidden");
+    $("manualBtn").classList.remove("hidden");
     const chip = $("userChip");
     chip.textContent = `${currentUser.name}（${currentUser.is_admin ? "系統管理員" : "一般使用者"}）`;
     chip.classList.remove("hidden");

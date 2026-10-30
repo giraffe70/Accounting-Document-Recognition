@@ -20,7 +20,7 @@ from app.db.session import init_db
 from app.models.schemas import ConfigUpdate, Voucher
 from app.services import (accounts, auth, backup, database_view, importdecl,
                           reports, review, sysconfig, taxid, companies, item_account_mapping, recognition_sources, import_jobs)
-from app.services import confirmed_vouchers, user_management
+from app.services import confirmed_vouchers, user_management, user_manual
 
 _LOG_FMT = "[%(asctime)s] %(levelname)s %(name)s: %(message)s"
 logging.basicConfig(level=logging.INFO, format=_LOG_FMT)
@@ -68,6 +68,7 @@ app.include_router(database_view.router)
 app.include_router(import_api.router)
 app.include_router(user_management.router)
 app.include_router(confirmed_vouchers.router)
+app.include_router(user_manual.router)
 
 
 @app.on_event("startup")

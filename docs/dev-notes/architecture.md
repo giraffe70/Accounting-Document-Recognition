@@ -286,6 +286,7 @@ OCR 本身不直接解析一般單據的語意欄位，主要內容仍由 VLM �
 | `GET /api/scan-source/list`、`POST /api/scan-source/import` | 掃描來源清單與匯入 |
 | `GET /api/vouchers`、`GET /api/vouchers/{rec_id}` | 依狀態／公司／期別查詢與單筆內容 |
 | `GET /api/confirmed-vouchers` | 已確認正式單據，依公司 ID、單據日期起迄查詢與分頁（預設 50、最多 100 筆） |
+| `GET /api/manual/`、`GET /api/manual/img/{filename}`、`GET /api/manual/download` | 登入後瀏覽圖文手冊、讀取手冊引用圖片及下載 PDF |
 | `PUT /api/vouchers/{rec_id}` | 保存人工修正內容 |
 | `POST /api/vouchers/{rec_id}/confirm-appearance` | 外觀確認，可帶 `doc_type_key`，加入待提取清單 |
 | `POST /api/vouchers/{rec_id}/confirm` | 保存辨識內容的人工確認；不代表會計分錄確認 |
@@ -300,6 +301,8 @@ OCR 本身不直接解析一般單據的語意欄位，主要內容仍由 VLM �
 AI 分錄建議、分錄草稿／確認、日記帳及會計傳票格式已退役；除摘要彙總表 API 外，相關會計模板端點回傳 404。`POST /api/analyze` 只處理辨識準備，不產生會計分錄。
 
 ## 7. 設定與啟動
+
+主頁及已確認單據頁的「使用者手冊」會在新分頁開啟圖文說明，保留原本作業。手冊以 `docs/manual/使用者手冊.html` 為內容來源，PDF 由 `scripts/build_user_manual.py` 產生；正式服務僅讀取已產生檔案。部署時需包含 HTML、PDF 及 `docs/manual/img/` 內引用的圖片。三個手冊路由均檢查登入，圖片只開放 HTML 明確引用的檔名，不公開整個文件目錄；Word 不列入下載介面。
 
 一般登入使用者可從主頁頂部「已確認單據」開啟 `/confirmed.html`，依歸屬公司與單據日期查閱歷史憑證、原圖及附頁，並列印既有辨識報告。第四步只列待確認單據；確認成功後收起編輯區並提供新頁面的單據連結。新頁面為唯讀，列印沿用既有版本保護。日期篩選包含起迄日，可單填其中一端；讀取時沿用日期正規化，不改寫保存內容，缺少有效完整日期的單據排在最後且不符合日期條件。後端以日期由新到舊、ID 由大到小排序與分頁，只回傳清單摘要。
 
