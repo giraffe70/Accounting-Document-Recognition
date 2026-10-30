@@ -22,14 +22,8 @@ app/data/system_config.json
 models/weights/
 
 # 執行期資料
-app/data/uploads/
 app/data/validation/
 app/data/backups/
-app/data/logs/
-app/data/*.db
-app/data/*.sqlite*
-data/uploads/
-*.log
 
 # 真實憑證掃描檔（客戶財務資料，勿上版控）
 **/vouchers_real/
