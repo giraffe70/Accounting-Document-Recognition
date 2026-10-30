@@ -53,9 +53,29 @@
   const esc = (s) => (s == null ? "" : String(s)).replace(/[<>&"]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" }[c]));
 
   // ── 上傳：每位使用者一次一個檔案，頁面依序確認 ──
-  let uploadSending = false, importRestorePending = true;
-  dropZone.addEventListener("click", () => { if (!uploadsBlocked()) fileInput.click(); });
-  dropZone.addEventListener("dragover", (e) => { e.preventDefault(); if (!uploadsBlocked()) dropZone.classList.add("over"); });
+  let uploadSending = false, importRestorePending = true, companyLoadState = "loading";
+  function selectedUploadCompany() {
+    if (companyLoadState !== "ready") return null;
+    const value = $("uploadCompany").value;
+    return companyRecords.find((c) => value && (c.short || c.name) === value) || null;
+  }
+  function uploadCompanyMessage() {
+    if (companyLoadState === "loading") return "正在載入公司清單…";
+    if (companyLoadState === "error") return "公司清單載入失敗，請重新整理頁面。";
+    if (!companyRecords.length) return "目前沒有可選公司，無法匯入。";
+    return selectedUploadCompany() ? "" : "請先選擇歸屬公司";
+  }
+  function requireUploadCompany() {
+    const company = selectedUploadCompany();
+    if (!company) {
+      alert(uploadCompanyMessage());
+      fileInput.value = "";
+      $("uploadCompany").focus();
+    }
+    return company;
+  }
+  dropZone.addEventListener("click", () => { if (!uploadsBlocked() && requireUploadCompany()) fileInput.click(); });
+  dropZone.addEventListener("dragover", (e) => { e.preventDefault(); if (!uploadsBlocked() && selectedUploadCompany()) dropZone.classList.add("over"); });
   dropZone.addEventListener("dragleave", () => dropZone.classList.remove("over"));
   dropZone.addEventListener("drop", (e) => { e.preventDefault(); dropZone.classList.remove("over"); handleFiles(e.dataTransfer.files); });
   fileInput.addEventListener("change", (e) => handleFiles(e.target.files));
@@ -70,9 +90,11 @@
 
   async function runBatch(files) {
     if (files.length !== 1 || uploadsBlocked()) return;
+    const company = requireUploadCompany();
+    if (!company) return;
     uploadSending = true; renderImportState();
     const fd = new FormData(); fd.append("files", files[0]);
-    fd.append("company", $("uploadCompany").value);
+    fd.append("company", company.short || company.name);
     fd.append("mode", "manual_review");
     try {
       const response = await fetch("/api/import-jobs", { method: "POST", body: fd });
@@ -98,11 +120,14 @@
   }
   function renderImportState() {
     const job = activeImportJob(), blocked = uploadsBlocked();
-    fileInput.disabled = blocked;
-    dropZone.setAttribute("aria-disabled", String(blocked));
-    dropZone.style.opacity = blocked ? "0.6" : "1";
-    $("uploadCompany").disabled = blocked;
-    $("btnScanImport").disabled = blocked;
+    const companyMessage = uploadCompanyMessage(), importDisabled = blocked || !!companyMessage;
+    fileInput.disabled = importDisabled;
+    dropZone.setAttribute("aria-disabled", String(importDisabled));
+    dropZone.style.opacity = importDisabled ? "0.6" : "1";
+    $("uploadCompany").disabled = blocked || companyLoadState !== "ready" || !companyRecords.length;
+    $("btnScanImport").disabled = importDisabled;
+    $("uploadCompanyStatus").textContent = companyMessage;
+    $("uploadCompanyStatus").classList.toggle("hidden", !companyMessage);
     $("importState").classList.toggle("hidden", !blocked);
     const failed = job && ["failed", "partial_failed", "interrupted"].includes(job.status);
     $("importHint").textContent = uploadSending ? "正在上傳，請稍候…" : importRestorePending ? "正在恢復目前檔案…" :
@@ -242,9 +267,11 @@
     const names = Array.from($("scanFiles").querySelectorAll("input:checked")).map((i) => i.value);
     if (names.length !== 1) { alert("請選擇一個檔案"); return; }
     if (uploadsBlocked()) { alert("請先完成目前檔案的外觀確認，或取消目前匯入"); return; }
+    const company = requireUploadCompany();
+    if (!company) return;
     uploadSending = true; renderImportState();
     try {
-      const response = await fetch("/api/scan-source/import", { method: "POST", headers: json(), body: JSON.stringify({ filenames: names, company: $("uploadCompany").value, background: true, mode: "manual_review" }) });
+      const response = await fetch("/api/scan-source/import", { method: "POST", headers: json(), body: JSON.stringify({ filenames: names, company: company.short || company.name, background: true, mode: "manual_review" }) });
       const d = await response.json();
       if (!response.ok || !d.ok) throw new Error(errText(d,"匯入失敗"));
       trackImportJob(d);
@@ -1634,17 +1661,40 @@
     const company = companyRecords.find((c) => String(c.id) === selected);
     $("revCompanyTaxId").textContent = companyTaxIdText(company);
   }
-  $("uploadCompany").addEventListener("change", updateUploadCompanyTaxId);
+  $("uploadCompany").addEventListener("change", () => { updateUploadCompanyTaxId(); renderImportState(); });
   async function loadCompanies() {
-    const data = await (await fetch("/api/companies")).json();
-    companyRecords = data.companies || [];
-    COMPANIES = (data.companies || []).map((c) => c.short || c.name);
-    const opts = COMPANIES.map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join("");
-    $("uploadCompany").innerHTML = `<option value="">未指定</option>` + opts;
-    $("revCompanySel").innerHTML = `<option value="">未指定</option>` + companyRecords.map((c) =>
-      `<option value="${esc(c.id)}">${esc(c.short || c.name)}</option>`).join("");
+    const generation = importJobGeneration;
+    const placeholder = `<option value="" disabled selected hidden>請選擇公司</option>`;
+    companyLoadState = "loading";
+    companyRecords = []; COMPANIES = [];
+    $("uploadCompany").innerHTML = placeholder;
+    $("uploadCompany").value = "";
+    $("revCompanySel").innerHTML = `<option value="">未指定</option>`;
     updateUploadCompanyTaxId();
     updateReviewCompanyTaxId();
+    renderImportState();
+    try {
+      const response = await fetch("/api/companies");
+      if (!response.ok) throw new Error("公司清單載入失敗");
+      const data = await response.json();
+      if (!Array.isArray(data.companies)) throw new Error("公司清單格式錯誤");
+      if (generation !== importJobGeneration || !currentUser) return;
+      companyRecords = data.companies.filter((c) => c && (c.short || c.name));
+      COMPANIES = companyRecords.map((c) => c.short || c.name);
+      const opts = COMPANIES.map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join("");
+      $("uploadCompany").innerHTML = placeholder + opts;
+      $("uploadCompany").value = "";
+      $("revCompanySel").innerHTML = `<option value="">未指定</option>` + companyRecords.map((c) =>
+        `<option value="${esc(c.id)}">${esc(c.short || c.name)}</option>`).join("");
+      companyLoadState = "ready";
+    } catch (error) {
+      if (generation !== importJobGeneration || !currentUser) return;
+      companyLoadState = "error";
+      console.warn("could not load companies", error);
+    }
+    updateUploadCompanyTaxId();
+    updateReviewCompanyTaxId();
+    renderImportState();
   }
 
   // ── 左右欄可拖拉調整寬度 ──

@@ -46,14 +46,17 @@
         <div class="panel">
           <h2>上傳憑證</h2>
           <label class="up-company">歸屬公司
-            <select id="uploadCompany" class="select select-sm"></select>
+            <select id="uploadCompany" class="select select-sm" required disabled aria-describedby="uploadCompanyStatus">
+              <option value="" disabled selected hidden>請選擇公司</option>
+            </select>
             <span id="uploadCompanyTaxId" class="company-tax-id" aria-live="polite"></span>
           </label>
-          <div id="dropZone" class="drop">
+          <p id="uploadCompanyStatus" class="hint" role="status" aria-live="polite">正在載入公司清單…</p>
+          <div id="dropZone" class="drop" aria-disabled="true">
             <p>拖拉 PDF／圖片至此，或點擊選擇</p>
             <p class="hint">每次一個檔案（≤5MB）；多頁 PDF 逐頁確認後繼續</p>
           </div>
-          <input id="fileInput" type="file" accept=".pdf,image/*" hidden>
+          <input id="fileInput" type="file" accept=".pdf,image/*" hidden disabled>
           <div id="importState" class="hidden" aria-live="polite">
             <p id="importHint" class="hint"></p>
             <button id="btnImportReview" class="btn btn-sm hidden">繼續外觀確認</button>
@@ -69,7 +72,7 @@
           </div>
           <p class="hint" id="scanDirHint">按「讀取目錄」列出已設定來源目錄中的檔案。</p>
           <div id="scanFiles" class="scan-files"></div>
-          <button id="btnScanImport" class="btn btn-sm primary hidden">匯入所選檔案</button>
+          <button id="btnScanImport" class="btn btn-sm primary hidden" disabled>匯入所選檔案</button>
         </div>
       </div>
 

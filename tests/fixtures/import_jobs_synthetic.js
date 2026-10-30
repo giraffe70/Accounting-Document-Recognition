@@ -6,8 +6,9 @@ const importJobs = new Map(), importJobTimers = new Map(), importSeenPages = new
 let nextTimer = 1, resolveUpload, resolveLate;
 const nodes = {};
 function makeNode(id) {
-  return nodes[id] = {
+  const node = {
     id, value: "", textContent: "", innerHTML: "", disabled: false, checked: false,
+    options: [], focusCount: 0,
     style: {}, attrs: {}, listeners: {}, classList: {
       values: new Set(),
       toggle(name, force) { if (force === undefined ? !this.values.has(name) : force) this.values.add(name); else this.values.delete(name); },
@@ -17,12 +18,27 @@ function makeNode(id) {
     setAttribute(name, value) { this.attrs[name] = String(value); },
     addEventListener(type, handler) { this.listeners[type] = handler; },
     click() { events.push(["click", id]); },
+    focus() { this.focusCount++; events.push(["focus", id]); },
     querySelectorAll() { return []; },
   };
+  let value = "", html = "";
+  Object.defineProperty(node, "value", { configurable: true, get() { return value; }, set(next) { value = String(next ?? ""); } });
+  Object.defineProperty(node, "innerHTML", { configurable: true, get() { return html; }, set(next) {
+    html = String(next); this.options = [];
+    if (id === "uploadCompany" || id === "revCompanySel") {
+      this.options = Array.from(html.matchAll(/<option\b([^>]*)>([\s\S]*?)<\/option>/gi), match => {
+        const attrs = match[1], valueMatch = attrs.match(/\bvalue="([^"]*)"/i);
+        return { value: valueMatch ? valueMatch[1] : "", text: match[2].replace(/<[^>]*>/g, ""),
+          disabled: /\bdisabled\b/i.test(attrs), hidden: /\bhidden\b/i.test(attrs), selected: /\bselected\b/i.test(attrs) };
+      });
+      const selected = this.options.find(option => option.selected);
+      value = selected ? selected.value : (this.options[0]?.value || "");
+    }
+  }});
+  return nodes[id] = node;
 }
-const ids = ["dropZone","fileInput","progress","progressText","modal","importState","importHint","btnImportReview","btnImportRetry","btnImportCancel","uploadCompany","btnScanImport","appearanceRecovery","btnAppearanceRetry","btnAppearanceCancel","appearancePosition","btnScanList","scanFiles","scanDirHint","btnExtractAll","listBody","listEmpty","listTable","btnMerge","confirmationFilter","queueTitle"];
+const ids = ["dropZone","fileInput","progress","progressText","modal","importState","importHint","btnImportReview","btnImportRetry","btnImportCancel","uploadCompany","uploadCompanyStatus","uploadCompanyTaxId","revCompanySel","revCompanyTaxId","btnScanImport","appearanceRecovery","btnAppearanceRetry","btnAppearanceCancel","appearancePosition","btnScanList","scanFiles","scanDirHint","btnExtractAll","listBody","listEmpty","listTable","btnMerge","confirmationFilter","queueTitle"];
 ids.forEach(makeNode);
-nodes.uploadCompany.value = "3";
 nodes.confirmationFilter.value = "prepared";
 const document = {
   getElementById: (id) => nodes[id] || null,
@@ -36,6 +52,7 @@ const context = {
   currentUser: { id: 7 }, currentVoucher: {}, currentStage: "import", currentId: null,
   recognitionDirty: false, editBusy: false, importJobs, importJobTimers, importSeenPages,
   uploadSending: false, importRestorePending: false, importJobGeneration: 0,
+  companyRecords: [], companyLoadState: "loading",
   $: (id) => nodes[id] || null,
   json: () => ({ "Content-Type": "application/json" }),
   alert: (message) => events.push(["alert", message]),
@@ -60,7 +77,7 @@ const context = {
     if (url === "/api/import-jobs/late") {
       return new Promise(resolve => { resolveLate = resolve; });
     }
-    const response = responses.get(url) || { ok: true, status: 200, body: { items: [] } };
+    const response = responses.get(url) || { ok: true, status: 200, body: url === "/api/companies" ? { companies: [{ id: 3, short: "甲", name: "合成甲公司", tax_id: "12345678" }] } : { items: [] } };
     return { ok: response.ok !== false, status: response.status || 200, json: async () => response.body || {} };
   },
 };
@@ -69,18 +86,33 @@ const importStart = source.indexOf("  // ── 上傳：");
 const importEnd = source.indexOf("  // ── ③掃描清單", importStart);
 if (importStart < 0 || importEnd < 0) throw new Error("production upload/import functions not found");
 vm.runInContext(source.slice(importStart, importEnd) +
-  "\nglobalThis.testImport = { handleFiles, runBatch, activeImportJob, uploadsBlocked, recoveryImportJob, currentReviewIds, renderImportState, trackImportJob, pollImportJob, stopImportPolling, actOnImportJob, restoreImportJobs, restorePending: () => importRestorePending };", context);
+  "\nglobalThis.testImport = { handleFiles, runBatch, activeImportJob, uploadsBlocked, recoveryImportJob, currentReviewIds, renderImportState, trackImportJob, pollImportJob, stopImportPolling, actOnImportJob, restoreImportJobs, restorePending: () => importRestorePending, selectedUploadCompany, uploadCompanyMessage, requireUploadCompany, companyState: () => companyLoadState };", context);
+
+const companiesStart = source.indexOf("  // 載入公司清單到上傳下拉");
+const companiesEnd = source.indexOf("  // ── 左右欄可拖拉調整寬度", companiesStart);
+if (companiesStart < 0 || companiesEnd < 0) throw new Error("production company loading functions not found");
+vm.runInContext(source.slice(companiesStart, companiesEnd) +
+  "\nglobalThis.testCompanies = { loadCompanies, updateUploadCompanyTaxId };", context);
+const scanStart = source.indexOf("  // ── ①匯入：伺服器端掃描來源目錄");
+const scanEnd = source.indexOf("  function hideProgress()", scanStart);
+if (scanStart < 0 || scanEnd < 0) throw new Error("production scan source handlers not found");
+vm.runInContext(source.slice(scanStart, scanEnd), context);
 
 async function uploadScenario() {
+  events.length = 0;
   const fileA = { name: "a.pdf", type: "application/pdf" };
   const fileB = { name: "b.pdf", type: "application/pdf" };
   const postsBeforeMulti = requests.filter(r => r.url === "/api/import-jobs" && r.method === "POST").length;
   context.testImport.handleFiles([fileA, fileB]);
   const rejectedMulti = requests.filter(r => r.url === "/api/import-jobs" && r.method === "POST").length === postsBeforeMulti;
   const multiAlert = events.find(e => e[0] === "alert")?.[1] || "";
+  nodes.uploadCompany.value = "甲";
+  if (nodes.uploadCompany.listeners.change) nodes.uploadCompany.listeners.change();
   context.testImport.handleFiles([fileA]);
   await Promise.resolve();
   const lockedDuringUpload = context.testImport.uploadsBlocked() && nodes.fileInput.disabled;
+  const lockedDropZone = nodes.dropZone.attrs["aria-disabled"] === "true";
+  const companyLockedDuringUpload = nodes.uploadCompany.disabled;
   context.testImport.handleFiles([fileB]);
   const requestCountWhileLocked = requests.filter(r => r.url === "/api/import-jobs" && r.method === "POST").length;
   responses.set("/api/import-jobs/upload-1", { body: { id: "upload-1", status: "queued", pages: [] } });
@@ -91,7 +123,68 @@ async function uploadScenario() {
   return { rejectedMulti, multiAlert, lockedDuringUpload, requestCountWhileLocked,
     requestCount: requests.filter(r => r.url === "/api/import-jobs" && r.method === "POST").length,
     formData: requests.find(r => r.url === "/api/import-jobs" && r.method === "POST")?.body?.values || [],
-    blockedAfterAccepted: context.testImport.uploadsBlocked(), disabledAfterAccepted: nodes.fileInput.disabled };
+    blockedAfterAccepted: context.testImport.uploadsBlocked(), disabledAfterAccepted: nodes.fileInput.disabled,
+    lockedDropZone, companyLockedDuringUpload,
+    selectedAfterUpload: nodes.uploadCompany.value };
+}
+async function attemptImports(file) {
+  const before = requests.filter(r => r.method === "POST" && ["/api/import-jobs", "/api/scan-source/import"].includes(r.url)).length;
+  context.testImport.handleFiles([file]);
+  context.testImport.runBatch([file]);
+  nodes.dropZone.listeners.drop({ preventDefault() {}, dataTransfer: { files: [file] } });
+  await nodes.btnScanImport.listeners.click();
+  return requests.filter(r => r.method === "POST" && ["/api/import-jobs", "/api/scan-source/import"].includes(r.url)).length - before;
+}
+async function companyScenario() {
+  const api = context.testImport;
+  api.renderImportState();
+  const initialState = api.companyState();
+  const file = { name: "unselected.pdf", type: "application/pdf" };
+  const focusBefore = nodes.uploadCompany.focusCount;
+  nodes.scanFiles.querySelectorAll = () => [{ value: "scan.pdf" }];
+  const initialRejectedPosts = await attemptImports(file);
+  const initialFocusCount = nodes.uploadCompany.focusCount - focusBefore;
+
+  responses.set("/api/companies", { ok: false, status: 503, body: {} });
+  await context.testCompanies.loadCompanies();
+  const failedState = api.companyState(), failedDisabled = nodes.fileInput.disabled && nodes.btnScanImport.disabled;
+  const failedMessage = nodes.uploadCompanyStatus.textContent;
+  responses.set("/api/companies", { body: { companies: [] } });
+  await context.testCompanies.loadCompanies();
+  const emptyState = api.companyState(), emptyDisabled = nodes.fileInput.disabled && nodes.btnScanImport.disabled;
+  const emptyMessage = nodes.uploadCompanyStatus.textContent;
+
+  responses.set("/api/companies", { body: { companies: [
+    { id: 3, short: "甲", name: "合成甲公司", tax_id: "12345678" },
+    { id: 4, name: "合成乙公司", tax_id: "87654321" },
+    { id: 5, short: "", name: "" },
+  ] } });
+  await context.testCompanies.loadCompanies();
+  const readyState = api.companyState();
+  const placeholder = nodes.uploadCompany.options[0];
+  const selectorEnabledWithoutSelection = !nodes.uploadCompany.disabled;
+  const readyImportDisabledWithoutSelection = nodes.fileInput.disabled && nodes.btnScanImport.disabled;
+  const unselectedMessage = nodes.uploadCompanyStatus.textContent;
+  const readyBlankDropDisabled = nodes.dropZone.attrs["aria-disabled"] === "true";
+  const readyBlankRejectedPosts = await attemptImports(file);
+  nodes.uploadCompany.value = "not-a-company";
+  const invalidRejectedPosts = await attemptImports(file);
+  const invalidCompanyRejected = api.selectedUploadCompany() === null;
+  nodes.uploadCompany.value = "甲";
+  nodes.uploadCompany.listeners.change();
+  const taxId = nodes.uploadCompanyTaxId.textContent;
+  const controlsEnabledAfterSelection = !nodes.fileInput.disabled && !nodes.btnScanImport.disabled && !nodes.uploadCompany.disabled;
+  const selectedDropZoneEnabled = nodes.dropZone.attrs["aria-disabled"] === "false";
+  const selectedCompany = api.selectedUploadCompany()?.short || "";
+  await context.testCompanies.loadCompanies();
+  return { initialState, initialRejectedPosts, initialFocusCount,
+    failedState, failedDisabled, failedMessage,
+    emptyState, emptyDisabled, emptyMessage, readyState, placeholderValue: placeholder?.value,
+    placeholderDisabled: placeholder?.disabled, placeholderHidden: placeholder?.hidden,
+    selectorEnabledWithoutSelection, readyImportDisabledWithoutSelection, unselectedMessage,
+    readyBlankDropDisabled, readyBlankRejectedPosts, invalidRejectedPosts, invalidCompanyRejected,
+    taxId, controlsEnabledAfterSelection, selectedDropZoneEnabled,
+    selectedCompany, reloadedValue: nodes.uploadCompany.value, reloadedState: api.companyState() };
 }
 async function pollScenario() {
   context.currentUser = { id: 7 };
@@ -140,11 +233,9 @@ async function recoveryScenario() {
 async function scanScenario() {
   context.testImport.stopImportPolling();
   await context.testImport.restoreImportJobs();
-  const scanStart = source.indexOf("  // ── ①匯入：伺服器端掃描來源目錄");
-  const scanEnd = source.indexOf("  function hideProgress()", scanStart);
-  if (scanStart < 0 || scanEnd < 0) throw new Error("production scan source handlers not found");
-  vm.runInContext(source.slice(scanStart, scanEnd), context);
   nodes.scanFiles.querySelectorAll = () => [{ value: "scan.pdf" }];
+  nodes.uploadCompany.value = "合成乙公司";
+  if (nodes.uploadCompany.listeners.change) nodes.uploadCompany.listeners.change();
   responses.set("/api/scan-source/import", { body: { ok: true, job_id: "scan-1", status: "queued" } });
   await nodes.btnScanImport.listeners.click();
   const request = requests.find(r => r.url === "/api/scan-source/import" && r.method === "POST");
@@ -199,12 +290,13 @@ async function listScenario() {
 }
 (async () => {
   await context.testImport.restoreImportJobs();
+  const company = await companyScenario();
   const upload = await uploadScenario();
   const poll = await pollScenario();
   const scan = await scanScenario();
   const recovery = await recoveryScenario();
   const list = await listScenario();
-  process.stdout.write(JSON.stringify({ upload, poll, scan, recovery, list, source: {
+  process.stdout.write(JSON.stringify({ company, upload, poll, scan, recovery, list, source: {
     hasLegacyJobRenderer: source.includes("renderImportJobs"),
     hasBatchAppearanceControls: ["appearanceBatch", "batchType", "dirInput"].some(s => source.includes(s)),
   } }));

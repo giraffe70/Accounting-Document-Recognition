@@ -25,6 +25,11 @@ class ImportFrontendTests(unittest.TestCase):
 
         file_tag = html[html.index('id="fileInput"') - 30:html.index(">", html.index('id="fileInput"')) + 1]
         self.assertNotIn("multiple", file_tag.lower())
+        company_select = html[html.index('<select id="uploadCompany"'):html.index("</select>", html.index('<select id="uploadCompany"'))]
+        self.assertIn("required", company_select)
+        self.assertIn('value="" disabled selected hidden', company_select)
+        self.assertIn('id="uploadCompanyStatus"', html)
+        self.assertNotIn("未指定", company_select)
         for marker in ('id="importState"', 'id="importHint"', 'id="btnImportReview"', 'id="btnImportRetry"', 'id="btnImportCancel"',
                        'id="appearancePosition"', 'id="appearanceRecovery"', 'id="btnAppearanceRetry"', 'id="btnAppearanceCancel"'):
             self.assertIn(marker, html)
@@ -49,16 +54,50 @@ class ImportFrontendTests(unittest.TestCase):
         self.assertEqual(result["formData"][0][0], "files")
         self.assertEqual(result["formData"][0][1]["name"], "a.pdf")
         self.assertEqual(dict(result["formData"])["mode"], "manual_review")
+        self.assertEqual(dict(result["formData"])["company"], "甲")
         self.assertTrue(result["blockedAfterAccepted"])
         self.assertTrue(result["disabledAfterAccepted"])
+        self.assertTrue(result["lockedDropZone"])
+        self.assertTrue(result["companyLockedDuringUpload"])
+        self.assertEqual(result["selectedAfterUpload"], "甲")
+
+    def test_import_requires_a_loaded_company_and_manual_selection(self):
+        result = self.run_synthetic()["company"]
+
+        self.assertEqual(result["initialState"], "loading")
+        self.assertEqual(result["initialRejectedPosts"], 0)
+        self.assertEqual(result["initialFocusCount"], 4)
+        self.assertEqual(result["failedState"], "error")
+        self.assertTrue(result["failedDisabled"])
+        self.assertIn("載入失敗", result["failedMessage"])
+        self.assertEqual(result["emptyState"], "ready")
+        self.assertTrue(result["emptyDisabled"])
+        self.assertIn("沒有可選公司", result["emptyMessage"])
+        self.assertEqual(result["readyState"], "ready")
+        self.assertEqual(result["placeholderValue"], "")
+        self.assertTrue(result["placeholderDisabled"])
+        self.assertTrue(result["placeholderHidden"])
+        self.assertTrue(result["selectorEnabledWithoutSelection"])
+        self.assertTrue(result["readyImportDisabledWithoutSelection"])
+        self.assertTrue(result["readyBlankDropDisabled"])
+        self.assertEqual(result["readyBlankRejectedPosts"], 0)
+        self.assertIn("請先選擇歸屬公司", result["unselectedMessage"])
+        self.assertEqual(result["invalidRejectedPosts"], 0)
+        self.assertTrue(result["invalidCompanyRejected"])
+        self.assertEqual(result["taxId"], "統編：12345678")
+        self.assertTrue(result["controlsEnabledAfterSelection"])
+        self.assertTrue(result["selectedDropZoneEnabled"])
+        self.assertEqual(result["selectedCompany"], "甲")
+        self.assertEqual(result["reloadedValue"], "")
+        self.assertEqual(result["reloadedState"], "ready")
 
     def test_scan_source_import_requires_manual_appearance_review(self):
         result = self.run_synthetic()["scan"]
 
         self.assertEqual(result["filenames"], ["scan.pdf"])
-        self.assertEqual(result["company"], "3")
         self.assertTrue(result["background"])
         self.assertEqual(result["mode"], "manual_review")
+        self.assertEqual(result["company"], "合成乙公司")
 
     def test_polling_tracks_page_changes_but_respects_dirty_review_and_logout(self):
         result = self.run_synthetic()["poll"]
