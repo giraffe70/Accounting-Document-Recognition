@@ -694,7 +694,7 @@ process.stdout.write(JSON.stringify(input.cases.map(([dx, dy]) => context.f(dx, 
         self.assertEqual(parser.options, [])
         self.assertNotIn('$("confirmationFilter")', self.source)
         self.assertIn('const status = STAGE_STATUS[currentStage] || "";', self.source)
-        self.assertIn('href="/confirmed.html"', APP_HTML.read_text(encoding="utf-8"))
+        self.assertIn("onclick=\"location.href='/confirmed.html'\"", APP_HTML.read_text(encoding="utf-8"))
 
     def test_print_requires_clean_confirmed_recognition_and_uses_report_version(self):
         dirty = self.run_print(ready=True, event="input")

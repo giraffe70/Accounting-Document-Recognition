@@ -22,6 +22,10 @@ class El {
   addEventListener(k,fn){this.handlers[k]=fn} append(...xs){this.children.push(...xs)} replaceChildren(...xs){this.children=[...xs]}
   setAttribute(k,v){this.attrs[k]=v} showModal(){this.open=true} close(){this.open=false;this.handlers.close?.()}
   click(){return this.handlers.click?.({target:this})}
+  setCustomValidity(message){this.validationMessage=message}
+  reportValidity(){this.validityReported=true;return !this.validationMessage}
+  showPicker(){this.pickerShown=true}
+  focus(){}
 }
 const document={createElement:(tag)=>new El(tag), getElementById:(id)=>all[id]||(all[id]=new El()),
   open(){}, write(html){this.written=html}, close(){}};
@@ -54,11 +58,17 @@ const tick=()=>new Promise(r=>setTimeout(r,0));
   await tick(); await tick();
   const api=window.ConfirmedPage;
   if(input.action==='filter'){
-    all.companyFilter.value='7';all.dateFrom.value='2026-01-01';all.dateTo.value='2026-01-31';all.filters.handlers.submit({preventDefault(){}});await tick();
+    all.companyFilter.value='7';all.dateFrom.value='2026年1月1日';all.dateTo.value='2026/1/31';all.filters.handlers.submit({preventDefault(){}});await tick();
     const filtered=requests.filter(x=>x.url.startsWith('/api/confirmed-vouchers')).at(-1).url;
+    const display=[all.dateFrom.value,all.dateTo.value],picker=[all.dateFromPicker.value,all.dateToPicker.value];
     all.clearFilters.click();await tick();
     all.nextPage.click(); await tick();
-    process.stdout.write(JSON.stringify({filtered,cleared:requests.filter(x=>x.url.startsWith('/api/confirmed-vouchers')).at(-1).url,methods:requests.map(x=>x.method)}));
+    process.stdout.write(JSON.stringify({filtered,display,picker,clearedPicker:[all.dateFromPicker.value,all.dateToPicker.value],cleared:requests.filter(x=>x.url.startsWith('/api/confirmed-vouchers')).at(-1).url,methods:requests.map(x=>x.method)}));
+  } else if(input.action==='dateInput'){
+    all.dateFrom.value=input.value;
+    if(input.picker){all.dateFromPickerButton.click();all.dateFromPicker.value=input.picker;all.dateFromPicker.handlers.change();}
+    all.filters.handlers.submit({preventDefault(){}});await tick();
+    process.stdout.write(JSON.stringify({requests,display:all.dateFrom.value,validity:all.dateFrom.validationMessage,reported:all.dateFrom.validityReported,pickerShown:all.dateFromPicker.pickerShown}));
   } else if(input.action==='detail'){
     await api.openDetail(9);
     if(input.triggerImageError) { const img=all.detailBody.children[0].children.find(x=>x.tagName==='img'); img.handlers.error(); }
@@ -102,9 +112,21 @@ class ConfirmedFrontendTests(unittest.TestCase):
         self.assertIn("date_from=2026-01-01", out["filtered"])
         self.assertIn("date_to=2026-01-31", out["filtered"])
         self.assertIn("page_size=50", out["filtered"])
+        self.assertEqual(out["display"], ["2026年1月1日", "2026年1月31日"])
+        self.assertEqual(out["picker"], ["2026-01-01", "2026-01-31"])
+        self.assertEqual(out["clearedPicker"], ["", ""])
         self.assertNotIn("company_id", out["cleared"])
         self.assertTrue(all(method == "GET" for method in out["methods"]))
         self.assertNotRegex(self.source, r"fetch\([^\n]*method\s*:\s*['\"](?:POST|PUT|DELETE)")
+        picked = self.run_node(action="dateInput", value="", picker="2024-02-29")
+        self.assertEqual(picked["display"], "2024年2月29日")
+        self.assertTrue(picked["pickerShown"])
+        self.assertIn("date_from=2024-02-29", picked["requests"][-1]["url"])
+        for value in ("2026年2月29日", "2026/13/1", "不是日期"):
+            invalid = self.run_node(action="dateInput", value=value)
+            self.assertTrue(invalid["reported"])
+            self.assertIn("有效", invalid["validity"])
+            self.assertEqual(sum("confirmed-vouchers" in request["url"] for request in invalid["requests"]), 1)
 
     def test_detail_encodes_version_and_uses_text_nodes(self):
         out = self.run_node(action="detail")

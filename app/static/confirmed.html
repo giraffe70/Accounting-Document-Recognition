@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>已確認單據</title>
   <link rel="stylesheet" href="/css/styles.css">
-  <link rel="stylesheet" href="/css/confirmed.css">
-  <script defer src="/js/confirmed.js"></script>
+  <link rel="stylesheet" href="/css/confirmed.css?v=20261030-chinese-dates">
+  <script defer src="/js/confirmed.js?v=20261030-chinese-dates"></script>
 </head>
 <body class="confirmed-page">
   <header class="topbar">
@@ -20,8 +20,8 @@
       <div class="row-between"><h2 id="listTitle">已確認單據</h2><span id="resultCount" class="hint"></span></div>
       <form id="filters" class="confirmed-filters">
         <label>公司<select id="companyFilter"><option value="">全部公司</option></select></label>
-        <label>單據日期起<input id="dateFrom" type="date"></label>
-        <label>單據日期迄<input id="dateTo" type="date"></label>
+        <label for="dateFrom">單據日期起<span class="confirmed-date-field"><input id="dateFrom" type="text" inputmode="numeric" autocomplete="off" placeholder="年／月／日" aria-label="單據日期起"><button id="dateFromPickerButton" class="confirmed-date-picker-button" type="button" aria-label="選擇單據日期起日">選擇</button><input id="dateFromPicker" class="confirmed-native-date-picker" type="date" tabindex="-1" aria-hidden="true"></span></label>
+        <label for="dateTo">單據日期迄<span class="confirmed-date-field"><input id="dateTo" type="text" inputmode="numeric" autocomplete="off" placeholder="年／月／日" aria-label="單據日期迄"><button id="dateToPickerButton" class="confirmed-date-picker-button" type="button" aria-label="選擇單據日期迄日">選擇</button><input id="dateToPicker" class="confirmed-native-date-picker" type="date" tabindex="-1" aria-hidden="true"></span></label>
         <div class="filter-actions"><button class="btn primary" type="submit">查詢</button><button class="btn" id="clearFilters" type="button">清除條件</button></div>
       </form>
       <div id="listMessage" class="callout hidden" role="status"></div>

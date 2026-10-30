@@ -70,10 +70,35 @@
     const params = new URLSearchParams();
     const company = byId("companyFilter").value, from = byId("dateFrom").value, to = byId("dateTo").value;
     if (company) params.set("company_id", company);
-    if (from) params.set("date_from", from);
-    if (to) params.set("date_to", to);
+    if (from) params.set("date_from", parseFilterDate(from).iso);
+    if (to) params.set("date_to", parseFilterDate(to).iso);
     params.set("page", String(state.page)); params.set("page_size", String(PAGE_SIZE));
     return params;
+  }
+  function parseFilterDate(value) {
+    const match = value.trim().match(/^(\d{4})\s*(?:年|[／/-])\s*(\d{1,2})\s*(?:月|[／/-])\s*(\d{1,2})\s*日?$/);
+    if (!match) throw new Error("請以年／月／日輸入有效的單據日期");
+    const [, year, month, day] = match.map(Number);
+    const parsed = new Date(0);
+    parsed.setUTCFullYear(year, month - 1, day);
+    if (year < 1 || parsed.getUTCFullYear() !== year || parsed.getUTCMonth() !== month - 1 || parsed.getUTCDate() !== day)
+      throw new Error("請輸入有效的單據日期");
+    return { iso: `${match[1]}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`,
+      display: `${match[1]}年${month}月${day}日` };
+  }
+  function normalizeDateInput(id) {
+    const input = byId(id), picker = byId(`${id}Picker`);
+    try {
+      const date = input.value.trim() ? parseFilterDate(input.value) : { iso: "", display: "" };
+      input.value = date.display; picker.value = date.iso; input.setCustomValidity("");
+      return true;
+    } catch (error) { input.setCustomValidity(error.message); return false; }
+  }
+  function openDatePicker(id) {
+    const input = byId(id), picker = byId(`${id}Picker`);
+    try { picker.value = input.value.trim() ? parseFilterDate(input.value).iso : ""; }
+    catch (_) { picker.value = ""; }
+    try { picker.showPicker(); } catch (_) { picker.focus(); picker.click(); }
   }
   async function loadList() {
     const seq = ++state.listSeq;
@@ -233,8 +258,24 @@
     if (typesResult.status === "rejected") showStartError(typesResult.reason);
     const match = location.hash.match(/^#v=(\d+)$/); if (match && Number(match[1]) > 0) openDetail(Number(match[1]));
   }
-  byId("filters").addEventListener("submit", (event) => { event.preventDefault(); state.page = 1; loadList(); });
-  byId("clearFilters").addEventListener("click", () => { byId("companyFilter").value = ""; byId("dateFrom").value = ""; byId("dateTo").value = ""; state.page = 1; loadList(); });
+  ["dateFrom", "dateTo"].forEach((id) => {
+    byId(id).addEventListener("input", () => byId(id).setCustomValidity(""));
+    byId(id).addEventListener("blur", () => normalizeDateInput(id));
+    byId(`${id}PickerButton`).addEventListener("click", () => openDatePicker(id));
+    byId(`${id}Picker`).addEventListener("change", () => {
+      byId(id).value = byId(`${id}Picker`).value; normalizeDateInput(id);
+    });
+  });
+  byId("filters").addEventListener("submit", (event) => {
+    event.preventDefault();
+    for (const id of ["dateFrom", "dateTo"]) if (!normalizeDateInput(id)) { byId(id).reportValidity(); return; }
+    state.page = 1; loadList();
+  });
+  byId("clearFilters").addEventListener("click", () => {
+    byId("companyFilter").value = "";
+    ["dateFrom", "dateTo"].forEach((id) => { byId(id).value = ""; normalizeDateInput(id); });
+    state.page = 1; loadList();
+  });
   byId("prevPage").addEventListener("click", () => { if (state.page > 1) { state.page--; loadList(); } });
   byId("nextPage").addEventListener("click", () => { if (state.page < state.pages) { state.page++; loadList(); } });
   byId("closeDetail").addEventListener("click", () => byId("detailDialog").close());
